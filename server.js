@@ -27,7 +27,6 @@ const setupDatabase = async () => {
   try {
     // --- THIS IS THE NUKE AND PAVE FIX ---
     // 1. Drop the old, incorrect table. This will run ONCE.
-    await client.query('DROP TABLE IF EXISTS territories;');
     console.log('[DB] Dropped old "territories" table to ensure clean schema.');
     
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
