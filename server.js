@@ -1,7 +1,6 @@
 // claimr_server/server.js
 
-// --- FIX: LOAD ENVIRONMENT VARIABLES AT THE VERY TOP ---
-require('dotenv').config(); 
+require('dotenv').config();
 
 const express = require('express');
 const http = require('http');
@@ -14,10 +13,8 @@ const io = new Server(server, {
   cors: { origin: "*" }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-// --- DATABASE CONNECTION SETUP ---
-// Now, process.env.DATABASE_URL will be correctly populated both locally and on Render.
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
@@ -25,7 +22,6 @@ const pool = new Pool({
   }
 });
 
-// Function to set up the database
 const setupDatabase = async () => {
   const client = await pool.connect();
   try {
@@ -44,7 +40,6 @@ const setupDatabase = async () => {
     console.log('[DB] "territories" table is ready.');
   } catch (err) {
     console.error('[DB] Error during database setup:', err);
-    // If setup fails, we should probably exit to prevent the app from running in a broken state.
     process.exit(1);
   } finally {
     client.release();
@@ -52,7 +47,7 @@ const setupDatabase = async () => {
 };
 
 app.get('/', (req, res) => {
-  res.send('Claimr Server v1.7 (Env Fixed) is running!');
+  res.send('Claimr Server v1.8 (Argument Fix) is running!');
 });
 
 io.on('connection', async (socket) => {
@@ -73,8 +68,18 @@ io.on('connection', async (socket) => {
     console.error('[DB] Error fetching existing territories:', err);
   }
 
-  socket.on('claimTerritory', async (trailData) => {
-    if (!trailData || trailData.length < 3) return;
+  // --- FIX: ROBUST ARGUMENT HANDLING FOR THE 'claimTerritory' EVENT ---
+  socket.on('claimTerritory', async (...args) => {
+    // Socket.IO events can sometimes wrap arguments. We find the array.
+    const trailData = args.find(arg => Array.isArray(arg));
+
+    console.log(`[SERVER] Received 'claimTerritory' from ${socket.id}.`);
+    
+    // Check if we successfully found an array.
+    if (!trailData || trailData.length < 3) {
+      console.error('[SERVER] ERROR: Invalid or empty trailData received.', args);
+      return;
+    }
     
     const coordinatesString = trailData.map(p => `${p.lng} ${p.lat}`).join(', ');
     const wkt = `POLYGON((${coordinatesString}, ${trailData[0].lng} ${trailData[0].lat}))`;
@@ -110,17 +115,11 @@ io.on('connection', async (socket) => {
   });
 });
 
-// We wrap the server start in a function to call it after the DB setup.
-const startServer = () => {
+const main = async () => {
+  await setupDatabase();
   server.listen(PORT, () => {
     console.log(`Server listening on *:${PORT}`);
   });
-};
-
-// Main execution block
-const main = async () => {
-  await setupDatabase();
-  startServer();
 };
 
 main();
