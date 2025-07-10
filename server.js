@@ -1,5 +1,8 @@
 // claimr_server/server.js
 
+// --- FIX: LOAD ENVIRONMENT VARIABLES AT THE VERY TOP ---
+require('dotenv').config(); 
+
 const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
@@ -13,6 +16,8 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 
+// --- DATABASE CONNECTION SETUP ---
+// Now, process.env.DATABASE_URL will be correctly populated both locally and on Render.
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
@@ -22,14 +27,11 @@ const pool = new Pool({
 
 // Function to set up the database
 const setupDatabase = async () => {
-  const client = await pool.connect(); // Get a client from the pool
+  const client = await pool.connect();
   try {
-    // *** THE CRITICAL FIX: ENABLE THE POSTGIS EXTENSION ***
-    // This command activates all the special mapping functions like GEOMETRY and ST_GeomFromText.
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
     console.log('[DB] PostGIS extension is enabled.');
-
-    // Now, create the table
+    
     const createTableQuery = `
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
@@ -42,13 +44,15 @@ const setupDatabase = async () => {
     console.log('[DB] "territories" table is ready.');
   } catch (err) {
     console.error('[DB] Error during database setup:', err);
+    // If setup fails, we should probably exit to prevent the app from running in a broken state.
+    process.exit(1);
   } finally {
-    client.release(); // IMPORTANT: Release the client back to the pool
+    client.release();
   }
 };
 
 app.get('/', (req, res) => {
-  res.send('Claimr Server v1.6 (PostGIS Enabled) is running!');
+  res.send('Claimr Server v1.7 (Env Fixed) is running!');
 });
 
 io.on('connection', async (socket) => {
@@ -93,7 +97,6 @@ io.on('connection', async (socket) => {
   socket.on('resetAllTerritories', async () => {
     console.log(`[SERVER] Received 'resetAllTerritories'. Clearing database table.`);
     try {
-      // It's safer to use TRUNCATE to reset the table and its primary key sequence
       await pool.query("TRUNCATE TABLE territories RESTART IDENTITY;");
       console.log('[DB] "territories" table cleared.');
       io.emit('clearAllTerritories');
@@ -107,8 +110,17 @@ io.on('connection', async (socket) => {
   });
 });
 
-server.listen(PORT, async () => {
-  // Run the setup function when the server starts.
+// We wrap the server start in a function to call it after the DB setup.
+const startServer = () => {
+  server.listen(PORT, () => {
+    console.log(`Server listening on *:${PORT}`);
+  });
+};
+
+// Main execution block
+const main = async () => {
   await setupDatabase();
-  console.log(`Server listening on *:${PORT}`);
-});
+  startServer();
+};
+
+main();
