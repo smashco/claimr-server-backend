@@ -15,52 +15,47 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 
-const players = {};
+// This array is now our persistent "Source of Truth" for the game session.
 const claimedTerritories = []; 
 
 app.get('/', (req, res) => {
-  res.send('Claimr Server v1.3 (Debug Logging) is running!');
+  res.send('Claimr Server v1.4 (Stateful) is running!');
 });
 
 io.on('connection', (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
   
-  players[socket.id] = { id: socket.id, location: null };
+  // *** THE CRITICAL FIX ***
+  // When a new player connects, immediately send them all territories that already exist.
+  console.log(`[SERVER] Sending ${claimedTerritories.length} existing territories to ${socket.id}.`);
   socket.emit('existingTerritories', claimedTerritories);
-  socket.broadcast.emit('newPlayer', players[socket.id]);
 
-  socket.on('locationUpdate', (data) => {
-    // We can quiet this log for now to reduce noise
-    // console.log(`[SERVER] Location update from ${socket.id}`);
-    const player = players[socket.id];
-    if (player) {
-      player.location = data;
-    }
-    socket.broadcast.emit('playerMoved', { id: socket.id, location: data });
-  });
-
-  // --- DEBUG-ENHANCED CLAIM LOGIC ---
   socket.on('claimTerritory', (trailData) => {
-    console.log(`--- [SERVER] Received 'claimTerritory' from ${socket.id} ---`);
+    console.log(`[SERVER] Received 'claimTerritory' from ${socket.id}.`);
     
     const newTerritory = {
       ownerId: socket.id,
       polygon: trailData,
     };
+
+    // Add the new territory to our persistent list.
     claimedTerritories.push(newTerritory);
     
-    // Log exactly what we are about to broadcast
-    console.log(`[SERVER] Broadcasting 'newTerritoryClaimed'. Owner: ${socket.id}. Polygon points: ${trailData.length}`);
-    console.log(`[SERVER] Full data: ${JSON.stringify(newTerritory)}`);
-
+    // Broadcast the NEW territory to everyone so their maps update live.
     io.emit('newTerritoryClaimed', newTerritory);
-    console.log('--- [SERVER] Broadcast sent. ---');
+  });
+
+  // *** NEW: The reset button functionality ***
+  socket.on('resetAllTerritories', () => {
+    console.log(`[SERVER] Received 'resetAllTerritories' from ${socket.id}. Clearing all data.`);
+    // Clear the server's memory.
+    claimedTerritories.length = 0; 
+    // Tell all connected clients to clear their maps.
+    io.emit('clearAllTerritories');
   });
 
   socket.on('disconnect', () => {
     console.log(`[SERVER] User disconnected: ${socket.id}`);
-    delete players[socket.id];
-    io.emit('playerLeft', { id: socket.id });
   });
 });
 
