@@ -47,7 +47,7 @@ const setupDatabase = async () => {
 };
 
 app.get('/', (req, res) => {
-  res.send('Claimr Server v1.8 (Argument Fix) is running!');
+  res.send('Claimr Server v1.9 (Final Argument Fix) is running!');
 });
 
 io.on('connection', async (socket) => {
@@ -68,16 +68,13 @@ io.on('connection', async (socket) => {
     console.error('[DB] Error fetching existing territories:', err);
   }
 
-  // --- FIX: ROBUST ARGUMENT HANDLING FOR THE 'claimTerritory' EVENT ---
-  socket.on('claimTerritory', async (...args) => {
-    // Socket.IO events can sometimes wrap arguments. We find the array.
-    const trailData = args.find(arg => Array.isArray(arg));
-
+  // --- FINAL FIX: SIMPLIFIED AND CORRECTED ARGUMENT HANDLING ---
+  socket.on('claimTerritory', async (trailData) => {
     console.log(`[SERVER] Received 'claimTerritory' from ${socket.id}.`);
     
-    // Check if we successfully found an array.
-    if (!trailData || trailData.length < 3) {
-      console.error('[SERVER] ERROR: Invalid or empty trailData received.', args);
+    // The previous logic was flawed. If trailData is the array, this will work.
+    if (!Array.isArray(trailData) || trailData.length < 3) {
+      console.error('[SERVER] ERROR: Received data is not a valid trail array.', trailData);
       return;
     }
     
