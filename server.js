@@ -45,8 +45,28 @@ const setupDatabase = async () => {
   }
 };
 
+// --- THIS IS THE ONLY NEW PART ---
+// A "secret" admin route to clear the database.
+app.get('/admin/reset-all', async (req, res) => {
+  console.log('[ADMIN] Received request to /admin/reset-all. Clearing all territories.');
+  try {
+    // 1. Wipe the database table clean.
+    await pool.query("TRUNCATE TABLE territories RESTART IDENTITY;");
+    console.log('[DB] "territories" table cleared via admin route.');
+    
+    // 2. Tell all connected clients to clear their maps.
+    io.emit('clearAllTerritories');
+    
+    // 3. Send a success message back to the browser.
+    res.status(200).send('All claimed territories have been successfully deleted from the database.');
+  } catch (err) {
+    console.error('[ADMIN] Error clearing territories table:', err);
+    res.status(500).send('An error occurred while clearing territories.');
+  }
+});
+
 app.get('/', (req, res) => {
-  res.send('Claimr Server v2.3 (Player-Specific Delete) is running!');
+  res.send('Claimr Server v2.4 (Admin Reset Added) is running!');
 });
 
 io.on('connection', async (socket) => {
@@ -55,6 +75,7 @@ io.on('connection', async (socket) => {
   try {
     const result = await pool.query("SELECT id, owner_id, ST_AsGeoJSON(area) as geojson FROM territories");
     const existingTerritories = result.rows.map(row => {
+      // ... same logic as before
       const polygonData = JSON.parse(row.geojson);
       return {
         ownerId: row.owner_id,
@@ -67,6 +88,7 @@ io.on('connection', async (socket) => {
   }
 
   socket.on('claimTerritory', async (data) => {
+    // ... same logic as before
     const trailData = data.trail;
     if (!Array.isArray(trailData) || trailData.length < 3) return;
     const coordinatesString = trailData.map(p => `${p.lng} ${p.lat}`).join(', ');
@@ -81,16 +103,13 @@ io.on('connection', async (socket) => {
     }
   });
 
-  // --- REPLACED 'resetAllTerritories' WITH 'deleteMyTerritories' ---
   socket.on('deleteMyTerritories', async () => {
+    // ... same logic as before
     console.log(`[SERVER] Received 'deleteMyTerritories' from ${socket.id}.`);
     try {
-      // 1. Delete only the territories belonging to the player who sent the message.
       const query = "DELETE FROM territories WHERE owner_id = $1";
       await pool.query(query, [socket.id]);
       console.log(`[DB] Deleted territories for owner_id: ${socket.id}.`);
-      
-      // 2. Tell all clients WHICH player's territories to clear from their maps.
       io.emit('playerTerritoriesCleared', { ownerId: socket.id });
     } catch (err) {
       console.error('[DB] Error deleting player territories:', err);
