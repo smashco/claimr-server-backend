@@ -15,26 +15,23 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 
-// In-memory store for players and territories
 const players = {};
 const claimedTerritories = []; 
 
 app.get('/', (req, res) => {
-  res.send('Claimr Server v1.2 is running!'); // Version bump for clarity
+  res.send('Claimr Server v1.3 (Debug Logging) is running!');
 });
 
 io.on('connection', (socket) => {
-  console.log(`A user connected with ID: ${socket.id}`);
+  console.log(`[SERVER] User connected: ${socket.id}`);
   
   players[socket.id] = { id: socket.id, location: null };
-
-  // When a player connects, send them all existing territories
   socket.emit('existingTerritories', claimedTerritories);
-  
-  // Let other players know about the new player
   socket.broadcast.emit('newPlayer', players[socket.id]);
 
   socket.on('locationUpdate', (data) => {
+    // We can quiet this log for now to reduce noise
+    // console.log(`[SERVER] Location update from ${socket.id}`);
     const player = players[socket.id];
     if (player) {
       player.location = data;
@@ -42,27 +39,26 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('playerMoved', { id: socket.id, location: data });
   });
 
-  // --- THIS IS THE MISSING PIECE OF LOGIC ---
-  // Listens for a claim from a client and relays it to everyone else.
+  // --- DEBUG-ENHANCED CLAIM LOGIC ---
   socket.on('claimTerritory', (trailData) => {
-    console.log(`Received territory claim from ${socket.id}. Broadcasting to all clients.`);
+    console.log(`--- [SERVER] Received 'claimTerritory' from ${socket.id} ---`);
     
-    // Create the territory object, making sure to include the owner's ID
     const newTerritory = {
       ownerId: socket.id,
       polygon: trailData,
     };
-
-    // Store it so new players who join later will see it
     claimedTerritories.push(newTerritory);
     
-    // Broadcast the newly claimed territory to EVERYONE
+    // Log exactly what we are about to broadcast
+    console.log(`[SERVER] Broadcasting 'newTerritoryClaimed'. Owner: ${socket.id}. Polygon points: ${trailData.length}`);
+    console.log(`[SERVER] Full data: ${JSON.stringify(newTerritory)}`);
+
     io.emit('newTerritoryClaimed', newTerritory);
+    console.log('--- [SERVER] Broadcast sent. ---');
   });
-  // --- END OF NEW LOGIC ---
 
   socket.on('disconnect', () => {
-    console.log(`User with ID: ${socket.id} disconnected`);
+    console.log(`[SERVER] User disconnected: ${socket.id}`);
     delete players[socket.id];
     io.emit('playerLeft', { id: socket.id });
   });
