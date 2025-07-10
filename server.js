@@ -22,6 +22,8 @@ const pool = new Pool({
   }
 });
 
+const players = {}; // In-memory store for LIVE player data
+
 const setupDatabase = async () => {
   const client = await pool.connect();
   try {
@@ -47,12 +49,15 @@ const setupDatabase = async () => {
 };
 
 app.get('/', (req, res) => {
-  res.send('Claimr Server v2.0 (Payload Wrapped) is running!');
+  res.send('Claimr Server v2.1 (Live Trails) is running!');
 });
 
 io.on('connection', async (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
   
+  // Player object now needs a place to store their active trail
+  players[socket.id] = { id: socket.id, location: null, activeTrail: [] };
+
   try {
     const result = await pool.query("SELECT id, owner_id, ST_AsGeoJSON(area) as geojson FROM territories");
     const existingTerritories = result.rows.map(row => {
@@ -62,23 +67,32 @@ io.on('connection', async (socket) => {
         polygon: polygonData.coordinates[0].map(coord => ({ lng: coord[0], lat: coord[1] }))
       }
     });
-    console.log(`[SERVER] Sending ${existingTerritories.length} existing territories to ${socket.id}.`);
     socket.emit('existingTerritories', existingTerritories);
   } catch (err) {
     console.error('[DB] Error fetching existing territories:', err);
   }
 
-  // --- FINAL SERVER FIX: UNWRAP THE PAYLOAD OBJECT ---
+  socket.on('locationUpdate', (data) => {
+    const player = players[socket.id];
+    if (player) {
+      player.location = data;
+      player.activeTrail.push(data);
+
+      // --- THE KEY CHANGE ---
+      // Instead of just 'playerMoved', we send 'trailUpdated'.
+      // It includes the player's ID and their ENTIRE current trail.
+      socket.broadcast.emit('trailUpdated', { 
+        id: socket.id, 
+        trail: player.activeTrail 
+      });
+    }
+  });
+
   socket.on('claimTerritory', async (data) => {
-    console.log(`[SERVER] Received 'claimTerritory' from ${socket.id}.`);
-    
-    // Extract the trail array from the data object
+    const player = players[socket.id];
     const trailData = data.trail;
     
-    if (!Array.isArray(trailData) || trailData.length < 3) {
-      console.error('[SERVER] ERROR: Received data does not contain a valid trail array.', data);
-      return;
-    }
+    if (!player || !Array.isArray(trailData) || trailData.length < 3) return;
     
     const coordinatesString = trailData.map(p => `${p.lng} ${p.lat}`).join(', ');
     const wkt = `POLYGON((${coordinatesString}, ${trailData[0].lng} ${trailData[0].lat}))`;
@@ -86,39 +100,34 @@ io.on('connection', async (socket) => {
     try {
       const query = "INSERT INTO territories (owner_id, area) VALUES ($1, ST_GeomFromText($2, 4326))";
       await pool.query(query, [socket.id, wkt]);
-      console.log(`[DB] Successfully inserted new territory for ${socket.id}.`);
       
-      const newTerritory = {
-        ownerId: socket.id,
-        polygon: trailData,
-      };
+      const newTerritory = { ownerId: socket.id, polygon: trailData };
       io.emit('newTerritoryClaimed', newTerritory);
+
+      // After a successful claim, clear the player's trail on the server.
+      const lastPoint = player.activeTrail.length > 0 ? player.activeTrail[player.activeTrail.length - 1] : null;
+      player.activeTrail = lastPoint ? [lastPoint] : [];
+      
+      // Tell other clients to clear THIS player's trail from their screens
+      io.emit('trailCleared', { id: socket.id });
+
     } catch (err) {
       console.error('[DB] Error inserting new territory:', err);
     }
   });
 
-  socket.on('resetAllTerritories', async () => {
-    console.log(`[SERVER] Received 'resetAllTerritories'. Clearing database table.`);
-    try {
-      await pool.query("TRUNCATE TABLE territories RESTART IDENTITY;");
-      console.log('[DB] "territories" table cleared.');
-      io.emit('clearAllTerritories');
-    } catch (err) {
-      console.error('[DB] Error clearing territories table:', err);
-    }
-  });
+  socket.on('resetAllTerritories', async () => { /* ... */ });
 
   socket.on('disconnect', () => {
     console.log(`[SERVER] User disconnected: ${socket.id}`);
+    // Tell other clients to remove this player's trail when they disconnect
+    io.emit('trailCleared', { id: socket.id });
+    delete players[socket.id];
   });
 });
 
 const main = async () => {
   await setupDatabase();
-  server.listen(PORT, () => {
-    console.log(`Server listening on *:${PORT}`);
-  });
+  server.listen(PORT, () => console.log(`Server listening on *:${PORT}`));
 };
-
 main();
