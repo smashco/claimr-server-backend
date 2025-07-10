@@ -45,7 +45,7 @@ const setupDatabase = async () => {
   }
 };
 
-// --- THIS IS THE ONLY NEW PART ---
+// --- THIS IS THE KEY ADDITION ---
 // A "secret" admin route to clear the database.
 app.get('/admin/reset-all', async (req, res) => {
   console.log('[ADMIN] Received request to /admin/reset-all. Clearing all territories.');
@@ -58,10 +58,10 @@ app.get('/admin/reset-all', async (req, res) => {
     io.emit('clearAllTerritories');
     
     // 3. Send a success message back to the browser.
-    res.status(200).send('All claimed territories have been successfully deleted from the database.');
+    res.status(200).send('SUCCESS: All claimed territories have been deleted from the database. You can now restart your app.');
   } catch (err) {
     console.error('[ADMIN] Error clearing territories table:', err);
-    res.status(500).send('An error occurred while clearing territories.');
+    res.status(500).send('ERROR: An error occurred while clearing territories. Check the server logs.');
   }
 });
 
@@ -75,7 +75,6 @@ io.on('connection', async (socket) => {
   try {
     const result = await pool.query("SELECT id, owner_id, ST_AsGeoJSON(area) as geojson FROM territories");
     const existingTerritories = result.rows.map(row => {
-      // ... same logic as before
       const polygonData = JSON.parse(row.geojson);
       return {
         ownerId: row.owner_id,
@@ -88,7 +87,6 @@ io.on('connection', async (socket) => {
   }
 
   socket.on('claimTerritory', async (data) => {
-    // ... same logic as before
     const trailData = data.trail;
     if (!Array.isArray(trailData) || trailData.length < 3) return;
     const coordinatesString = trailData.map(p => `${p.lng} ${p.lat}`).join(', ');
@@ -104,7 +102,6 @@ io.on('connection', async (socket) => {
   });
 
   socket.on('deleteMyTerritories', async () => {
-    // ... same logic as before
     console.log(`[SERVER] Received 'deleteMyTerritories' from ${socket.id}.`);
     try {
       const query = "DELETE FROM territories WHERE owner_id = $1";
