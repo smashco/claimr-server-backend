@@ -47,7 +47,7 @@ const setupDatabase = async () => {
 };
 
 app.get('/', (req, res) => {
-  res.send('Claimr Server v1.9 (Final Argument Fix) is running!');
+  res.send('Claimr Server v2.0 (Payload Wrapped) is running!');
 });
 
 io.on('connection', async (socket) => {
@@ -68,13 +68,15 @@ io.on('connection', async (socket) => {
     console.error('[DB] Error fetching existing territories:', err);
   }
 
-  // --- FINAL FIX: SIMPLIFIED AND CORRECTED ARGUMENT HANDLING ---
-  socket.on('claimTerritory', async (trailData) => {
+  // --- FINAL SERVER FIX: UNWRAP THE PAYLOAD OBJECT ---
+  socket.on('claimTerritory', async (data) => {
     console.log(`[SERVER] Received 'claimTerritory' from ${socket.id}.`);
     
-    // The previous logic was flawed. If trailData is the array, this will work.
+    // Extract the trail array from the data object
+    const trailData = data.trail;
+    
     if (!Array.isArray(trailData) || trailData.length < 3) {
-      console.error('[SERVER] ERROR: Received data is not a valid trail array.', trailData);
+      console.error('[SERVER] ERROR: Received data does not contain a valid trail array.', data);
       return;
     }
     
