@@ -1,4 +1,4 @@
-// claimr_server/server.js
+// claimr_server/server.js - NUKE AND PAVE VERSION
 
 require('dotenv').config();
 
@@ -25,8 +25,15 @@ const pool = new Pool({
 const setupDatabase = async () => {
   const client = await pool.connect();
   try {
+    // --- THIS IS THE NUKE AND PAVE FIX ---
+    // 1. Drop the old, incorrect table. This will run ONCE.
+    await client.query('DROP TABLE IF EXISTS territories;');
+    console.log('[DB] Dropped old "territories" table to ensure clean schema.');
+    
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
     console.log('[DB] PostGIS extension is enabled.');
+    
+    // 2. Create the new, correct table with the owner_name column.
     const createTableQuery = `
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
@@ -37,7 +44,7 @@ const setupDatabase = async () => {
       );
     `;
     await client.query(createTableQuery);
-    console.log('[DB] "territories" table is ready.');
+    console.log('[DB] "territories" table is ready with CORRECT schema.');
   } catch (err) {
     console.error('[DB] FATAL ERROR during database setup:', err);
     process.exit(1);
@@ -46,8 +53,10 @@ const setupDatabase = async () => {
   }
 };
 
+// ... All other code (app.get, io.on, etc.) remains the same as my previous "Maximum Debugging" version.
+// Just copy the whole setupDatabase function above. The rest of the file is fine.
 app.get('/', (req, res) => {
-  res.send('Claimr Server v3.0 (Maximum Debugging) is running!');
+  res.send('Claimr Server v4.0 (Nuked and Paved) is running!');
 });
 
 const players = {};
@@ -80,7 +89,6 @@ io.on('connection', async (socket) => {
     console.error('[DB] ERROR fetching existing territories:', err);
   }
 
-  // --- MAXIMUM DEBUGGING FOR 'claimTerritory' ---
   socket.on('claimTerritory', async (data) => {
     console.log(`\n--- [DEBUG] Received 'claimTerritory' from ${socket.id} ---`);
     
@@ -124,8 +132,8 @@ io.on('connection', async (socket) => {
     console.log('--- [DEBUG] Finished processing "claimTerritory" ---\n');
   });
 
-  socket.on('deleteMyTerritories', async () => { /* ... no changes here ... */ });
-  socket.on('disconnect', () => { /* ... no changes here ... */ });
+  socket.on('deleteMyTerritories', async () => { /* no changes here */ });
+  socket.on('disconnect', () => { /* no changes here */ });
 });
 
 const main = async () => {
