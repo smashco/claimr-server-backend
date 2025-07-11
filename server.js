@@ -9,19 +9,26 @@ const { Pool } = require('pg');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, {
+  cors: { origin: "*" }
+});
 
 const PORT = process.env.PORT || 10000;
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
-const players = {};
+
+const players = {}; 
 
 const setupDatabase = async () => {
   const client = await pool.connect();
   try {
+    // This is the "safe" version that won't drop your table.
+    // It assumes the table was already created correctly with owner_name and area_sqm.
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
+    console.log('[DB] PostGIS extension is enabled.');
     const createTableQuery = `
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
@@ -51,13 +58,15 @@ app.get('/admin/reset-all', async (req, res) => {
         res.status(500).send('ERROR clearing territories.');
     }
 });
-app.get('/', (req, res) => { res.send('Claimr Server v6.0 (Territory Expansion) is running!'); });
+
+app.get('/', (req, res) => { res.send('Claimr Server - Stable Version (Home Base Logic) is running!'); });
 
 io.on('connection', async (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
   
   socket.on('playerJoined', (data) => {
     players[socket.id] = { id: socket.id, name: data.name || 'Anonymous', activeTrail: [] };
+    console.log(`[SERVER] Player ${socket.id} has joined as "${players[socket.id].name}".`);
   });
 
   try {
@@ -81,86 +90,61 @@ io.on('connection', async (socket) => {
     const player = players[socket.id];
     const trailData = data ? data.trail : undefined;
     if (!player || !Array.isArray(trailData) || trailData.length < 3) return;
-
-    const client = await pool.connect();
+    
+    const coordinatesString = trailData.map(p => `${p.lng} ${p.lat}`).join(', ');
+    const wkt = `POLYGON((${coordinatesString}, ${trailData[0].lng} ${trailData[0].lat}))`;
+    
     try {
-      const trailCoords = trailData.map(p => `${p.lng} ${p.lat}`).join(', ');
-      const trailWkt = `LINESTRING(${trailCoords})`;
+      // This is the simpler INSERT logic for the "home base" game loop.
+      const query = `
+        INSERT INTO territories (owner_id, owner_name, area, area_sqm)
+        VALUES ($1, $2, ST_GeomFromText($3, 4326), ST_Area(ST_GeomFromText($3, 4326)::geography))
+        RETURNING area_sqm;
+      `;
+      const result = await pool.query(query, [socket.id, player.name, wkt]);
+      const calculatedArea = result.rows[0].area_sqm;
+      console.log(`[DB] Inserted territory for ${socket.id} with area: ${calculatedArea} sqm.`);
       
-      const existingTerritoriesResult = await client.query("SELECT id, area FROM territories WHERE owner_id = $1", [socket.id]);
-
-      let territoryToExpandId = null;
-      let newClaimPolygonWkt = `POLYGON((${trailCoords}, ${trailData[0].lng} ${trailData[0].lat}))`;
-
-      if (existingTerritoriesResult.rows.length > 0) {
-        // Find if the trail intersects ANY of the player's territories
-        const checkPromises = existingTerritoriesResult.rows.map(territory => 
-            client.query("SELECT ST_Intersects(ST_GeomFromText($1, 4326), $2) as intersects", [trailWkt, territory.area])
-        );
-        const intersectionResults = await Promise.all(checkPromises);
-        
-        const intersectingTerritoryIndex = intersectionResults.findIndex(res => res.rows[0].intersects);
-
-        if (intersectingTerritoryIndex !== -1) {
-          const territoryToExpand = existingTerritoriesResult.rows[intersectingTerritoryIndex];
-          territoryToExpandId = territoryToExpand.id;
-          
-          // Merge the new area with the existing territory
-          const unionResult = await client.query(
-            "SELECT ST_Union(ST_GeomFromText($1, 4326), $2) as new_area",
-            [newClaimPolygonWkt, territoryToExpand.area]
-          );
-          // PostGIS returns geometry in a specific format, we need to convert it back to WKT for the next query
-          const mergedGeom = unionResult.rows[0].new_area;
-          const wktResult = await client.query("SELECT ST_AsText($1) as wkt", [mergedGeom]);
-          newClaimPolygonWkt = wktResult.rows[0].wkt;
-        }
-      }
-
-      let finalAreaSqm, finalGeoJson;
-      
-      if (territoryToExpandId !== null) {
-        const updateResult = await client.query(
-          `UPDATE territories SET area = ST_GeomFromText($1, 4326), area_sqm = ST_Area(ST_GeomFromText($1, 4326)::geography) WHERE id = $2 RETURNING area_sqm, ST_AsGeoJSON(area) as geojson;`,
-          [newClaimPolygonWkt, territoryToExpandId]
-        );
-        finalAreaSqm = updateResult.rows[0].area_sqm;
-        finalGeoJson = updateResult.rows[0].geojson;
-      } else {
-        const insertResult = await client.query(
-          `INSERT INTO territories (owner_id, owner_name, area, area_sqm) VALUES ($1, $2, ST_GeomFromText($3, 4326), ST_Area(ST_GeomFromText($3, 4326)::geography)) RETURNING area_sqm, ST_AsGeoJSON(area) as geojson;`,
-          [socket.id, player.name, newClaimPolygonWkt]
-        );
-        finalAreaSqm = insertResult.rows[0].area_sqm;
-        finalGeoJson = insertResult.rows[0].geojson;
-      }
-      
-      const finalPolygonData = JSON.parse(finalGeoJson);
-
-      io.emit('playerTerritoriesCleared', { ownerId: socket.id });
-
-      await new Promise(resolve => setTimeout(resolve, 100)); // Small delay
-
-      const updatedTerritory = {
-        ownerId: socket.id,
+      const newTerritory = { 
+        ownerId: socket.id, 
         ownerName: player.name,
-        polygon: finalPolygonData.coordinates[0].map(coord => ({ lng: coord[0], lat: coord[1] })),
-        area: finalAreaSqm,
+        polygon: trailData, 
+        area: calculatedArea
       };
-      io.emit('newTerritoryClaimed', updatedTerritory);
-      
+      io.emit('newTerritoryClaimed', newTerritory);
+
+      // Clear the trail on the server after a successful claim.
       player.activeTrail = [];
+      io.emit('trailCleared', { id: socket.id });
 
     } catch (err) {
-      console.error('[DB] Error during territory claim/expansion:', err);
-    } finally {
-      client.release();
+      console.error('[DB] Error inserting territory:', err);
     }
   });
 
-  socket.on('deleteMyTerritories', async () => { /* ... same as before ... */ });
-  socket.on('disconnect', () => { /* ... same as before ... */ });
+  socket.on('deleteMyTerritories', async () => {
+    console.log(`[SERVER] Received 'deleteMyTerritories' from ${socket.id}.`);
+    try {
+      const query = "DELETE FROM territories WHERE owner_id = $1";
+      await pool.query(query, [socket.id]);
+      console.log(`[DB] Deleted territories for owner_id: ${socket.id}.`);
+      io.emit('playerTerritoriesCleared', { ownerId: socket.id });
+    } catch (err) {
+      console.error('[DB] Error deleting player territories:', err);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`[SERVER] User disconnected: ${socket.id}`);
+    io.emit('playerLeft', { id: socket.id });
+    if(players[socket.id]) {
+        delete players[socket.id];
+    }
+  });
 });
 
-const main = async () => { await setupDatabase(); server.listen(PORT, () => console.log(`Server listening on *:${PORT}`)); };
+const main = async () => { 
+  await setupDatabase(); 
+  server.listen(PORT, () => console.log(`Server listening on *:${PORT}`)); 
+};
 main();
