@@ -9,15 +9,17 @@ const { Pool } = require('pg');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, {
+  cors: { origin: "*" }
+});
 
 const PORT = process.env.PORT || 10000;
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// In-memory store for LIVE player data
 const players = {}; 
 
 const setupDatabase = async () => {
@@ -25,7 +27,6 @@ const setupDatabase = async () => {
   try {
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
     console.log('[DB] PostGIS extension is enabled.');
-    
     const createTableQuery = `
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
@@ -52,12 +53,11 @@ app.get('/admin/reset-all', async (req, res) => {
         io.emit('clearAllTerritories');
         res.status(200).send('SUCCESS: All claimed territories have been deleted.');
     } catch (err) {
-        console.error('[ADMIN] Error clearing territories table:', err);
         res.status(500).send('ERROR clearing territories.');
     }
 });
 
-app.get('/', (req, res) => { res.send('Claimr Server v7.0 (True Merge) is running!'); });
+app.get('/', (req, res) => { res.send('Claimr Server - Stable Version (Home Base Logic) is running!'); });
 
 io.on('connection', async (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
@@ -88,81 +88,34 @@ io.on('connection', async (socket) => {
     const player = players[socket.id];
     const trailData = data ? data.trail : undefined;
     if (!player || !Array.isArray(trailData) || trailData.length < 3) return;
-
-    const client = await pool.connect();
+    
+    const coordinatesString = trailData.map(p => `${p.lng} ${p.lat}`).join(', ');
+    const wkt = `POLYGON((${coordinatesString}, ${trailData[0].lng} ${trailData[0].lat}))`;
+    
     try {
-      await client.query('BEGIN');
-
-      const trailCoords = trailData.map(p => `${p.lng} ${p.lat}`).join(', ');
-      const newClaimPolygonWkt = `POLYGON((${trailCoords}, ${trailData[0].lng} ${trailData[0].lat}))`;
-      const newClaimGeom = `ST_GeomFromText('${newClaimPolygonWkt}', 4326)`;
-
-      const intersectingTerritoriesResult = await client.query(
-        `SELECT id, area FROM territories WHERE owner_id = $1 AND ST_Intersects(area, ${newClaimGeom})`,
-        [socket.id]
-      );
+      // This is the simpler INSERT logic. It does not merge.
+      const query = `
+        INSERT INTO territories (owner_id, owner_name, area, area_sqm)
+        VALUES ($1, $2, ST_GeomFromText($3, 4326), ST_Area(ST_GeomFromText($3, 4326)::geography))
+        RETURNING area_sqm;
+      `;
+      const result = await pool.query(query, [socket.id, player.name, wkt]);
+      const calculatedArea = result.rows[0].area_sqm;
+      console.log(`[DB] Inserted territory for ${socket.id} with area: ${calculatedArea} sqm.`);
       
-      let finalMergedGeom = newClaimGeom;
-      const idsToDelete = [];
-
-      if (intersectingTerritoriesResult.rows.length > 0) {
-        console.log(`[SERVER] Merging new claim with ${intersectingTerritoriesResult.rows.length} existing territories.`);
-        
-        const geomsToMerge = intersectingTerritoriesResult.rows.map(row => {
-          idsToDelete.push(row.id);
-          return row.area;
-        });
-        
-        const unionQuery = `SELECT ST_Union(ARRAY[ST_GeomFromText('${newClaimPolygonWkt}', 4326)] || ARRAY(SELECT area FROM territories WHERE id = ANY($1::int[]))) as merged_area`;
-        const unionResult = await client.query(unionQuery, [idsToDelete]);
-        finalMergedGeom = unionResult.rows[0].merged_area;
-
-        if (idsToDelete.length > 0) {
-          await client.query("DELETE FROM territories WHERE id = ANY($1::int[])", [idsToDelete]);
-        }
-      }
-
-      // Clean up self-intersections from the final shape
-      const bufferQuery = `SELECT ST_Buffer(ST_Buffer($1, 0.000001), -0.000001) as clean_geom`;
-      const bufferedResult = await client.query(bufferQuery, [finalMergedGeom]);
-      const cleanFinalGeom = bufferedResult.rows[0].clean_geom;
-
-      const wktResult = await client.query("SELECT ST_AsText($1) as wkt", [cleanFinalGeom]);
-      const finalWkt = wktResult.rows[0].wkt;
-
-      const insertResult = await client.query(
-        `INSERT INTO territories (owner_id, owner_name, area, area_sqm)
-         VALUES ($1, $2, ST_GeomFromText($3, 4326), ST_Area(ST_GeomFromText($3, 4326)::geography))
-         RETURNING area_sqm, ST_AsGeoJSON(area) as geojson;`,
-        [socket.id, player.name, finalWkt]
-      );
-      
-      await client.query('COMMIT');
-      
-      const finalAreaSqm = insertResult.rows[0].area_sqm;
-      const finalGeoJson = insertResult.rows[0].geojson;
-      const finalPolygonData = JSON.parse(finalGeoJson);
-
-      if (idsToDelete.length > 0) {
-        io.emit('playerTerritoriesCleared', { ownerId: socket.id });
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-      
-      const updatedTerritory = {
-        ownerId: socket.id,
+      const newTerritory = { 
+        ownerId: socket.id, 
         ownerName: player.name,
-        polygon: finalPolygonData.coordinates[0].map(coord => ({ lng: coord[0], lat: coord[1] })),
-        area: finalAreaSqm,
+        polygon: trailData, 
+        area: calculatedArea
       };
-      io.emit('newTerritoryClaimed', updatedTerritory);
-      
+      io.emit('newTerritoryClaimed', newTerritory);
+
       player.activeTrail = [];
+      io.emit('trailCleared', { id: socket.id });
 
     } catch (err) {
-      await client.query('ROLLBACK');
-      console.error('[DB] Error during territory expansion, transaction rolled back:', err);
-    } finally {
-      client.release();
+      console.error('[DB] Error inserting territory:', err);
     }
   });
 
