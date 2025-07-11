@@ -1,4 +1,4 @@
-// claimr_server/server.js - NUKE AND PAVE VERSION
+// claimr_server/server.js
 
 require('dotenv').config();
 
@@ -25,14 +25,10 @@ const pool = new Pool({
 const setupDatabase = async () => {
   const client = await pool.connect();
   try {
-    // --- THIS IS THE NUKE AND PAVE FIX ---
-    // 1. Drop the old, incorrect table. This will run ONCE.
-    console.log('[DB] Dropped old "territories" table to ensure clean schema.');
-    
+    // This is the "safe" version without the DROP TABLE command.
+    // It will only create the table if it doesn't already exist.
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
     console.log('[DB] PostGIS extension is enabled.');
-    
-    // 2. Create the new, correct table with the owner_name column.
     const createTableQuery = `
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
@@ -43,7 +39,7 @@ const setupDatabase = async () => {
       );
     `;
     await client.query(createTableQuery);
-    console.log('[DB] "territories" table is ready with CORRECT schema.');
+    console.log('[DB] "territories" table is ready.');
   } catch (err) {
     console.error('[DB] FATAL ERROR during database setup:', err);
     process.exit(1);
@@ -52,10 +48,22 @@ const setupDatabase = async () => {
   }
 };
 
-// ... All other code (app.get, io.on, etc.) remains the same as my previous "Maximum Debugging" version.
-// Just copy the whole setupDatabase function above. The rest of the file is fine.
+// --- THIS IS THE FIX: Re-adding the missing admin route ---
+app.get('/admin/reset-all', async (req, res) => {
+  console.log('[ADMIN] Received request to /admin/reset-all. Clearing all territories.');
+  try {
+    await pool.query("TRUNCATE TABLE territories RESTART IDENTITY;");
+    console.log('[DB] "territories" table cleared via admin route.');
+    io.emit('clearAllTerritories');
+    res.status(200).send('SUCCESS: All claimed territories have been deleted from the database. Please restart your app.');
+  } catch (err) {
+    console.error('[ADMIN] Error clearing territories table:', err);
+    res.status(500).send('ERROR: An error occurred while clearing territories. Check server logs.');
+  }
+});
+
 app.get('/', (req, res) => {
-  res.send('Claimr Server v4.0 (Nuked and Paved) is running!');
+  res.send('Claimr Server v4.1 (Admin Reset Added) is running!');
 });
 
 const players = {};
@@ -65,10 +73,7 @@ io.on('connection', async (socket) => {
   
   socket.on('playerJoined', (data) => {
     const playerName = data.name || 'Anonymous';
-    players[socket.id] = { 
-      id: socket.id, 
-      name: playerName,
-    };
+    players[socket.id] = { id: socket.id, name: playerName };
     console.log(`[SERVER] Player ${socket.id} has joined as "${playerName}".`);
   });
 
@@ -89,50 +94,37 @@ io.on('connection', async (socket) => {
   }
 
   socket.on('claimTerritory', async (data) => {
-    console.log(`\n--- [DEBUG] Received 'claimTerritory' from ${socket.id} ---`);
-    
     const player = players[socket.id];
     const trailData = data ? data.trail : undefined;
-    
-    if (!player) {
-      console.error('[DEBUG] FAILED: Player object not found for this socket ID.');
-      return;
-    }
-    if (!Array.isArray(trailData) || trailData.length < 3) {
-      console.error('[DEBUG] FAILED: Received data is not a valid trail array. Data received:', data);
-      return;
-    }
+    if (!player || !Array.isArray(trailData) || trailData.length < 3) return;
     
     const coordinatesString = trailData.map(p => `${p.lng} ${p.lat}`).join(', ');
     const wkt = `POLYGON((${coordinatesString}, ${trailData[0].lng} ${trailData[0].lat}))`;
-    console.log(`[DEBUG] Generated WKT for database: ${wkt}`);
-
     try {
       const query = "INSERT INTO territories (owner_id, owner_name, area) VALUES ($1, $2, ST_GeomFromText($3, 4326))";
-      const values = [socket.id, player.name, wkt];
-      
-      console.log('[DEBUG] Attempting to execute INSERT query...');
-      await pool.query(query, values);
-      console.log('[DEBUG] SUCCESS: Database INSERT completed.');
-      
-      const newTerritory = { 
-        ownerId: socket.id, 
-        ownerName: player.name,
-        polygon: trailData, 
-      };
+      await pool.query(query, [socket.id, player.name, wkt]);
+      const newTerritory = { ownerId: socket.id, ownerName: player.name, polygon: trailData, };
       io.emit('newTerritoryClaimed', newTerritory);
-      console.log('[DEBUG] Broadcast "newTerritoryClaimed" to all clients.');
-
     } catch (err) {
-      console.error('--- [DEBUG] DATABASE INSERT FAILED! ---');
-      console.error('The error is:', err);
-      console.error('--- END OF DATABASE ERROR ---');
+      console.error('[DB] Error inserting new territory:', err);
     }
-    console.log('--- [DEBUG] Finished processing "claimTerritory" ---\n');
   });
 
-  socket.on('deleteMyTerritories', async () => { /* no changes here */ });
-  socket.on('disconnect', () => { /* no changes here */ });
+  socket.on('deleteMyTerritories', async () => {
+    console.log(`[SERVER] Received 'deleteMyTerritories' from ${socket.id}.`);
+    try {
+      const query = "DELETE FROM territories WHERE owner_id = $1";
+      await pool.query(query, [socket.id]);
+      console.log(`[DB] Deleted territories for owner_id: ${socket.id}.`);
+      io.emit('playerTerritoriesCleared', { ownerId: socket.id });
+    } catch (err) {
+      console.error('[DB] Error deleting player territories:', err);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`[SERVER] User disconnected: ${socket.id}`);
+  });
 });
 
 const main = async () => {
