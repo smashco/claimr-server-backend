@@ -15,7 +15,7 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 10000;
 const SERVER_TICK_RATE_MS = 100;
-const MINIMUM_CLAIM_AREA_SQM = 100; // Minimum area in square meters to be a valid claim
+const MINIMUM_CLAIM_AREA_SQM = 100;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -212,8 +212,7 @@ io.on('connection', async (socket) => {
       if (newArea < MINIMUM_CLAIM_AREA_SQM) {
         console.log(`[CLAIM] Rejected claim from ${socket.id}. Area ${newArea}sqm is less than minimum ${MINIMUM_CLAIM_AREA_SQM}sqm.`);
         socket.emit('claimRejected', { reason: 'Area is too small. Think bigger!' });
-        client.release();
-        return; 
+        return; // Return early, finally block will run.
       }
       
       await client.query('BEGIN');
@@ -296,6 +295,7 @@ io.on('connection', async (socket) => {
       console.error('[DB] FATAL Error during territory cut/claim:', err);
     } finally {
         client.release();
+        console.log('[DB] Connection released.');
     }
   });
 
