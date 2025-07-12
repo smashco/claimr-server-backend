@@ -14,8 +14,8 @@ const io = new Server(server, {
 });
 
 const PORT = process.env.PORT || 10000;
-// --- *** UPDATED TICK RATE *** ---
-const SERVER_TICK_RATE_MS = 100; // Broadcast updates 10 times per second
+const SERVER_TICK_RATE_MS = 100;
+const MINIMUM_CLAIM_AREA_SQM = 100; // Minimum area in square meters to be a valid claim
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -205,6 +205,17 @@ io.on('connection', async (socket) => {
     
     const client = await pool.connect();
     try {
+      const areaCheckQuery = `SELECT ST_Area(ST_GeomFromText($1, 4326)::geography) as area;`;
+      const areaResult = await client.query(areaCheckQuery, [newClaimWKT]);
+      const newArea = areaResult.rows[0].area;
+      
+      if (newArea < MINIMUM_CLAIM_AREA_SQM) {
+        console.log(`[CLAIM] Rejected claim from ${socket.id}. Area ${newArea}sqm is less than minimum ${MINIMUM_CLAIM_AREA_SQM}sqm.`);
+        socket.emit('claimRejected', { reason: 'Area is too small. Think bigger!' });
+        client.release();
+        return; 
+      }
+      
       await client.query('BEGIN');
 
       const victimsResult = await client.query(
