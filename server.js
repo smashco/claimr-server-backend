@@ -64,7 +64,7 @@ const setupDatabase = async () => {
         id SERIAL PRIMARY KEY,
         owner_id VARCHAR(255) NOT NULL UNIQUE, 
         owner_name VARCHAR(255), 
-        area GEOMETRY(GEOMETRY, 4326) NOT NULL, -- Use GEOMETRY to allow for MultiPolygons
+        area GEOMETRY(GEOMETRY, 4326) NOT NULL,
         area_sqm REAL,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
@@ -91,9 +91,8 @@ app.get('/admin/reset-all', async (req, res) => {
     }
 });
 
-app.get('/', (req, res) => { res.send('Claimr Server - Full Gameplay Logic is running!'); });
+app.get('/', (req, res) => { res.send('Claimr Server - Full Gameplay Logic & Performance is running!'); });
 
-// --- *** NEW: Function to broadcast all player data *** ---
 function broadcastAllPlayers() {
     const allPlayersData = Object.values(players).map(p => ({
         id: p.id,
@@ -107,9 +106,8 @@ io.on('connection', async (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
   
   socket.on('playerJoined', (data) => {
-    players[socket.id] = { id: socket.id, name: data.name || 'Anonymous', activeTrail: [], lastKnownPosition: null };
+    players[socket.id] = { id: socket.id, name: data.name || 'Anonymous', activeTrail: [], lastKnownPosition: null, isDrawing: false };
     console.log(`[SERVER] Player ${socket.id} has joined as "${players[socket.id].name}".`);
-    // Tell everyone a new player has joined (including sending their own info back)
     broadcastAllPlayers();
   });
 
@@ -119,7 +117,7 @@ io.on('connection', async (socket) => {
       return { 
         ownerId: row.owner_id, 
         ownerName: row.owner_name, 
-        geojson: JSON.parse(row.geojson), // Send full GeoJSON
+        geojson: JSON.parse(row.geojson),
         area: row.area_sqm 
       };
     });
@@ -130,19 +128,16 @@ io.on('connection', async (socket) => {
     const currentPlayer = players[socket.id];
     if (!currentPlayer) return;
 
-    // --- *** MODIFIED: Update position and broadcast *** ---
+    const lastPoint = currentPlayer.lastKnownPosition;
     currentPlayer.lastKnownPosition = data;
-    broadcastAllPlayers(); // Let everyone know the new position
+    broadcastAllPlayers();
 
-    const lastPoint = currentPlayer.activeTrail.length > 0 ? currentPlayer.activeTrail[currentPlayer.activeTrail.length - 1] : null;
-
-    // Only add to trail if drawing, otherwise it's just a position update
     if (currentPlayer.isDrawing) {
         currentPlayer.activeTrail.push(data);
-        socket.broadcast.emit('trailUpdated', { id: socket.id, name: currentPlayer.name, trail: currentPlayer.activeTrail });
+        // --- *** OPTIMIZATION: ONLY SEND THE NEW POINT *** ---
+        socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data });
     }
     
-    // Trail-cutting combat logic
     if (lastPoint && currentPlayer.isDrawing) {
         for (const targetPlayerId in players) {
             if (targetPlayerId === socket.id) continue;
@@ -165,16 +160,18 @@ io.on('connection', async (socket) => {
     }
   });
 
-  // New events to manage when a trail starts and stops
   socket.on('startDrawingTrail', () => {
     if(players[socket.id]) {
+      console.log(`[TRAIL] ${players[socket.id].name} started drawing.`);
       players[socket.id].isDrawing = true;
-      players[socket.id].activeTrail = []; // Reset trail on start
+      players[socket.id].activeTrail = []; 
+      socket.broadcast.emit('trailStarted', { id: socket.id });
     }
   });
 
   socket.on('stopDrawingTrail', () => {
     if(players[socket.id]) {
+      console.log(`[TRAIL] ${players[socket.id].name} stopped drawing.`);
       players[socket.id].isDrawing = false;
       players[socket.id].activeTrail = [];
       io.emit('trailCleared', { id: socket.id });
@@ -240,7 +237,6 @@ io.on('connection', async (socket) => {
       `;
       const finalResult = await client.query(finalResultQuery, [updatedOwnerIds]);
       
-      // --- *** MODIFIED: Send full GeoJSON for MultiPolygon support *** ---
       const batchUpdateData = finalResult.rows.map(row => {
           return {
               ownerId: row.owner_id, 
@@ -265,7 +261,14 @@ io.on('connection', async (socket) => {
   });
 
   socket.on('deleteMyTerritories', async () => {
-    // unchanged
+    console.log(`[SERVER] Received 'deleteMyTerritories' from ${socket.id}.`);
+    try {
+      await pool.query("DELETE FROM territories WHERE owner_id = $1", [socket.id]);
+      console.log(`[DB] Deleted territories for owner_id: ${socket.id}.`);
+      io.emit('playerTerritoriesCleared', { ownerId: socket.id });
+    } catch (err) {
+      console.error('[DB] Error deleting player territories:', err);
+    }
   });
 
   socket.on('disconnect', () => {
@@ -274,7 +277,6 @@ io.on('connection', async (socket) => {
     if(players[socket.id]) {
         delete players[socket.id];
     }
-    // Tell everyone the player has left
     broadcastAllPlayers();
   });
 });
