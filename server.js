@@ -109,7 +109,6 @@ io.on('connection', async (socket) => {
   socket.on('playerJoined', (data) => {
     players[socket.id] = { id: socket.id, name: data.name || 'Anonymous', activeTrail: [], lastKnownPosition: null, isDrawing: false };
     console.log(`[SERVER] Player ${socket.id} has joined as "${players[socket.id].name}".`);
-    // broadcastAllPlayers will handle informing others.
   });
 
   try {
@@ -126,16 +125,12 @@ io.on('connection', async (socket) => {
   socket.on('locationUpdate', (data) => {
     const currentPlayer = players[socket.id];
     if (!currentPlayer) return;
-
     const lastPoint = currentPlayer.lastKnownPosition;
-    currentPlayer.lastKnownPosition = data; // Quietly update the high-frequency position
-
+    currentPlayer.lastKnownPosition = data;
     if (currentPlayer.isDrawing) {
         currentPlayer.activeTrail.push(data);
         socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data });
     }
-    
-    // Trail-cutting combat logic (uses high-frequency data)
     if (lastPoint && currentPlayer.isDrawing) {
         for (const targetPlayerId in players) {
             if (targetPlayerId === socket.id) continue;
@@ -218,12 +213,18 @@ io.on('connection', async (socket) => {
           SET 
             area = (SELECT piece FROM largest_piece),
             area_sqm = ST_Area((SELECT piece FROM largest_piece)::geography)
-          WHERE owner_id = $2 AND (SELECT piece FROM largest_piece) IS NOT NULL;
+          WHERE owner_id = $2 AND (SELECT piece FROM largest_piece) IS NOT NULL
+          RETURNING area;
         `;
-        await client.query(smartCutQuery, [newClaimWKT, victimId]);
+        const cutResult = await client.query(smartCutQuery, [newClaimWKT, victimId]);
         
-        const cleanupQuery = `DELETE FROM territories WHERE owner_id = $1 AND (area IS NULL OR ST_IsEmpty(area));`;
-        await client.query(cleanupQuery, [victimId]);
+        // *** NEW: Check for and handle complete territory loss ***
+        if (cutResult.rowCount === 0 || cutResult.rows[0].area === null) {
+            console.log(`[COMBAT] ${victimId} lost all territory. Deleting.`);
+            await client.query('DELETE FROM territories WHERE owner_id = $1', [victimId]);
+            io.emit('playerTerritoriesCleared', { ownerId: victimId });
+            updatedOwnerIds = updatedOwnerIds.filter(id => id !== victimId);
+        }
       }
 
       const unionQuery = `
@@ -254,7 +255,9 @@ io.on('connection', async (socket) => {
 
       await client.query('COMMIT');
       
-      io.emit('batchTerritoryUpdate', batchUpdateData);
+      if(batchUpdateData.length > 0) {
+        io.emit('batchTerritoryUpdate', batchUpdateData);
+      }
       io.emit('trailCleared', { id: socket.id });
 
     } catch (err) {
@@ -282,11 +285,9 @@ io.on('connection', async (socket) => {
     if(players[socket.id]) {
         delete players[socket.id];
     }
-    // The tick will handle removing them from other clients' views
   });
 });
 
-// --- *** SERVER TICK: Broadcasts player positions on a fixed interval *** ---
 setInterval(() => {
     broadcastAllPlayers();
 }, SERVER_TICK_RATE_MS);
