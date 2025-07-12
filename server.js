@@ -91,7 +91,7 @@ app.get('/admin/reset-all', async (req, res) => {
     }
 });
 
-app.get('/', (req, res) => { res.send('Claimr Server - Full Gameplay Logic & Performance is running!'); });
+app.get('/', (req, res) => { res.send('Claimr Server - Final Gameplay Logic is running!'); });
 
 function broadcastAllPlayers() {
     const allPlayersData = Object.values(players).map(p => ({
@@ -113,31 +113,25 @@ io.on('connection', async (socket) => {
 
   try {
     const result = await pool.query("SELECT owner_id, owner_name, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories");
-    const existingTerritories = result.rows.map(row => {
-      return { 
+    const existingTerritories = result.rows.map(row => ({ 
         ownerId: row.owner_id, 
         ownerName: row.owner_name, 
         geojson: JSON.parse(row.geojson),
         area: row.area_sqm 
-      };
-    });
+    }));
     socket.emit('existingTerritories', existingTerritories);
   } catch (err) { console.error('[DB] ERROR fetching territories:', err); }
 
   socket.on('locationUpdate', (data) => {
     const currentPlayer = players[socket.id];
     if (!currentPlayer) return;
-
     const lastPoint = currentPlayer.lastKnownPosition;
     currentPlayer.lastKnownPosition = data;
     broadcastAllPlayers();
-
     if (currentPlayer.isDrawing) {
         currentPlayer.activeTrail.push(data);
-        // --- *** OPTIMIZATION: ONLY SEND THE NEW POINT *** ---
         socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data });
     }
-    
     if (lastPoint && currentPlayer.isDrawing) {
         for (const targetPlayerId in players) {
             if (targetPlayerId === socket.id) continue;
@@ -147,7 +141,6 @@ io.on('connection', async (socket) => {
                 const p1 = targetPlayer.activeTrail[i];
                 const p2 = targetPlayer.activeTrail[i+1];
                 if (linesIntersect(lastPoint, data, p1, p2)) {
-                    console.log(`[COMBAT] ${currentPlayer.name} CUT ${targetPlayer.name}!`);
                     io.to(targetPlayerId).emit('youWereCut', { by: currentPlayer.name });
                     socket.emit('youCutPlayer', { name: targetPlayer.name });
                     io.emit('trailCleared', { id: targetPlayerId });
@@ -162,7 +155,6 @@ io.on('connection', async (socket) => {
 
   socket.on('startDrawingTrail', () => {
     if(players[socket.id]) {
-      console.log(`[TRAIL] ${players[socket.id].name} started drawing.`);
       players[socket.id].isDrawing = true;
       players[socket.id].activeTrail = []; 
       socket.broadcast.emit('trailStarted', { id: socket.id });
@@ -171,13 +163,13 @@ io.on('connection', async (socket) => {
 
   socket.on('stopDrawingTrail', () => {
     if(players[socket.id]) {
-      console.log(`[TRAIL] ${players[socket.id].name} stopped drawing.`);
       players[socket.id].isDrawing = false;
       players[socket.id].activeTrail = [];
       io.emit('trailCleared', { id: socket.id });
     }
   });
 
+  // --- *** REWRITTEN 'claimTerritory' with SMART CUTTING *** ---
   socket.on('claimTerritory', async (data) => {
     const player = players[socket.id];
     const trailData = data ? data.trail : undefined;
@@ -201,24 +193,38 @@ io.on('connection', async (socket) => {
       let updatedOwnerIds = [socket.id, ...victimIds];
 
       for (const victimId of victimIds) {
-        console.log(`[COMBAT] Claim by ${socket.id} is cutting territory of ${victimId}`);
-        const cutQuery = `
-            UPDATE territories
-            SET 
-              area = ST_CollectionExtract(ST_Difference(area, ST_GeomFromText($1, 4326)), 3),
-              area_sqm = ST_Area(ST_CollectionExtract(ST_Difference(area, ST_GeomFromText($1, 4326)), 3)::geography)
-            WHERE owner_id = $2;
+        console.log(`[COMBAT] Claim by ${socket.id} is smartly cutting territory of ${victimId}`);
+        const smartCutQuery = `
+          WITH remaining_pieces AS (
+            SELECT (ST_Dump(
+              ST_CollectionExtract(
+                ST_Difference(
+                  (SELECT area FROM territories WHERE owner_id = $2),
+                  ST_GeomFromText($1, 4326)
+                ), 
+              3)
+            )).geom AS piece
+          ),
+          largest_piece AS (
+            SELECT piece FROM remaining_pieces ORDER BY ST_Area(piece) DESC NULLS LAST LIMIT 1
+          )
+          UPDATE territories
+          SET 
+            area = (SELECT piece FROM largest_piece),
+            area_sqm = ST_Area((SELECT piece FROM largest_piece)::geography)
+          WHERE owner_id = $2 AND (SELECT piece FROM largest_piece) IS NOT NULL;
         `;
-        await client.query(cutQuery, [newClaimWKT, victimId]);
+        await client.query(smartCutQuery, [newClaimWKT, victimId]);
+        
+        const cleanupQuery = `DELETE FROM territories WHERE owner_id = $1 AND (area IS NULL OR ST_IsEmpty(area));`;
+        await client.query(cleanupQuery, [victimId]);
       }
 
       const unionQuery = `
-        UPDATE territories
-        SET 
+        UPDATE territories SET 
           area = ST_CollectionExtract(ST_Union(area, ST_GeomFromText($1, 4326)), 3),
           area_sqm = ST_Area(ST_CollectionExtract(ST_Union(area, ST_GeomFromText($1, 4326)), 3)::geography)
-        WHERE owner_id = $2
-        RETURNING id;
+        WHERE owner_id = $2 RETURNING id;
       `;
       const unionResult = await client.query(unionQuery, [newClaimWKT, socket.id]);
 
@@ -230,26 +236,19 @@ io.on('connection', async (socket) => {
         await client.query(insertQuery, [socket.id, player.name, newClaimWKT]);
       }
       
-      const finalResultQuery = `
-        SELECT owner_id, owner_name, ST_AsGeoJSON(area) as geojson, area_sqm 
-        FROM territories 
-        WHERE owner_id = ANY($1::varchar[])
-      `;
+      const finalResultQuery = `SELECT owner_id, owner_name, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories WHERE owner_id = ANY($1::varchar[])`;
       const finalResult = await client.query(finalResultQuery, [updatedOwnerIds]);
       
-      const batchUpdateData = finalResult.rows.map(row => {
-          return {
-              ownerId: row.owner_id, 
-              ownerName: row.owner_name,
-              geojson: JSON.parse(row.geojson),
-              area: row.area_sqm
-          };
-      }).filter(d => d.geojson != null);
+      const batchUpdateData = finalResult.rows.map(row => ({
+          ownerId: row.owner_id, 
+          ownerName: row.owner_name,
+          geojson: JSON.parse(row.geojson),
+          area: row.area_sqm
+      })).filter(d => d.geojson != null);
 
       await client.query('COMMIT');
       
       io.emit('batchTerritoryUpdate', batchUpdateData);
-      console.log(`[SERVER] Sent 'batchTerritoryUpdate' for players: ${updatedOwnerIds.join(', ')}`);
       io.emit('trailCleared', { id: socket.id });
 
     } catch (err) {
