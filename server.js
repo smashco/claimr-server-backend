@@ -14,7 +14,8 @@ const io = new Server(server, {
 });
 
 const PORT = process.env.PORT || 10000;
-const SERVER_TICK_RATE_MS = 200; // Broadcast updates 5 times per second
+// --- *** UPDATED TICK RATE *** ---
+const SERVER_TICK_RATE_MS = 100; // Broadcast updates 10 times per second
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -79,6 +80,26 @@ const setupDatabase = async () => {
     client.release();
   }
 };
+
+app.get('/leaderboard', async (req, res) => {
+    try {
+        const query = `
+            SELECT 
+                owner_name, 
+                area_sqm,
+                RANK() OVER (ORDER BY area_sqm DESC) as rank
+            FROM territories
+            WHERE area_sqm > 0
+            ORDER BY area_sqm DESC
+            LIMIT 100;
+        `;
+        const result = await pool.query(query);
+        res.status(200).json(result.rows);
+    } catch (err) {
+        console.error('[API] Error fetching leaderboard:', err);
+        res.status(500).json({ error: 'Failed to fetch leaderboard' });
+    }
+});
 
 app.get('/admin/reset-all', async (req, res) => {
     try {
@@ -218,7 +239,6 @@ io.on('connection', async (socket) => {
         `;
         const cutResult = await client.query(smartCutQuery, [newClaimWKT, victimId]);
         
-        // *** NEW: Check for and handle complete territory loss ***
         if (cutResult.rowCount === 0 || cutResult.rows[0].area === null) {
             console.log(`[COMBAT] ${victimId} lost all territory. Deleting.`);
             await client.query('DELETE FROM territories WHERE owner_id = $1', [victimId]);
