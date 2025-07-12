@@ -14,6 +14,7 @@ const io = new Server(server, {
 });
 
 const PORT = process.env.PORT || 10000;
+const SERVER_TICK_RATE_MS = 200; // Broadcast updates 5 times per second
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -22,7 +23,7 @@ const pool = new Pool({
 
 const players = {}; 
 
-// --- INTERSECTION HELPER FUNCTIONS (Unchanged) ---
+// --- INTERSECTION HELPER FUNCTIONS ---
 function onSegment(p, q, r) { 
 	if (q.lat <= Math.max(p.lat, r.lat) && q.lat >= Math.min(p.lat, r.lat) && 
 		q.lng <= Math.max(p.lng, r.lng) && q.lng >= Math.min(p.lng, r.lng)) 
@@ -91,7 +92,7 @@ app.get('/admin/reset-all', async (req, res) => {
     }
 });
 
-app.get('/', (req, res) => { res.send('Claimr Server - Final Gameplay Logic is running!'); });
+app.get('/', (req, res) => { res.send('Claimr Server - OPTIMIZED is running!'); });
 
 function broadcastAllPlayers() {
     const allPlayersData = Object.values(players).map(p => ({
@@ -108,7 +109,7 @@ io.on('connection', async (socket) => {
   socket.on('playerJoined', (data) => {
     players[socket.id] = { id: socket.id, name: data.name || 'Anonymous', activeTrail: [], lastKnownPosition: null, isDrawing: false };
     console.log(`[SERVER] Player ${socket.id} has joined as "${players[socket.id].name}".`);
-    broadcastAllPlayers();
+    // broadcastAllPlayers will handle informing others.
   });
 
   try {
@@ -125,13 +126,16 @@ io.on('connection', async (socket) => {
   socket.on('locationUpdate', (data) => {
     const currentPlayer = players[socket.id];
     if (!currentPlayer) return;
+
     const lastPoint = currentPlayer.lastKnownPosition;
-    currentPlayer.lastKnownPosition = data;
-    broadcastAllPlayers();
+    currentPlayer.lastKnownPosition = data; // Quietly update the high-frequency position
+
     if (currentPlayer.isDrawing) {
         currentPlayer.activeTrail.push(data);
         socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data });
     }
+    
+    // Trail-cutting combat logic (uses high-frequency data)
     if (lastPoint && currentPlayer.isDrawing) {
         for (const targetPlayerId in players) {
             if (targetPlayerId === socket.id) continue;
@@ -141,6 +145,7 @@ io.on('connection', async (socket) => {
                 const p1 = targetPlayer.activeTrail[i];
                 const p2 = targetPlayer.activeTrail[i+1];
                 if (linesIntersect(lastPoint, data, p1, p2)) {
+                    console.log(`[COMBAT] ${currentPlayer.name} CUT ${targetPlayer.name}!`);
                     io.to(targetPlayerId).emit('youWereCut', { by: currentPlayer.name });
                     socket.emit('youCutPlayer', { name: targetPlayer.name });
                     io.emit('trailCleared', { id: targetPlayerId });
@@ -155,6 +160,7 @@ io.on('connection', async (socket) => {
 
   socket.on('startDrawingTrail', () => {
     if(players[socket.id]) {
+      console.log(`[TRAIL] ${players[socket.id].name} started drawing.`);
       players[socket.id].isDrawing = true;
       players[socket.id].activeTrail = []; 
       socket.broadcast.emit('trailStarted', { id: socket.id });
@@ -163,13 +169,13 @@ io.on('connection', async (socket) => {
 
   socket.on('stopDrawingTrail', () => {
     if(players[socket.id]) {
+      console.log(`[TRAIL] ${players[socket.id].name} stopped drawing.`);
       players[socket.id].isDrawing = false;
       players[socket.id].activeTrail = [];
       io.emit('trailCleared', { id: socket.id });
     }
   });
 
-  // --- *** REWRITTEN 'claimTerritory' with SMART CUTTING *** ---
   socket.on('claimTerritory', async (data) => {
     const player = players[socket.id];
     const trailData = data ? data.trail : undefined;
@@ -276,9 +282,14 @@ io.on('connection', async (socket) => {
     if(players[socket.id]) {
         delete players[socket.id];
     }
-    broadcastAllPlayers();
+    // The tick will handle removing them from other clients' views
   });
 });
+
+// --- *** SERVER TICK: Broadcasts player positions on a fixed interval *** ---
+setInterval(() => {
+    broadcastAllPlayers();
+}, SERVER_TICK_RATE_MS);
 
 const main = async () => { 
   await setupDatabase(); 
