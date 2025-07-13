@@ -27,11 +27,6 @@ const setupDatabase = async () => {
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
     console.log('[DB] PostGIS extension is enabled.');
     
-    // For development, we drop the table to apply schema changes.
-    // In production, you would use migration scripts.
-    // await client.query('DROP TABLE IF EXISTS territories;');
-    // console.log('[DB] Dropped old "territories" table for schema update.');
-    
     const createTableQuery = `
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
@@ -58,22 +53,31 @@ const setupDatabase = async () => {
 
 app.get('/', (req, res) => { res.send('Claimr Server - PROFILE UPDATE is running!'); });
 
-// NEW: Endpoint for the Login Screen to check if a profile has been set up.
+// --- ✅ UPDATED Endpoint ---
+// Checks for a profile and returns the user's custom data if it exists.
 app.get('/check-profile', async (req, res) => {
     const { googleId } = req.query;
     if (!googleId) return res.status(400).json({ error: 'googleId is required.' });
     try {
-        const result = await pool.query('SELECT username FROM territories WHERE owner_id = $1', [googleId]);
-        // Profile exists if a row is found AND the username has been set.
-        const profileExists = result.rowCount > 0 && result.rows[0].username;
-        res.json({ profileExists: !!profileExists });
+        const result = await pool.query('SELECT username, profile_image_url FROM territories WHERE owner_id = $1', [googleId]);
+        
+        if (result.rowCount > 0 && result.rows[0].username) {
+            // Profile exists and is complete, return the custom data
+            res.json({
+                profileExists: true,
+                username: result.rows[0].username,
+                profileImageUrl: result.rows[0].profile_image_url
+            });
+        } else {
+            // No profile or incomplete profile
+            res.json({ profileExists: false });
+        }
     } catch (err) {
         console.error('[API] Error checking profile:', err);
         res.status(500).json({ error: 'Server error while checking profile.' });
     }
 });
 
-// NEW: Endpoint for the Profile Setup Screen to check username availability.
 app.get('/check-username', async (req, res) => {
     const { username } = req.query;
     if (!username) return res.status(400).json({ error: 'Username query parameter is required.' });
@@ -86,7 +90,6 @@ app.get('/check-username', async (req, res) => {
     }
 });
 
-// NEW: Endpoint for the Profile Setup Screen to save the new profile.
 app.post('/setup-profile', async (req, res) => {
     const { googleId, username, imageUrl, displayName } = req.body;
     if (!googleId || !username || !imageUrl || !displayName) return res.status(400).json({ error: 'Missing required profile data.' });
@@ -110,7 +113,6 @@ app.post('/setup-profile', async (req, res) => {
 
 app.get('/leaderboard', async (req, res) => {
     try {
-        // Returns the unique `username` for display.
         const query = `
             SELECT 
                 owner_id,
@@ -141,9 +143,8 @@ async function broadcastAllPlayers() {
     const playerIds = Object.keys(players);
     if (playerIds.length === 0) return;
 
-    // Fetch profile info for all currently connected players in one go
     const googleIds = Object.values(players).map(p => p.googleId).filter(id => id);
-    if (googleIds.length === 0) return; // No players with googleId to look up
+    if (googleIds.length === 0) return;
 
     const profileQuery = await pool.query(
         'SELECT owner_id, username, profile_image_url FROM territories WHERE owner_id = ANY($1::varchar[])',
@@ -159,7 +160,7 @@ async function broadcastAllPlayers() {
         const profile = profiles[p.googleId] || {};
         return {
             id: p.id,
-            name: profile.username || p.name, // Fallback to original name
+            name: profile.username || p.name,
             imageUrl: profile.imageUrl,
             lastKnownPosition: p.lastKnownPosition
         };
@@ -181,8 +182,8 @@ io.on('connection', (socket) => {
         
         const activeTerritories = result.rows.filter(row => row.geojson).map(row => ({ 
             ownerId: row.owner_id,
-            ownerName: row.username, // Use the unique username
-            profileImageUrl: row.profile_image_url, // Add the image URL
+            ownerName: row.username,
+            profileImageUrl: row.profile_image_url,
             geojson: JSON.parse(row.geojson), 
             area: row.area_sqm 
         }));
@@ -200,7 +201,6 @@ io.on('connection', (socket) => {
         player.activeTrail.push(data);
         io.emit('trailPointAdded', { id: socket.id, point: data });
     }
-    // Cutting logic would go here in a real implementation
   });
 
   socket.on('startDrawingTrail', () => {
@@ -252,8 +252,8 @@ io.on('connection', (socket) => {
       
       const batchUpdateData = finalResult.rows.map(row => ({ 
           ownerId: row.owner_id, 
-          ownerName: row.username, // Use the unique username
-          profileImageUrl: row.profile_image_url, // Add the image URL
+          ownerName: row.username,
+          profileImageUrl: row.profile_image_url,
           geojson: JSON.parse(row.geojson), 
           area: row.area_sqm 
       })).filter(d => d.geojson != null);
