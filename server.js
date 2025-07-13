@@ -17,7 +17,7 @@ try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
-      storageBucket: `${serviceAccount.project_id}.appspot.com` // e.g., 'claimr-app.appspot.com'
+      storageBucket: 'claimr-6464.firebasestorage.app' // e.g., 'claimr-app.appspot.com'
     });
     console.log('[Firebase Admin] Initialized successfully.');
   } else {
