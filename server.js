@@ -61,12 +61,13 @@ const setupDatabase = async () => {
     await client.query('DROP TABLE IF EXISTS territories;');
     console.log('[DB] Dropped old "territories" table for schema update.');
 
+    // --- MODIFIED: `area` is now NULLABLE to allow for inactive players ---
     const createTableQuery = `
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
         owner_id VARCHAR(255) NOT NULL UNIQUE, 
         owner_name VARCHAR(255), 
-        area GEOMETRY(GEOMETRY, 4326) NOT NULL,
+        area GEOMETRY(GEOMETRY, 4326),
         area_sqm REAL,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
@@ -113,7 +114,7 @@ app.get('/admin/reset-all', async (req, res) => {
     }
 });
 
-app.get('/', (req, res) => { res.send('Claimr Server - OPTIMIZED is running!'); });
+app.get('/', (req, res) => { res.send('Claimr Server - ROBUST is running!'); });
 
 function broadcastAllPlayers() {
     const allPlayersData = Object.values(players).map(p => ({
@@ -132,15 +133,27 @@ io.on('connection', async (socket) => {
     console.log(`[SERVER] Player ${socket.id} has joined as "${players[socket.id].name}".`);
   });
 
+  // --- MODIFIED: Send a more informative payload to the client ---
   try {
     const result = await pool.query("SELECT owner_id, owner_name, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories");
-    const existingTerritories = result.rows.map(row => ({ 
+    
+    // Send only territories that have a valid area to be drawn
+    const activeTerritories = result.rows.filter(row => row.geojson).map(row => ({ 
         ownerId: row.owner_id, 
         ownerName: row.owner_name, 
         geojson: JSON.parse(row.geojson),
         area: row.area_sqm 
     }));
-    socket.emit('existingTerritories', existingTerritories);
+
+    // Check if a record for this player exists at all, even if their area is NULL
+    const playerHasRecord = result.rows.some(row => row.owner_id === socket.id);
+
+    // Emit the new payload structure
+    socket.emit('existingTerritories', {
+        territories: activeTerritories,
+        playerHasRecord: playerHasRecord
+    });
+
   } catch (err) { console.error('[DB] ERROR fetching territories:', err); }
 
   socket.on('locationUpdate', (data) => {
@@ -212,13 +225,13 @@ io.on('connection', async (socket) => {
       if (newArea < MINIMUM_CLAIM_AREA_SQM) {
         console.log(`[CLAIM] Rejected claim from ${socket.id}. Area ${newArea}sqm is less than minimum ${MINIMUM_CLAIM_AREA_SQM}sqm.`);
         socket.emit('claimRejected', { reason: 'Area is too small. Think bigger!' });
-        return; // Return early, finally block will run.
+        return;
       }
       
       await client.query('BEGIN');
 
       const victimsResult = await client.query(
-        "SELECT owner_id FROM territories WHERE owner_id != $1 AND ST_Intersects(area, ST_GeomFromText($2, 4326))",
+        "SELECT owner_id FROM territories WHERE owner_id != $1 AND area IS NOT NULL AND ST_Intersects(area, ST_GeomFromText($2, 4326))",
         [socket.id, newClaimWKT]
       );
       const victimIds = victimsResult.rows.map(r => r.owner_id);
@@ -244,34 +257,29 @@ io.on('connection', async (socket) => {
           SET 
             area = (SELECT piece FROM largest_piece),
             area_sqm = ST_Area((SELECT piece FROM largest_piece)::geography)
-          WHERE owner_id = $2 AND (SELECT piece FROM largest_piece) IS NOT NULL
+          WHERE owner_id = $2
           RETURNING area;
         `;
         const cutResult = await client.query(smartCutQuery, [newClaimWKT, victimId]);
         
+        // --- MODIFIED: Instead of deleting, set area to NULL ---
         if (cutResult.rowCount === 0 || cutResult.rows[0].area === null) {
-            console.log(`[COMBAT] ${victimId} lost all territory. Deleting.`);
-            await client.query('DELETE FROM territories WHERE owner_id = $1', [victimId]);
+            console.log(`[COMBAT] ${victimId} lost all territory. Inactivating.`);
+            await client.query('UPDATE territories SET area = NULL, area_sqm = NULL WHERE owner_id = $1', [victimId]);
             io.emit('playerTerritoriesCleared', { ownerId: victimId });
-            updatedOwnerIds = updatedOwnerIds.filter(id => id !== victimId);
         }
       }
 
-      const unionQuery = `
-        UPDATE territories SET 
-          area = ST_CollectionExtract(ST_Union(area, ST_GeomFromText($1, 4326)), 3),
-          area_sqm = ST_Area(ST_CollectionExtract(ST_Union(area, ST_GeomFromText($1, 4326)), 3)::geography)
-        WHERE owner_id = $2 RETURNING id;
+      // --- MODIFIED: Use a single, atomic UPSERT query ---
+      const upsertQuery = `
+        INSERT INTO territories (owner_id, owner_name, area, area_sqm)
+        VALUES ($1, $2, ST_GeomFromText($3, 4326), $4)
+        ON CONFLICT (owner_id) DO UPDATE SET
+          area = ST_CollectionExtract(ST_Union(territories.area, ST_GeomFromText($3, 4326)), 3),
+          area_sqm = ST_Area(ST_CollectionExtract(ST_Union(territories.area, ST_GeomFromText($3, 4326)), 3)::geography),
+          owner_name = $2;
       `;
-      const unionResult = await client.query(unionQuery, [newClaimWKT, socket.id]);
-
-      if (unionResult.rowCount === 0) {
-        const insertQuery = `
-          INSERT INTO territories (owner_id, owner_name, area, area_sqm)
-          VALUES ($1, $2, ST_GeomFromText($3, 4326), ST_Area(ST_GeomFromText($3, 4326)::geography))
-        `;
-        await client.query(insertQuery, [socket.id, player.name, newClaimWKT]);
-      }
+      await client.query(upsertQuery, [socket.id, player.name, newClaimWKT, newArea]);
       
       const finalResultQuery = `SELECT owner_id, owner_name, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories WHERE owner_id = ANY($1::varchar[])`;
       const finalResult = await client.query(finalResultQuery, [updatedOwnerIds]);
@@ -295,18 +303,18 @@ io.on('connection', async (socket) => {
       console.error('[DB] FATAL Error during territory cut/claim:', err);
     } finally {
         client.release();
-        console.log('[DB] Connection released.');
     }
   });
 
+  // --- MODIFIED: Change from DELETE to UPDATE to inactivate player ---
   socket.on('deleteMyTerritories', async () => {
     console.log(`[SERVER] Received 'deleteMyTerritories' from ${socket.id}.`);
     try {
-      await pool.query("DELETE FROM territories WHERE owner_id = $1", [socket.id]);
-      console.log(`[DB] Deleted territories for owner_id: ${socket.id}.`);
+      await pool.query("UPDATE territories SET area = NULL, area_sqm = NULL WHERE owner_id = $1", [socket.id]);
+      console.log(`[DB] Inactivated territories for owner_id: ${socket.id}.`);
       io.emit('playerTerritoriesCleared', { ownerId: socket.id });
     } catch (err) {
-      console.error('[DB] Error deleting player territories:', err);
+      console.error('[DB] Error inactivating player territories:', err);
     }
   });
 
