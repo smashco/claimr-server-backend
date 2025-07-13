@@ -1,5 +1,3 @@
-// claimr_server/server.js
-
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -31,8 +29,8 @@ const setupDatabase = async () => {
     
     // For development, we drop the table to apply schema changes.
     // In production, you would use migration scripts.
-    await client.query('DROP TABLE IF EXISTS territories;');
-    console.log('[DB] Dropped old "territories" table for schema update.');
+    // await client.query('DROP TABLE IF EXISTS territories;');
+    // console.log('[DB] Dropped old "territories" table for schema update.');
     
     const createTableQuery = `
       CREATE TABLE IF NOT EXISTS territories (
@@ -138,7 +136,37 @@ app.get('/admin/reset-all', async (req, res) => { try { await pool.query("TRUNCA
 function onSegment(p, q, r) { if (q.lat <= Math.max(p.lat, r.lat) && q.lat >= Math.min(p.lat, r.lat) && q.lng <= Math.max(p.lng, r.lng) && q.lng >= Math.min(p.lng, r.lng)) { return true; } return false; } 
 function orientation(p, q, r) { const val = (q.lng - p.lng) * (r.lat - q.lat) - (q.lat - p.lat) * (r.lng - q.lng); if (val == 0) return 0; return (val > 0) ? 1 : 2;} 
 function linesIntersect(p1, q1, p2, q2) { const o1 = orientation(p1, q1, p2); const o2 = orientation(p1, q1, q2); const o3 = orientation(p2, q2, p1); const o4 = orientation(p2, q2, q1); if (o1 != o2 && o3 != o4) return true; if (o1 == 0 && onSegment(p1, p2, q1)) return true; if (o2 == 0 && onSegment(p1, q2, q1)) return true; if (o3 == 0 && onSegment(p2, p1, q2)) return true; if (o4 == 0 && onSegment(p2, q1, q2)) return true; return false; }
-function broadcastAllPlayers() { const allPlayersData = Object.values(players).map(p => ({ id: p.id, name: p.name, lastKnownPosition: p.lastKnownPosition })); io.emit('allPlayersUpdate', allPlayersData); }
+
+async function broadcastAllPlayers() {
+    const playerIds = Object.keys(players);
+    if (playerIds.length === 0) return;
+
+    // Fetch profile info for all currently connected players in one go
+    const googleIds = Object.values(players).map(p => p.googleId).filter(id => id);
+    if (googleIds.length === 0) return; // No players with googleId to look up
+
+    const profileQuery = await pool.query(
+        'SELECT owner_id, username, profile_image_url FROM territories WHERE owner_id = ANY($1::varchar[])',
+        [googleIds]
+    );
+
+    const profiles = profileQuery.rows.reduce((acc, row) => {
+        acc[row.owner_id] = { username: row.username, imageUrl: row.profile_image_url };
+        return acc;
+    }, {});
+
+    const allPlayersData = Object.values(players).map(p => {
+        const profile = profiles[p.googleId] || {};
+        return {
+            id: p.id,
+            name: profile.username || p.name, // Fallback to original name
+            imageUrl: profile.imageUrl,
+            lastKnownPosition: p.lastKnownPosition
+        };
+    });
+
+    io.emit('allPlayersUpdate', allPlayersData);
+}
 
 io.on('connection', (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
@@ -149,16 +177,46 @@ io.on('connection', (socket) => {
     console.log(`[SERVER] Player ${socket.id} (${data.googleId}) has joined as "${players[socket.id].name}".`);
 
     try {
-        const result = await pool.query("SELECT owner_id, username as owner_name, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories");
-        const activeTerritories = result.rows.filter(row => row.geojson).map(row => ({ ownerId: row.owner_id, ownerName: row.owner_name, geojson: JSON.parse(row.geojson), area: row.area_sqm }));
-        const playerHasRecord = result.rows.some(row => row.owner_id === data.googleId && row.owner_name);
+        const result = await pool.query("SELECT owner_id, username, profile_image_url, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories");
+        
+        const activeTerritories = result.rows.filter(row => row.geojson).map(row => ({ 
+            ownerId: row.owner_id,
+            ownerName: row.username, // Use the unique username
+            profileImageUrl: row.profile_image_url, // Add the image URL
+            geojson: JSON.parse(row.geojson), 
+            area: row.area_sqm 
+        }));
+        
+        const playerHasRecord = result.rows.some(row => row.owner_id === data.googleId && row.username);
         socket.emit('existingTerritories', { territories: activeTerritories, playerHasRecord: playerHasRecord });
     } catch (err) { console.error('[DB] ERROR fetching initial territories:', err); }
   });
 
-  socket.on('locationUpdate', (data) => { /* ... (same as before) ... */ });
-  socket.on('startDrawingTrail', () => { /* ... (same as before) ... */ });
-  socket.on('stopDrawingTrail', () => { /* ... (same as before) ... */ });
+  socket.on('locationUpdate', (data) => {
+    const player = players[socket.id];
+    if (!player) return;
+    player.lastKnownPosition = data;
+    if (player.isDrawing && Array.isArray(player.activeTrail)) {
+        player.activeTrail.push(data);
+        io.emit('trailPointAdded', { id: socket.id, point: data });
+    }
+    // Cutting logic would go here in a real implementation
+  });
+
+  socket.on('startDrawingTrail', () => {
+    const player = players[socket.id];
+    if (!player) return;
+    player.isDrawing = true;
+    player.activeTrail = [];
+    io.emit('trailStarted', { id: socket.id, name: player.name });
+  });
+
+  socket.on('stopDrawingTrail', () => {
+    const player = players[socket.id];
+    if (!player) return;
+    player.isDrawing = false;
+    io.emit('trailCleared', { id: socket.id });
+  });
 
   socket.on('claimTerritory', async (data) => {
     const player = players[socket.id]; if (!player || !player.googleId) return;
@@ -190,8 +248,15 @@ io.on('connection', (socket) => {
       const upsertQuery = `INSERT INTO territories (owner_id, username, area, area_sqm) VALUES ($1, $2, ST_GeomFromText($3, 4326), $4) ON CONFLICT (owner_id) DO UPDATE SET area = ST_CollectionExtract(ST_Union(territories.area, ST_GeomFromText($3, 4326)), 3), area_sqm = ST_Area(ST_CollectionExtract(ST_Union(territories.area, ST_GeomFromText($3, 4326)), 3)::geography), username = $2;`;
       await client.query(upsertQuery, [player.googleId, currentUsername, newClaimWKT, newArea]);
       
-      const finalResult = await client.query(`SELECT owner_id, username as owner_name, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories WHERE owner_id = ANY($1::varchar[])`, [updatedOwnerIds]);
-      const batchUpdateData = finalResult.rows.map(row => ({ ownerId: row.owner_id, ownerName: row.owner_name, geojson: JSON.parse(row.geojson), area: row.area_sqm })).filter(d => d.geojson != null);
+      const finalResult = await client.query(`SELECT owner_id, username, profile_image_url, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories WHERE owner_id = ANY($1::varchar[])`, [updatedOwnerIds]);
+      
+      const batchUpdateData = finalResult.rows.map(row => ({ 
+          ownerId: row.owner_id, 
+          ownerName: row.username, // Use the unique username
+          profileImageUrl: row.profile_image_url, // Add the image URL
+          geojson: JSON.parse(row.geojson), 
+          area: row.area_sqm 
+      })).filter(d => d.geojson != null);
       
       await client.query('COMMIT');
       if(batchUpdateData.length > 0) io.emit('batchTerritoryUpdate', batchUpdateData);
@@ -215,7 +280,9 @@ io.on('connection', (socket) => {
   });
 });
 
-setInterval(() => { broadcastAllPlayers(); }, SERVER_TICK_RATE_MS);
+setInterval(async () => { 
+  await broadcastAllPlayers(); 
+}, SERVER_TICK_RATE_MS);
 
 const main = async () => { await setupDatabase(); server.listen(PORT, () => console.log(`Server listening on *:${PORT}`)); };
 main();
