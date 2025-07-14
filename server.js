@@ -5,13 +5,12 @@ const { Server } = require("socket.io");
 const { Pool } = require('pg');
 const admin = require('firebase-admin');
 
-// ✅ ADDED: Global error handlers for better debugging on Render
 process.on('unhandledRejection', (reason, promise) => {
   console.error('SERVER ERROR: Unhandled Rejection at:', promise, 'reason:', reason);
 });
 process.on('uncaughtException', (error) => {
   console.error('SERVER ERROR: Uncaught Exception:', error);
-  process.exit(1); // Exit on critical errors so the service can restart
+  process.exit(1);
 });
 
 const app = express();
@@ -19,7 +18,6 @@ app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-// --- Initialize Firebase Admin SDK ---
 try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -29,7 +27,7 @@ try {
     });
     console.log('[Firebase Admin] Initialized successfully.');
   } else {
-    console.log('[Firebase Admin] Skipping initialization: FIREBASE_SERVICE_ACCOUNT env var not set.');
+    console.log('[Firebase Admin] Skipping initialization.');
   }
 } catch (error) {
   console.error('[Firebase Admin] FATAL: Failed to initialize.', error.message);
@@ -67,13 +65,12 @@ const setupDatabase = async () => {
     console.log('[DB] "territories" table is ready.');
   } catch (err) {
     console.error('[DB] FATAL ERROR during database setup:', err);
-    throw err; // Re-throw the error to be caught by the caller
+    throw err;
   } finally {
     client.release();
   }
 };
 
-// --- Middleware for protecting admin routes ---
 const checkAdminSecret = (req, res, next) => {
     const { secret } = req.query;
     if (!process.env.ADMIN_SECRET_KEY || secret !== process.env.ADMIN_SECRET_KEY) {
@@ -82,7 +79,6 @@ const checkAdminSecret = (req, res, next) => {
     next();
 };
 
-// --- Middleware for authenticating user tokens ---
 const authenticate = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -97,8 +93,6 @@ const authenticate = async (req, res, next) => {
     res.status(403).send('Unauthorized: Invalid token.');
   }
 };
-
-// --- API ENDPOINTS ---
 
 app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
 
@@ -157,8 +151,6 @@ app.get('/leaderboard', async (req, res) => {
     }
 });
 
-// --- ADMIN & DEV ENDPOINTS ---
-
 app.post('/dev/reset-user', authenticate, async (req, res) => {
     const { googleId } = req.body; const firebaseUid = req.user.uid;
     const client = await pool.connect();
@@ -210,9 +202,6 @@ app.get('/admin/reset-all-territories', checkAdminSecret, async (req, res) => {
     }
 });
 
-
-// --- REAL-TIME GAME LOGIC ---
-
 async function broadcastAllPlayers() {
     const playerIds = Object.keys(players);
     if (playerIds.length === 0) return;
@@ -247,8 +236,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('locationUpdate', (data) => {
-    const player = players[socket.id];
-    if (!player) return;
+    const player = players[socket.id]; if (!player) return;
     player.lastKnownPosition = data;
     if (player.isDrawing && Array.isArray(player.activeTrail)) {
         player.activeTrail.push(data);
@@ -295,7 +283,18 @@ io.on('connection', (socket) => {
       const playerInfoRes = await client.query('SELECT username FROM territories WHERE owner_id = $1', [player.googleId]);
       const currentUsername = playerInfoRes.rows[0]?.username || player.name;
 
-      const upsertQuery = `INSERT INTO territories (owner_id, username, area, area_sqm) VALUES ($1, $2, ST_GeomFromText($3, 4326), $4) ON CONFLICT (owner_id) DO UPDATE SET area = ST_CollectionExtract(ST_Union(territories.area, ST_GeomFromText($3, 4326)), 3), area_sqm = ST_Area(ST_CollectionExtract(ST_Union(territories.area, ST_GeomFromText($3, 4326)), 3)::geography), username = $2;`;
+      // ✅ THIS IS THE CORRECTED QUERY
+      const upsertQuery = `
+          INSERT INTO territories (owner_id, username, area, area_sqm)
+          VALUES ($1, $2, ST_GeomFromText($3, 4326), $4)
+          ON CONFLICT (owner_id) DO UPDATE 
+          SET 
+              area = ST_CollectionExtract(ST_Union(COALESCE(territories.area, 'GEOMETRYCOLLECTION EMPTY'::geometry), ST_GeomFromText($3, 4326)), 3),
+              area_sqm = ST_Area((
+                  ST_CollectionExtract(ST_Union(COALESCE(territories.area, 'GEOMETRYCOLLECTION EMPTY'::geometry), ST_GeomFromText($3, 4326)), 3)
+              )::geography);
+      `;
+      // We pass currentUsername for the INSERT, but the UPDATE will use the existing geometry.
       await client.query(upsertQuery, [player.googleId, currentUsername, newClaimWKT, newArea]);
       
       const finalResult = await client.query(`SELECT owner_id, username, profile_image_url, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories WHERE owner_id = ANY($1::varchar[])`, [updatedOwnerIds]);
@@ -325,12 +324,9 @@ io.on('connection', (socket) => {
 
 setInterval(async () => { await broadcastAllPlayers(); }, SERVER_TICK_RATE_MS);
 
-// ✅ MODIFIED: The robust startup sequence
 const main = async () => {
   server.listen(PORT, () => {
     console.log(`Server listening on *:${PORT}`);
-    
-    // Connect to and set up the database after the server is live
     setupDatabase().catch(err => {
         console.error("Failed to setup database after server start:", err);
         process.exit(1); 
