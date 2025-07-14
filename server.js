@@ -5,6 +5,15 @@ const { Server } = require("socket.io");
 const { Pool } = require('pg');
 const admin = require('firebase-admin');
 
+// ✅ ADDED: Global error handlers for better debugging on Render
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('SERVER ERROR: Unhandled Rejection at:', promise, 'reason:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('SERVER ERROR: Uncaught Exception:', error);
+  process.exit(1); // Exit on critical errors so the service can restart
+});
+
 const app = express();
 app.use(express.json());
 const server = http.createServer(app);
@@ -58,7 +67,7 @@ const setupDatabase = async () => {
     console.log('[DB] "territories" table is ready.');
   } catch (err) {
     console.error('[DB] FATAL ERROR during database setup:', err);
-    process.exit(1);
+    throw err; // Re-throw the error to be caught by the caller
   } finally {
     client.release();
   }
@@ -221,7 +230,6 @@ async function broadcastAllPlayers() {
     io.emit('allPlayersUpdate', allPlayersData);
 }
 
-// ✅ THIS IS THE COMPLETE, CORRECTED REAL-TIME LOGIC BLOCK
 io.on('connection', (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
   
@@ -317,9 +325,17 @@ io.on('connection', (socket) => {
 
 setInterval(async () => { await broadcastAllPlayers(); }, SERVER_TICK_RATE_MS);
 
+// ✅ MODIFIED: The robust startup sequence
 const main = async () => {
-  await setupDatabase();
-  server.listen(PORT, () => console.log(`Server listening on *:${PORT}`));
+  server.listen(PORT, () => {
+    console.log(`Server listening on *:${PORT}`);
+    
+    // Connect to and set up the database after the server is live
+    setupDatabase().catch(err => {
+        console.error("Failed to setup database after server start:", err);
+        process.exit(1); 
+    });
+  });
 };
 
 main();
