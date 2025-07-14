@@ -12,21 +12,19 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 // --- Initialize Firebase Admin SDK ---
 try {
-  // Check if the environment variable is set before parsing
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
-      storageBucket: 'claimr-6464.firebasestorage.app' // e.g., 'claimr-app.appspot.com'
+      storageBucket: 'claimr-6464.firebasestorage.app'
     });
     console.log('[Firebase Admin] Initialized successfully.');
   } else {
     console.log('[Firebase Admin] Skipping initialization: FIREBASE_SERVICE_ACCOUNT env var not set.');
   }
 } catch (error) {
-  console.error('[Firebase Admin] FATAL: Failed to initialize. Check FIREBASE_SERVICE_ACCOUNT env var.', error.message);
+  console.error('[Firebase Admin] FATAL: Failed to initialize.', error.message);
 }
-// ---
 
 const PORT = process.env.PORT || 10000;
 const SERVER_TICK_RATE_MS = 100;
@@ -101,11 +99,7 @@ app.get('/check-profile', async (req, res) => {
     try {
         const result = await pool.query('SELECT username, profile_image_url FROM territories WHERE owner_id = $1', [googleId]);
         if (result.rowCount > 0 && result.rows[0].username) {
-            res.json({
-                profileExists: true,
-                username: result.rows[0].username,
-                profileImageUrl: result.rows[0].profile_image_url
-            });
+            res.json({ profileExists: true, username: result.rows[0].username, profileImageUrl: result.rows[0].profile_image_url });
         } else {
             res.json({ profileExists: false });
         }
@@ -131,12 +125,8 @@ app.post('/setup-profile', async (req, res) => {
     if (!googleId || !username || !imageUrl || !displayName) return res.status(400).json({ error: 'Missing required profile data.' });
     try {
         const upsertQuery = `
-            INSERT INTO territories (owner_id, owner_name, username, profile_image_url)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (owner_id) DO UPDATE SET
-                username = $3,
-                profile_image_url = $4,
-                owner_name = $2;
+            INSERT INTO territories (owner_id, owner_name, username, profile_image_url) VALUES ($1, $2, $3, $4)
+            ON CONFLICT (owner_id) DO UPDATE SET username = $3, profile_image_url = $4, owner_name = $2;
         `;
         await pool.query(upsertQuery, [googleId, displayName, username.toLowerCase(), imageUrl]);
         res.status(200).json({ success: true, message: 'Profile set up successfully.' });
@@ -158,13 +148,10 @@ app.get('/leaderboard', async (req, res) => {
     }
 });
 
-
 // --- ADMIN & DEV ENDPOINTS ---
 
 app.post('/dev/reset-user', authenticate, async (req, res) => {
-    const { googleId } = req.body;
-    const firebaseUid = req.user.uid;
-    console.log(`[RESET] Initiating reset for googleId: ${googleId}, firebaseUid: ${firebaseUid}`);
+    const { googleId } = req.body; const firebaseUid = req.user.uid;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -183,39 +170,32 @@ app.post('/dev/reset-user', authenticate, async (req, res) => {
     } catch (err) {
         await client.query('ROLLBACK');
         res.status(500).json({ error: 'Failed to reset user data.' });
-    } finally {
-        client.release();
-    }
+    } finally { client.release(); }
 });
 
 app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
-    console.log('[ADMIN] FACTORY RESET INITIATED!');
     const client = await pool.connect();
     try {
         await client.query("TRUNCATE TABLE territories RESTART IDENTITY;");
-        console.log('[ADMIN] Successfully truncated "territories" table.');
         if (admin.apps.length > 0) {
             const bucket = admin.storage().bucket();
             const [files] = await bucket.getFiles({ prefix: 'profile_images/' });
             if (files.length > 0) {
                 await Promise.all(files.map(file => file.delete()));
-                console.log(`[ADMIN] Successfully deleted ${files.length} profile images.`);
             }
         }
         io.emit('allTerritoriesCleared');
         res.status(200).send('SUCCESS: Factory reset complete.');
     } catch (err) {
         res.status(500).send(`ERROR during factory reset: ${err.message}`);
-    } finally {
-        client.release();
-    }
+    } finally { client.release(); }
 });
 
 app.get('/admin/reset-all-territories', checkAdminSecret, async (req, res) => {
     try {
         await pool.query("UPDATE territories SET area = NULL, area_sqm = NULL;");
         io.emit('allTerritoriesCleared');
-        res.status(200).send('SUCCESS: All claimed territories deleted. User profiles remain.');
+        res.status(200).send('SUCCESS: All claimed territories deleted.');
     } catch (err) {
         res.status(500).send('ERROR clearing territories.');
     }
@@ -224,22 +204,115 @@ app.get('/admin/reset-all-territories', checkAdminSecret, async (req, res) => {
 
 // --- REAL-TIME GAME LOGIC ---
 
-async function broadcastAllPlayers() { /* ... (This function is unchanged, ensure it's here) ... */ }
-io.on('connection', (socket) => { /* ... (This entire block is unchanged, ensure it's here) ... */ });
-
-// Example placeholder for io.on('connection', ...) if you need to paste it back in:
-io.on('connection', (socket) => {
-    socket.on('playerJoined', async (data) => {
-        if (!data || !data.googleId) return;
-        players[socket.id] = { id: socket.id, name: data.name, googleId: data.googleId, activeTrail: [], lastKnownPosition: null, isDrawing: false };
-        try {
-            const result = await pool.query("SELECT owner_id, username, profile_image_url, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories");
-            const activeTerritories = result.rows.filter(row => row.geojson).map(row => ({ ownerId: row.owner_id, ownerName: row.username, profileImageUrl: row.profile_image_url, geojson: JSON.parse(row.geojson), area: row.area_sqm }));
-            const playerHasRecord = result.rows.some(row => row.owner_id === data.googleId && row.username);
-            socket.emit('existingTerritories', { territories: activeTerritories, playerHasRecord: playerHasRecord });
-        } catch (err) { console.error('[DB] ERROR fetching initial territories:', err); }
+async function broadcastAllPlayers() {
+    const playerIds = Object.keys(players);
+    if (playerIds.length === 0) return;
+    const googleIds = Object.values(players).map(p => p.googleId).filter(id => id);
+    if (googleIds.length === 0) return;
+    const profileQuery = await pool.query('SELECT owner_id, username, profile_image_url FROM territories WHERE owner_id = ANY($1::varchar[])', [googleIds]);
+    const profiles = profileQuery.rows.reduce((acc, row) => {
+        acc[row.owner_id] = { username: row.username, imageUrl: row.profile_image_url };
+        return acc;
+    }, {});
+    const allPlayersData = Object.values(players).map(p => {
+        const profile = profiles[p.googleId] || {};
+        return { id: p.id, name: profile.username || p.name, imageUrl: profile.imageUrl, lastKnownPosition: p.lastKnownPosition };
     });
-    // ... all other socket events like locationUpdate, claimTerritory, disconnect, etc. ...
+    io.emit('allPlayersUpdate', allPlayersData);
+}
+
+// ✅ THIS IS THE COMPLETE, CORRECTED REAL-TIME LOGIC BLOCK
+io.on('connection', (socket) => {
+  console.log(`[SERVER] User connected: ${socket.id}`);
+  
+  socket.on('playerJoined', async (data) => {
+    if (!data || !data.googleId) return;
+    players[socket.id] = { id: socket.id, name: data.name, googleId: data.googleId, activeTrail: [], lastKnownPosition: null, isDrawing: false };
+    console.log(`[SERVER] Player ${socket.id} (${data.googleId}) has joined as "${players[socket.id].name}".`);
+
+    try {
+        const result = await pool.query("SELECT owner_id, username, profile_image_url, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories");
+        const activeTerritories = result.rows.filter(row => row.geojson).map(row => ({ ownerId: row.owner_id, ownerName: row.username, profileImageUrl: row.profile_image_url, geojson: JSON.parse(row.geojson), area: row.area_sqm }));
+        const playerHasRecord = result.rows.some(row => row.owner_id === data.googleId && row.username);
+        socket.emit('existingTerritories', { territories: activeTerritories, playerHasRecord: playerHasRecord });
+    } catch (err) { console.error('[DB] ERROR fetching initial territories:', err); }
+  });
+
+  socket.on('locationUpdate', (data) => {
+    const player = players[socket.id];
+    if (!player) return;
+    player.lastKnownPosition = data;
+    if (player.isDrawing && Array.isArray(player.activeTrail)) {
+        player.activeTrail.push(data);
+        io.emit('trailPointAdded', { id: socket.id, point: data });
+    }
+  });
+
+  socket.on('startDrawingTrail', () => {
+    const player = players[socket.id]; if (!player) return;
+    player.isDrawing = true; player.activeTrail = [];
+    io.emit('trailStarted', { id: socket.id, name: player.name });
+  });
+
+  socket.on('stopDrawingTrail', () => {
+    const player = players[socket.id]; if (!player) return;
+    player.isDrawing = false;
+    io.emit('trailCleared', { id: socket.id });
+  });
+
+  socket.on('claimTerritory', async (data) => {
+    const player = players[socket.id]; if (!player || !player.googleId) return;
+    const trailData = data ? data.trail : undefined; if (!Array.isArray(trailData) || trailData.length < 3) return;
+    player.isDrawing = false; player.activeTrail = [];
+    const coordinatesString = trailData.map(p => `${p.lng} ${p.lat}`).join(', ');
+    const newClaimWKT = `POLYGON((${coordinatesString}, ${trailData[0].lng} ${trailData[0].lat}))`;
+    
+    const client = await pool.connect();
+    try {
+      const areaResult = await client.query(`SELECT ST_Area(ST_GeomFromText($1, 4326)::geography) as area;`, [newClaimWKT]);
+      const newArea = areaResult.rows[0].area;
+      if (newArea < MINIMUM_CLAIM_AREA_SQM) { socket.emit('claimRejected', { reason: 'Area is too small!' }); return; }
+      
+      await client.query('BEGIN');
+      const victimsResult = await client.query("SELECT owner_id FROM territories WHERE owner_id != $1 AND area IS NOT NULL AND ST_Intersects(area, ST_GeomFromText($2, 4326))", [player.googleId, newClaimWKT]);
+      const victimIds = victimsResult.rows.map(r => r.owner_id);
+      let updatedOwnerIds = [player.googleId, ...victimIds];
+
+      for (const victimId of victimIds) {
+        const smartCutQuery = `WITH rem AS (SELECT (ST_Dump(ST_CollectionExtract(ST_Difference((SELECT area FROM territories WHERE owner_id = $2),ST_GeomFromText($1, 4326)), 3))).geom AS p), lg AS (SELECT p FROM rem ORDER BY ST_Area(p) DESC NULLS LAST LIMIT 1) UPDATE territories SET area = (SELECT p FROM lg), area_sqm = ST_Area((SELECT p FROM lg)::geography) WHERE owner_id = $2 RETURNING area;`;
+        const cutResult = await client.query(smartCutQuery, [newClaimWKT, victimId]);
+        if (cutResult.rowCount === 0 || cutResult.rows[0].area === null) { await client.query('UPDATE territories SET area = NULL, area_sqm = NULL WHERE owner_id = $1', [victimId]); io.emit('playerTerritoriesCleared', { ownerId: victimId }); }
+      }
+
+      const playerInfoRes = await client.query('SELECT username FROM territories WHERE owner_id = $1', [player.googleId]);
+      const currentUsername = playerInfoRes.rows[0]?.username || player.name;
+
+      const upsertQuery = `INSERT INTO territories (owner_id, username, area, area_sqm) VALUES ($1, $2, ST_GeomFromText($3, 4326), $4) ON CONFLICT (owner_id) DO UPDATE SET area = ST_CollectionExtract(ST_Union(territories.area, ST_GeomFromText($3, 4326)), 3), area_sqm = ST_Area(ST_CollectionExtract(ST_Union(territories.area, ST_GeomFromText($3, 4326)), 3)::geography), username = $2;`;
+      await client.query(upsertQuery, [player.googleId, currentUsername, newClaimWKT, newArea]);
+      
+      const finalResult = await client.query(`SELECT owner_id, username, profile_image_url, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories WHERE owner_id = ANY($1::varchar[])`, [updatedOwnerIds]);
+      const batchUpdateData = finalResult.rows.map(row => ({ ownerId: row.owner_id, ownerName: row.username, profileImageUrl: row.profile_image_url, geojson: JSON.parse(row.geojson), area: row.area_sqm })).filter(d => d.geojson != null);
+      
+      await client.query('COMMIT');
+      if(batchUpdateData.length > 0) io.emit('batchTerritoryUpdate', batchUpdateData);
+      io.emit('trailCleared', { id: socket.id });
+    } catch (err) { await client.query('ROLLBACK'); console.error('[DB] FATAL Error during territory cut/claim:', err); } finally { client.release(); }
+  });
+
+  socket.on('deleteMyTerritories', async () => {
+    const player = players[socket.id]; if (!player || !player.googleId) return;
+    try {
+      await pool.query("UPDATE territories SET area = NULL, area_sqm = NULL WHERE owner_id = $1", [player.googleId]);
+      console.log(`[DB] Inactivated territories for owner_id: ${player.googleId}.`);
+      io.emit('playerTerritoriesCleared', { ownerId: player.googleId });
+    } catch (err) { console.error('[DB] Error inactivating player territories:', err); }
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`[SERVER] User disconnected: ${socket.id}`);
+    io.emit('playerLeft', { id: socket.id });
+    if(players[socket.id]) { delete players[socket.id]; }
+  });
 });
 
 setInterval(async () => { await broadcastAllPlayers(); }, SERVER_TICK_RATE_MS);
