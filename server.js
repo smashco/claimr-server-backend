@@ -256,6 +256,7 @@ io.on('connection', (socket) => {
     io.emit('trailCleared', { id: socket.id });
   });
 
+  // ✅ THIS IS THE CORRECTED CLAIM LOGIC
   socket.on('claimTerritory', async (data) => {
     const player = players[socket.id]; if (!player || !player.googleId) return;
     const trailData = data ? data.trail : undefined; if (!Array.isArray(trailData) || trailData.length < 3) return;
@@ -263,39 +264,45 @@ io.on('connection', (socket) => {
     const coordinatesString = trailData.map(p => `${p.lng} ${p.lat}`).join(', ');
     const newClaimWKT = `POLYGON((${coordinatesString}, ${trailData[0].lng} ${trailData[0].lat}))`;
     
+    // Explicitly create the new geometry with the correct SRID
+    const newClaimGeom = `ST_SetSRID(ST_GeomFromText('${newClaimWKT}'), 4326)`;
+
     const client = await pool.connect();
     try {
-      const areaResult = await client.query(`SELECT ST_Area(ST_GeomFromText($1, 4326)::geography) as area;`, [newClaimWKT]);
+      const areaResult = await client.query(`SELECT ST_Area(${newClaimGeom}::geography) as area;`);
       const newArea = areaResult.rows[0].area;
       if (newArea < MINIMUM_CLAIM_AREA_SQM) { socket.emit('claimRejected', { reason: 'Area is too small!' }); return; }
       
       await client.query('BEGIN');
-      const victimsResult = await client.query("SELECT owner_id FROM territories WHERE owner_id != $1 AND area IS NOT NULL AND ST_Intersects(area, ST_GeomFromText($2, 4326))", [player.googleId, newClaimWKT]);
+      const victimsResult = await client.query(`SELECT owner_id FROM territories WHERE owner_id != $1 AND area IS NOT NULL AND ST_Intersects(area, ${newClaimGeom})`, [player.googleId]);
       const victimIds = victimsResult.rows.map(r => r.owner_id);
       let updatedOwnerIds = [player.googleId, ...victimIds];
 
       for (const victimId of victimIds) {
-        const smartCutQuery = `WITH rem AS (SELECT (ST_Dump(ST_CollectionExtract(ST_Difference((SELECT area FROM territories WHERE owner_id = $2),ST_GeomFromText($1, 4326)), 3))).geom AS p), lg AS (SELECT p FROM rem ORDER BY ST_Area(p) DESC NULLS LAST LIMIT 1) UPDATE territories SET area = (SELECT p FROM lg), area_sqm = ST_Area((SELECT p FROM lg)::geography) WHERE owner_id = $2 RETURNING area;`;
-        const cutResult = await client.query(smartCutQuery, [newClaimWKT, victimId]);
+        const smartCutQuery = `
+          WITH rem AS (SELECT (ST_Dump(ST_CollectionExtract(ST_Difference((SELECT area FROM territories WHERE owner_id = $1), ${newClaimGeom}), 3))).geom AS p), 
+               lg AS (SELECT p FROM rem ORDER BY ST_Area(p) DESC NULLS LAST LIMIT 1) 
+          UPDATE territories SET area = (SELECT p FROM lg), area_sqm = ST_Area((SELECT p FROM lg)::geography) WHERE owner_id = $1 RETURNING area;
+        `;
+        const cutResult = await client.query(smartCutQuery, [victimId]);
         if (cutResult.rowCount === 0 || cutResult.rows[0].area === null) { await client.query('UPDATE territories SET area = NULL, area_sqm = NULL WHERE owner_id = $1', [victimId]); io.emit('playerTerritoriesCleared', { ownerId: victimId }); }
       }
 
       const playerInfoRes = await client.query('SELECT username FROM territories WHERE owner_id = $1', [player.googleId]);
       const currentUsername = playerInfoRes.rows[0]?.username || player.name;
 
-      // ✅ THIS IS THE CORRECTED QUERY
+      // The new, safe upsert query
       const upsertQuery = `
           INSERT INTO territories (owner_id, username, area, area_sqm)
-          VALUES ($1, $2, ST_GeomFromText($3, 4326), $4)
+          VALUES ($1, $2, ${newClaimGeom}, $3)
           ON CONFLICT (owner_id) DO UPDATE 
           SET 
-              area = ST_CollectionExtract(ST_Union(COALESCE(territories.area, 'GEOMETRYCOLLECTION EMPTY'::geometry), ST_GeomFromText($3, 4326)), 3),
+              area = ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3),
               area_sqm = ST_Area((
-                  ST_CollectionExtract(ST_Union(COALESCE(territories.area, 'GEOMETRYCOLLECTION EMPTY'::geometry), ST_GeomFromText($3, 4326)), 3)
+                  ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3)
               )::geography);
       `;
-      // We pass currentUsername for the INSERT, but the UPDATE will use the existing geometry.
-      await client.query(upsertQuery, [player.googleId, currentUsername, newClaimWKT, newArea]);
+      await client.query(upsertQuery, [player.googleId, currentUsername, newArea]);
       
       const finalResult = await client.query(`SELECT owner_id, username, profile_image_url, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories WHERE owner_id = ANY($1::varchar[])`, [updatedOwnerIds]);
       const batchUpdateData = finalResult.rows.map(row => ({ ownerId: row.owner_id, ownerName: row.username, profileImageUrl: row.profile_image_url, geojson: JSON.parse(row.geojson), area: row.area_sqm })).filter(d => d.geojson != null);
