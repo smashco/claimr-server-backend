@@ -42,7 +42,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-const players = {}; 
+const players = {};
 
 const setupDatabase = async () => {
   const client = await pool.connect();
@@ -100,9 +100,9 @@ app.get('/check-profile', async (req, res) => {
     const { googleId } = req.query;
     if (!googleId) return res.status(400).json({ error: 'googleId is required.' });
     try {
-        const result = await pool.query('SELECT username, profile_image_url FROM territories WHERE owner_id = $1', [googleId]);
+        const result = await pool.query('SELECT username, profile_image_url, area_sqm FROM territories WHERE owner_id = $1', [googleId]);
         if (result.rowCount > 0 && result.rows[0].username) {
-            res.json({ profileExists: true, username: result.rows[0].username, profileImageUrl: result.rows[0].profile_image_url });
+            res.json({ profileExists: true, username: result.rows[0].username, profileImageUrl: result.rows[0].profile_image_url, area_sqm: result.rows[0].area_sqm });
         } else {
             res.json({ profileExists: false });
         }
