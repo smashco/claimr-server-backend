@@ -131,8 +131,13 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// --- Basic & Profile API Endpoints ---
+// --- API Endpoints ---
 app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
+
+app.get('/ping', (req, res) => {
+    console.log('[API] Server was pinged, dyno is awake.');
+    res.status(200).json({ success: true, message: 'pong' });
+});
 
 app.get('/check-profile', async (req, res) => {
     const { googleId } = req.query;
@@ -205,7 +210,6 @@ app.post('/setup-profile', async (req, res) => {
     }
 });
 
-// --- Leaderboard & User Rank Endpoints ---
 app.get('/leaderboard', async (req, res) => {
     try {
         const result = await pool.query(`
@@ -237,8 +241,6 @@ app.get('/user-rank', async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch user rank' });
     }
 });
-
-// --- CLAN API ENDPOINTS ---
 
 app.get('/leaderboard/clans', async (req, res) => {
     try {
@@ -428,7 +430,22 @@ async function broadcastAllPlayers() { /* ... unchanged ... */ }
 io.on('connection', (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
   
-  socket.on('playerJoined', async (data) => { /* ... unchanged ... */ });
+  socket.on('playerJoined', async (data) => {
+    if (!data || !data.googleId) return;
+    players[socket.id] = { id: socket.id, name: data.name, googleId: data.googleId, activeTrail: [], lastKnownPosition: null, isDrawing: false };
+    console.log(`[SERVER] Player ${socket.id} (${data.googleId}) has joined as "${players[socket.id].name}".`);
+
+    try {
+        const result = await pool.query("SELECT owner_id, username, profile_image_url, ST_AsGeoJSON(area) as geojson, area_sqm FROM territories");
+        const activeTerritories = result.rows.filter(row => row.geojson).map(row => ({ ownerId: row.owner_id, ownerName: row.username, profileImageUrl: row.profile_image_url, geojson: JSON.parse(row.geojson), area: row.area_sqm }));
+        const playerHasRecord = result.rows.some(row => row.owner_id === data.googleId && row.username);
+        socket.emit('existingTerritories', { territories: activeTerritories, playerHasRecord: playerHasRecord });
+    } catch (err) { 
+      console.error('[DB] ERROR fetching initial territories:', err);
+      socket.emit('existingTerritories', { territories: [], playerHasRecord: false });
+    }
+  });
+
   socket.on('locationUpdate', (data) => { /* ... unchanged ... */ });
   socket.on('startDrawingTrail', () => { /* ... unchanged ... */ });
   socket.on('stopDrawingTrail', () => { /* ... unchanged ... */ });
