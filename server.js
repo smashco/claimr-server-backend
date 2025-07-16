@@ -128,6 +128,14 @@ const setupDatabase = async () => {
 
 
 // --- Middleware ---
+const checkAdminSecret = (req, res, next) => {
+    const { secret } = req.query;
+    if (!process.env.ADMIN_SECRET_KEY || secret !== process.env.ADMIN_SECRET_KEY) {
+        return res.status(403).send('Forbidden: Invalid or missing secret key.');
+    }
+    next();
+};
+
 const authenticate = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -428,6 +436,119 @@ app.delete('/clans/members/me', authenticate, async (req, res) => {
         await client.query('ROLLBACK');
         console.error('[API] Error leaving clan:', err);
         res.status(500).json({ message: 'Server error while leaving clan.' });
+    } finally {
+        client.release();
+    }
+});
+
+// --- NEW ENDPOINTS FOR JOIN REQUESTS ---
+app.post('/clans/:id/requests', authenticate, async (req, res) => {
+    const { id: clanId } = req.params;
+    const { user_id } = req.user;
+
+    try {
+        const memberCheck = await pool.query('SELECT 1 FROM clan_members WHERE user_id = $1', [user_id]);
+        if (memberCheck.rowCount > 0) {
+            return res.status(409).json({ message: 'You are already in a clan.' });
+        }
+        
+        const query = `
+            INSERT INTO clan_join_requests (clan_id, user_id, status)
+            VALUES ($1, $2, 'pending')
+            ON CONFLICT (clan_id, user_id) DO NOTHING;
+        `;
+        await pool.query(query, [clanId, user_id]);
+        res.sendStatus(201);
+    } catch (err) {
+        console.error('[API] Error creating join request:', err);
+        res.status(500).json({ message: 'Server error while creating join request.' });
+    }
+});
+
+app.get('/clans/:id/requests', authenticate, async (req, res) => {
+    const { id: clanId } = req.params;
+    const { user_id } = req.user;
+
+    try {
+        const leaderCheck = await pool.query('SELECT 1 FROM clans WHERE id = $1 AND leader_id = $2', [clanId, user_id]);
+        if (leaderCheck.rowCount === 0) {
+            return res.status(403).json({ message: 'You are not the leader of this clan.' });
+        }
+
+        const query = `
+            SELECT
+                cjr.id as request_id,
+                t.owner_id as user_id,
+                t.username,
+                t.profile_image_url,
+                cjr.requested_at
+            FROM clan_join_requests cjr
+            JOIN territories t ON cjr.user_id = t.owner_id
+            WHERE cjr.clan_id = $1 AND cjr.status = 'pending'
+            ORDER BY cjr.requested_at ASC;
+        `;
+        const result = await pool.query(query, [clanId]);
+        res.status(200).json(result.rows);
+    } catch (err) {
+        console.error('[API] Error fetching join requests:', err);
+        res.status(500).json({ message: 'Server error while fetching requests.' });
+    }
+});
+
+app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
+    const { requestId } = req.params;
+    const { status } = req.body;
+    const { user_id: leaderId } = req.user;
+
+    if (!['approved', 'denied'].includes(status)) {
+        return res.status(400).json({ message: 'Invalid status provided.' });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        const requestQuery = `
+            SELECT cjr.clan_id, cjr.user_id, c.leader_id
+            FROM clan_join_requests cjr
+            JOIN clans c ON cjr.clan_id = c.id
+            WHERE cjr.id = $1;
+        `;
+        const requestResult = await client.query(requestQuery, [requestId]);
+        if (requestResult.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ message: 'Request not found.' });
+        }
+
+        const { clan_id, user_id, leader_id } = requestResult.rows[0];
+        if (leader_id !== leaderId) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ message: 'You are not authorized to manage this request.' });
+        }
+
+        if (status === 'denied') {
+            await client.query('DELETE FROM clan_join_requests WHERE id = $1', [requestId]);
+        }
+        
+        if (status === 'approved') {
+            const memberCountRes = await client.query('SELECT COUNT(*) as count FROM clan_members WHERE clan_id = $1', [clan_id]);
+            const memberCount = parseInt(memberCountRes.rows[0].count, 10);
+            if (memberCount >= 20) {
+                 await client.query('ROLLBACK');
+                 return res.status(409).json({ message: 'Clan is full.' });
+            }
+            
+            await client.query('INSERT INTO clan_members (clan_id, user_id, role) VALUES ($1, $2, $3)', [clan_id, user_id, 'member']);
+            await client.query('DELETE FROM clan_join_requests WHERE id = $1', [requestId]);
+        }
+        
+        await client.query('COMMIT');
+        res.status(200).json({ message: `Request successfully ${status}.` });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('[API] Error managing join request:', err);
+        res.status(500).json({ message: 'Server error while managing request.' });
     } finally {
         client.release();
     }
