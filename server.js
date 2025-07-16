@@ -554,8 +554,25 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     }
 });
 
+
 // --- Socket.IO Logic ---
-async function broadcastAllPlayers() { /* ... unchanged ... */ }
+async function broadcastAllPlayers() {
+    const playerIds = Object.keys(players);
+    if (playerIds.length === 0) return;
+    const googleIds = Object.values(players).map(p => p.googleId).filter(id => id);
+    if (googleIds.length === 0) return;
+    const profileQuery = await pool.query('SELECT owner_id, username, profile_image_url FROM territories WHERE owner_id = ANY($1::varchar[])', [googleIds]);
+    const profiles = profileQuery.rows.reduce((acc, row) => {
+        acc[row.owner_id] = { username: row.username, imageUrl: row.profile_image_url };
+        return acc;
+    }, {});
+    const allPlayersData = Object.values(players).map(p => {
+        const profile = profiles[p.googleId] || {};
+        return { id: p.id, name: profile.username || p.name, imageUrl: profile.imageUrl, lastKnownPosition: p.lastKnownPosition };
+    });
+    io.emit('allPlayersUpdate', allPlayersData);
+}
+
 io.on('connection', (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
   
