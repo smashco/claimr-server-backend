@@ -145,7 +145,6 @@ const authenticate = async (req, res, next) => {
   try {
     const decodedToken = await admin.auth().verifyIdToken(idToken);
     req.user = decodedToken;
-    // Extract the Google ID from the token's identity providers
     if (decodedToken.firebase.identities && decodedToken.firebase.identities['google.com']) {
         req.user.googleId = decodedToken.firebase.identities['google.com'][0];
     }
@@ -287,7 +286,7 @@ app.get('/leaderboard/clans', async (req, res) => {
 
 app.post('/clans', authenticate, async (req, res) => {
     const { name, tag, description } = req.body;
-    const leaderId = req.user.googleId; // Use Google ID from auth middleware
+    const leaderId = req.user.googleId;
     if (!name || !tag || !leaderId) return res.status(400).json({ error: 'Name, tag, and leaderId are required' });
 
     const client = await pool.connect();
@@ -517,7 +516,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
         await client.query('BEGIN');
         
         const requestQuery = `
-            SELECT cjr.clan_id, cjr.user_id, c.leader_id
+            SELECT cjr.clan_id, cjr.user_id as applicant_google_id, c.leader_id
             FROM clan_join_requests cjr
             JOIN clans c ON cjr.clan_id = c.id
             WHERE cjr.id = $1;
@@ -528,7 +527,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
             return res.status(404).json({ message: 'Request not found.' });
         }
 
-        const { clan_id, user_id, leader_id } = requestResult.rows[0];
+        const { clan_id, applicant_google_id, leader_id } = requestResult.rows[0];
         if (leader_id !== googleId) {
             await client.query('ROLLBACK');
             return res.status(403).json({ message: 'You are not authorized to manage this request.' });
@@ -546,8 +545,28 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
                  return res.status(409).json({ message: 'Clan is full.' });
             }
             
-            await client.query('INSERT INTO clan_members (clan_id, user_id, role) VALUES ($1, $2, $3)', [clan_id, user_id, 'member']);
+            await client.query('INSERT INTO clan_members (clan_id, user_id, role) VALUES ($1, $2, $3)', [clan_id, applicant_google_id, 'member']);
             await client.query('DELETE FROM clan_join_requests WHERE id = $1', [requestId]);
+            
+            const newMemberSocketId = Object.keys(players).find(id => players[id].googleId === applicant_google_id);
+            if (newMemberSocketId) {
+                const newClanInfoRes = await client.query(`
+                    SELECT c.id, c.name, c.tag, cm.role, (c.base_location IS NOT NULL) as base_is_set
+                    FROM clans c JOIN clan_members cm ON c.id = cm.clan_id
+                    WHERE c.id = $1 AND cm.user_id = $2;
+                `, [clan_id, applicant_google_id]);
+
+                if (newClanInfoRes.rowCount > 0) {
+                    const newClanInfo = newClanInfoRes.rows[0];
+                    io.to(newMemberSocketId).emit('clanStatusUpdated', {
+                        id: newClanInfo.id.toString(),
+                        name: newClanInfo.name,
+                        tag: newClanInfo.tag,
+                        role: newClanInfo.role,
+                        base_is_set: newClanInfo.base_is_set
+                    });
+                }
+            }
         }
         
         await client.query('COMMIT');
