@@ -55,7 +55,6 @@ const setupDatabase = async () => {
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
     console.log('[DB] PostGIS extension is enabled.');
 
-    // Original territories table
     await client.query(`
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
@@ -70,7 +69,6 @@ const setupDatabase = async () => {
     `);
     console.log('[DB] "territories" table is ready.');
 
-    // NEW: Clans table
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
         id SERIAL PRIMARY KEY,
@@ -85,25 +83,23 @@ const setupDatabase = async () => {
     `);
     console.log('[DB] "clans" table is ready.');
 
-    // NEW: Clan members linking table
     await client.query(`
       CREATE TABLE IF NOT EXISTS clan_members (
         clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
         user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-        role VARCHAR(20) NOT NULL DEFAULT 'member', -- 'leader' or 'member'
+        role VARCHAR(20) NOT NULL DEFAULT 'member',
         joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (clan_id, user_id)
       );
     `);
     console.log('[DB] "clan_members" table is ready.');
 
-    // NEW: Clan join requests table
     await client.query(`
       CREATE TABLE IF NOT EXISTS clan_join_requests (
         id SERIAL PRIMARY KEY,
         clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
         user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-        status VARCHAR(20) NOT NULL DEFAULT 'pending', -- 'pending', 'approved', 'denied'
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
         requested_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(clan_id, user_id)
       );
@@ -119,14 +115,25 @@ const setupDatabase = async () => {
 };
 
 
-// --- Middleware (Unchanged) ---
-const checkAdminSecret = (req, res, next) => { /* ... unchanged ... */ };
-const authenticate = async (req, res, next) => { /* ... unchanged ... */ };
+// --- Middleware ---
+const authenticate = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).send('Unauthorized: No token provided.');
+  }
+  const idToken = authHeader.split('Bearer ')[1];
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    req.user = decodedToken;
+    next();
+  } catch (error) {
+    res.status(403).send('Unauthorized: Invalid token.');
+  }
+};
 
-// --- Basic & Profile API Endpoints (Updated) ---
+// --- Basic & Profile API Endpoints ---
 app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
 
-// MODIFIED: /check-profile now also returns clan info
 app.get('/check-profile', async (req, res) => {
     const { googleId } = req.query;
     if (!googleId) return res.status(400).json({ error: 'googleId is required.' });
@@ -149,12 +156,12 @@ app.get('/check-profile', async (req, res) => {
                 profileExists: true,
                 username: row.username,
                 profileImageUrl: row.profile_image_url,
-                area_sqm: row.area_sqm,
+                area_sqm: row.area_sqm || 0,
                 clan_info: null
             };
             if (row.clan_id) {
                 response.clan_info = {
-                    id: row.clan_id,
+                    id: row.clan_id.toString(),
                     name: row.clan_name,
                     tag: row.clan_tag,
                     role: row.clan_role,
@@ -171,13 +178,46 @@ app.get('/check-profile', async (req, res) => {
     }
 });
 
-app.get('/check-username', async (req, res) => { /* ... unchanged ... */ });
-app.post('/setup-profile', async (req, res) => { /* ... unchanged ... */ });
+app.get('/check-username', async (req, res) => {
+    const { username } = req.query;
+    if (!username) return res.status(400).json({ error: 'Username query parameter is required.' });
+    try {
+        const result = await pool.query('SELECT 1 FROM territories WHERE username ILIKE $1', [username]);
+        res.json({ isAvailable: result.rowCount === 0 });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error while checking username.' });
+    }
+});
 
-// --- Leaderboard & User Rank Endpoints (Updated) ---
-app.get('/leaderboard', async (req, res) => { /* ... unchanged ... */ });
+app.post('/setup-profile', async (req, res) => {
+    const { googleId, username, imageUrl, displayName } = req.body;
+    if (!googleId || !username || !imageUrl || !displayName) return res.status(400).json({ error: 'Missing required profile data.' });
+    try {
+        const upsertQuery = `
+            INSERT INTO territories (owner_id, owner_name, username, profile_image_url) VALUES ($1, $2, $3, $4)
+            ON CONFLICT (owner_id) DO UPDATE SET username = $3, profile_image_url = $4, owner_name = $2;
+        `;
+        await pool.query(upsertQuery, [googleId, displayName, username, imageUrl]);
+        res.status(200).json({ success: true, message: 'Profile set up successfully.' });
+    } catch (err) {
+        if (err.code === '23505') return res.status(409).json({ error: 'Username is already taken.' });
+        res.status(500).json({ error: 'Failed to set up profile.' });
+    }
+});
 
-// NEW: User Rank endpoint
+// --- Leaderboard & User Rank Endpoints ---
+app.get('/leaderboard', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT owner_id, username as owner_name, profile_image_url, area_sqm, RANK() OVER (ORDER BY area_sqm DESC) as rank
+            FROM territories WHERE area_sqm > 0 AND username IS NOT NULL ORDER BY area_sqm DESC LIMIT 100;
+        `);
+        res.status(200).json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch leaderboard' });
+    }
+});
+
 app.get('/user-rank', async (req, res) => {
     const { googleId } = req.query;
     if (!googleId) return res.status(400).json({ error: 'googleId is required' });
@@ -191,11 +231,7 @@ app.get('/user-rank', async (req, res) => {
             SELECT rank FROM ranked_users WHERE owner_id = $1;
         `;
         const result = await pool.query(query, [googleId]);
-        if (result.rowCount > 0) {
-            res.status(200).json({ rank: result.rows[0].rank });
-        } else {
-            res.status(200).json({ rank: 'N/A' }); // User not ranked yet
-        }
+        res.status(200).json({ rank: result.rowCount > 0 ? result.rows[0].rank : 'N/A' });
     } catch (err) {
         console.error('[API] Error fetching user rank:', err);
         res.status(500).json({ error: 'Failed to fetch user rank' });
@@ -204,7 +240,6 @@ app.get('/user-rank', async (req, res) => {
 
 // --- CLAN API ENDPOINTS ---
 
-// NEW: GET /leaderboard/clans
 app.get('/leaderboard/clans', async (req, res) => {
     try {
         const query = `
@@ -227,35 +262,29 @@ app.get('/leaderboard/clans', async (req, res) => {
     }
 });
 
-// NEW: POST /clans
-app.post('/clans', async (req, res) => {
-    const { name, tag, description, leaderId } = req.body;
-    if (!name || !tag || !leaderId) return res.status(400).json({ error: 'Name, tag, and leaderId are required' });
+app.post('/clans', authenticate, async (req, res) => {
+    const { name, tag, description } = req.body;
+    const leaderId = req.user.user_id;
+    if (!name || !tag) return res.status(400).json({ error: 'Name and tag are required' });
 
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        // Check if user is already in a clan
         const memberCheck = await client.query('SELECT 1 FROM clan_members WHERE user_id = $1', [leaderId]);
         if (memberCheck.rowCount > 0) {
             await client.query('ROLLBACK');
             return res.status(409).json({ message: 'You are already in a clan.' });
         }
 
-        // Create the clan
         const insertClanQuery = 'INSERT INTO clans(name, tag, description, leader_id) VALUES($1, $2, $3, $4) RETURNING id, name, tag';
         const clanResult = await client.query(insertClanQuery, [name, tag, description || '', leaderId]);
         const newClan = clanResult.rows[0];
 
-        // Add the leader to the clan_members table
-        const insertMemberQuery = 'INSERT INTO clan_members(clan_id, user_id, role) VALUES($1, $2, $3)';
-        await client.query(insertMemberQuery, [newClan.id, leaderId, 'leader']);
-
+        await client.query('INSERT INTO clan_members(clan_id, user_id, role) VALUES($1, $2, $3)', [newClan.id, leaderId, 'leader']);
         await client.query('COMMIT');
 
-        // Return the info needed for the AppUser model
         res.status(201).json({
-            id: newClan.id,
+            id: newClan.id.toString(),
             name: newClan.name,
             tag: newClan.tag,
             role: 'leader',
@@ -263,9 +292,7 @@ app.post('/clans', async (req, res) => {
         });
     } catch (err) {
         await client.query('ROLLBACK');
-        if (err.code === '23505') { // Unique constraint violation
-            return res.status(409).json({ message: 'A clan with that name or tag already exists.' });
-        }
+        if (err.code === '23505') return res.status(409).json({ message: 'A clan with that name or tag already exists.' });
         console.error('[API] Error creating clan:', err);
         res.status(500).json({ message: 'Server error while creating clan.' });
     } finally {
@@ -273,10 +300,8 @@ app.post('/clans', async (req, res) => {
     }
 });
 
-// NEW: GET /clans
-app.get('/clans', async (req, res) => {
-    const { userId } = req.query;
-    if (!userId) return res.status(400).json({ error: 'userId is required' });
+app.get('/clans', authenticate, async (req, res) => {
+    const { user_id } = req.user;
     try {
         const query = `
             SELECT 
@@ -288,7 +313,7 @@ app.get('/clans', async (req, res) => {
             JOIN territories t ON c.leader_id = t.owner_id
             ORDER BY member_count DESC;
         `;
-        const result = await pool.query(query, [userId]);
+        const result = await pool.query(query, [user_id]);
         res.status(200).json(result.rows);
     } catch (err) {
         console.error('[API] Error fetching clans list:', err);
@@ -296,8 +321,40 @@ app.get('/clans', async (req, res) => {
     }
 });
 
-// NEW: PUT /clans/:id/photo
-app.put('/clans/:id/photo', async (req, res) => {
+app.get('/clans/:id', authenticate, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const clanQuery = `
+            SELECT 
+                c.id, c.name, c.tag, c.description, c.clan_image_url,
+                t.username as leader_name,
+                (SELECT COUNT(*) FROM clan_members cm WHERE cm.clan_id = c.id) as member_count,
+                (SELECT COALESCE(SUM(area_sqm), 0) FROM territories WHERE owner_id IN (SELECT user_id FROM clan_members WHERE clan_id = c.id)) as total_area_sqm
+            FROM clans c
+            JOIN territories t ON c.leader_id = t.owner_id
+            WHERE c.id = $1;
+        `;
+        const clanResult = await pool.query(clanQuery, [id]);
+        if (clanResult.rowCount === 0) return res.status(404).json({ error: 'Clan not found' });
+        
+        const clanDetails = clanResult.rows[0];
+        const membersQuery = `
+            SELECT t.owner_id as user_id, t.username, t.profile_image_url, cm.role, COALESCE(t.area_sqm, 0) as area_claimed_sqm
+            FROM clan_members cm
+            JOIN territories t ON cm.user_id = t.owner_id
+            WHERE cm.clan_id = $1 ORDER BY cm.role DESC, t.area_sqm DESC;
+        `;
+        const membersResult = await pool.query(membersQuery, [id]);
+        
+        clanDetails.members = membersResult.rows;
+        res.status(200).json(clanDetails);
+    } catch (err) {
+        console.error('[API] Error fetching clan details:', err);
+        res.status(500).json({ error: 'Failed to fetch clan details' });
+    }
+});
+
+app.put('/clans/:id/photo', authenticate, async (req, res) => {
     const { id } = req.params;
     const { imageUrl } = req.body;
     if (!imageUrl) return res.status(400).json({ error: 'imageUrl is required' });
@@ -310,8 +367,7 @@ app.put('/clans/:id/photo', async (req, res) => {
     }
 });
 
-// NEW: POST /clans/:id/set-base
-app.post('/clans/:id/set-base', async (req, res) => {
+app.post('/clans/:id/set-base', authenticate, async (req, res) => {
     const { id } = req.params;
     const { baseLocation } = req.body;
     if (!baseLocation || !baseLocation.lat || !baseLocation.lng) return res.status(400).json({ error: 'baseLocation is required' });
@@ -326,11 +382,46 @@ app.post('/clans/:id/set-base', async (req, res) => {
     }
 });
 
-// --- Admin Endpoints (Unchanged) ---
-app.post('/dev/reset-user', authenticate, async (req, res) => { /* ... unchanged ... */ });
-app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => { /* ... unchanged ... */ });
-app.get('/admin/reset-all-territories', checkAdminSecret, async (req, res) => { /* ... unchanged ... */ });
+app.delete('/clans/members/me', authenticate, async (req, res) => {
+    const { user_id } = req.user;
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        const memberInfoQuery = `
+            SELECT clan_id, role, (SELECT COUNT(*) FROM clan_members WHERE clan_id = cm.clan_id) as member_count
+            FROM clan_members cm WHERE user_id = $1
+        `;
+        const memberInfoRes = await client.query(memberInfoQuery, [user_id]);
 
+        if (memberInfoRes.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ message: "You are not in a clan." });
+        }
+        
+        const { clan_id, role, member_count } = memberInfoRes.rows[0];
+
+        if (role === 'leader' && member_count > 1) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ message: "A leader cannot leave a clan with members. Transfer leadership first." });
+        }
+        if (role === 'leader' && member_count <= 1) {
+            await client.query('DELETE FROM clans WHERE id = $1', [clan_id]);
+        } else {
+            await client.query('DELETE FROM clan_members WHERE user_id = $1', [user_id]);
+        }
+        
+        await client.query('COMMIT');
+        res.status(200).json({ message: "Successfully left the clan." });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('[API] Error leaving clan:', err);
+        res.status(500).json({ message: 'Server error while leaving clan.' });
+    } finally {
+        client.release();
+    }
+});
 
 // --- Socket.IO Logic (Unchanged) ---
 async function broadcastAllPlayers() { /* ... unchanged ... */ }
