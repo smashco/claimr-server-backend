@@ -444,10 +444,14 @@ app.delete('/clans/members/me', authenticate, async (req, res) => {
 // --- NEW ENDPOINTS FOR JOIN REQUESTS ---
 app.post('/clans/:id/requests', authenticate, async (req, res) => {
     const { id: clanId } = req.params;
-    const { user_id } = req.user;
+    const { userId } = req.body; // Using userId from body now
+
+    if (!userId) {
+        return res.status(400).json({ message: 'User ID is required in the request body.' });
+    }
 
     try {
-        const memberCheck = await pool.query('SELECT 1 FROM clan_members WHERE user_id = $1', [user_id]);
+        const memberCheck = await pool.query('SELECT 1 FROM clan_members WHERE user_id = $1', [userId]);
         if (memberCheck.rowCount > 0) {
             return res.status(409).json({ message: 'You are already in a clan.' });
         }
@@ -457,7 +461,7 @@ app.post('/clans/:id/requests', authenticate, async (req, res) => {
             VALUES ($1, $2, 'pending')
             ON CONFLICT (clan_id, user_id) DO NOTHING;
         `;
-        await pool.query(query, [clanId, user_id]);
+        await pool.query(query, [clanId, userId]);
         res.sendStatus(201);
     } catch (err) {
         console.error('[API] Error creating join request:', err);
