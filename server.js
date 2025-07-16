@@ -145,8 +145,13 @@ const authenticate = async (req, res, next) => {
   try {
     const decodedToken = await admin.auth().verifyIdToken(idToken);
     req.user = decodedToken;
+    // Extract the Google ID from the token's identity providers
+    if (decodedToken.firebase.identities && decodedToken.firebase.identities['google.com']) {
+        req.user.googleId = decodedToken.firebase.identities['google.com'][0];
+    }
     next();
   } catch (error) {
+    console.error("Auth Error:", error);
     res.status(403).send('Unauthorized: Invalid token.');
   }
 };
@@ -282,8 +287,8 @@ app.get('/leaderboard/clans', async (req, res) => {
 
 app.post('/clans', authenticate, async (req, res) => {
     const { name, tag, description } = req.body;
-    const leaderId = req.user.user_id;
-    if (!name || !tag) return res.status(400).json({ error: 'Name and tag are required' });
+    const leaderId = req.user.googleId; // Use Google ID from auth middleware
+    if (!name || !tag || !leaderId) return res.status(400).json({ error: 'Name, tag, and leaderId are required' });
 
     const client = await pool.connect();
     try {
@@ -319,7 +324,7 @@ app.post('/clans', authenticate, async (req, res) => {
 });
 
 app.get('/clans', authenticate, async (req, res) => {
-    const { user_id } = req.user;
+    const { googleId } = req.user;
     try {
         const query = `
             SELECT 
@@ -331,7 +336,7 @@ app.get('/clans', authenticate, async (req, res) => {
             JOIN territories t ON c.leader_id = t.owner_id
             ORDER BY member_count DESC;
         `;
-        const result = await pool.query(query, [user_id]);
+        const result = await pool.query(query, [googleId]);
         res.status(200).json(result.rows);
     } catch (err) {
         console.error('[API] Error fetching clans list:', err);
@@ -401,7 +406,7 @@ app.post('/clans/:id/set-base', authenticate, async (req, res) => {
 });
 
 app.delete('/clans/members/me', authenticate, async (req, res) => {
-    const { user_id } = req.user;
+    const { googleId } = req.user;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -410,7 +415,7 @@ app.delete('/clans/members/me', authenticate, async (req, res) => {
             SELECT clan_id, role, (SELECT COUNT(*) FROM clan_members WHERE clan_id = cm.clan_id) as member_count
             FROM clan_members cm WHERE user_id = $1
         `;
-        const memberInfoRes = await client.query(memberInfoQuery, [user_id]);
+        const memberInfoRes = await client.query(memberInfoQuery, [googleId]);
 
         if (memberInfoRes.rowCount === 0) {
             await client.query('ROLLBACK');
@@ -426,7 +431,7 @@ app.delete('/clans/members/me', authenticate, async (req, res) => {
         if (role === 'leader' && member_count <= 1) {
             await client.query('DELETE FROM clans WHERE id = $1', [clan_id]);
         } else {
-            await client.query('DELETE FROM clan_members WHERE user_id = $1', [user_id]);
+            await client.query('DELETE FROM clan_members WHERE user_id = $1', [googleId]);
         }
         
         await client.query('COMMIT');
@@ -441,10 +446,9 @@ app.delete('/clans/members/me', authenticate, async (req, res) => {
     }
 });
 
-// --- NEW ENDPOINTS FOR JOIN REQUESTS ---
 app.post('/clans/:id/requests', authenticate, async (req, res) => {
     const { id: clanId } = req.params;
-    const { userId } = req.body; // Using userId from body now
+    const { userId } = req.body;
 
     if (!userId) {
         return res.status(400).json({ message: 'User ID is required in the request body.' });
@@ -471,10 +475,10 @@ app.post('/clans/:id/requests', authenticate, async (req, res) => {
 
 app.get('/clans/:id/requests', authenticate, async (req, res) => {
     const { id: clanId } = req.params;
-    const { user_id } = req.user;
+    const { googleId } = req.user;
 
     try {
-        const leaderCheck = await pool.query('SELECT 1 FROM clans WHERE id = $1 AND leader_id = $2', [clanId, user_id]);
+        const leaderCheck = await pool.query('SELECT 1 FROM clans WHERE id = $1 AND leader_id = $2', [clanId, googleId]);
         if (leaderCheck.rowCount === 0) {
             return res.status(403).json({ message: 'You are not the leader of this clan.' });
         }
@@ -502,7 +506,7 @@ app.get('/clans/:id/requests', authenticate, async (req, res) => {
 app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     const { requestId } = req.params;
     const { status } = req.body;
-    const { user_id: leaderId } = req.user;
+    const { googleId } = req.user;
 
     if (!['approved', 'denied'].includes(status)) {
         return res.status(400).json({ message: 'Invalid status provided.' });
@@ -525,7 +529,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
         }
 
         const { clan_id, user_id, leader_id } = requestResult.rows[0];
-        if (leader_id !== leaderId) {
+        if (leader_id !== googleId) {
             await client.query('ROLLBACK');
             return res.status(403).json({ message: 'You are not authorized to manage this request.' });
         }
