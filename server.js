@@ -1,5 +1,3 @@
-// server/index.js (This code is correct, the issue is likely in deployment)
-
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -635,20 +633,21 @@ io.on('connection', (socket) => {
   socket.on('playerJoined', async ({ googleId, name, gameMode }) => {
     if (!googleId || !gameMode) return;
     
-    const memberInfo = await pool.query('SELECT clan_id FROM clan_members WHERE user_id = $1', [googleId]);
+    const memberInfo = await pool.query('SELECT clan_id, role FROM clan_members WHERE user_id = $1', [googleId]);
     const clanId = memberInfo.rowCount > 0 ? memberInfo.rows[0].clan_id : null;
+    const role = memberInfo.rowCount > 0 ? memberInfo.rows[0].role : null;
 
-    players[socket.id] = { id: socket.id, name, googleId, clanId, gameMode, activeTrail: [], lastKnownPosition: null, isDrawing: false };
-    console.log(`[SERVER] Player ${socket.id} (${googleId}) joined in [${gameMode}] mode. Clan ID: ${clanId}`);
+    players[socket.id] = { id: socket.id, name, googleId, clanId, role, gameMode, activeTrail: [], lastKnownPosition: null, isDrawing: false };
+    console.log(`[SERVER] Player ${socket.id} (${name}) joined in [${gameMode}] mode. Clan ID: ${clanId}`);
 
     try {
         let query;
         if (gameMode === 'clan') {
             query = `
                 SELECT 
-                    ct.clan_id::text as ownerId,
-                    c.name as ownerName,
-                    c.clan_image_url as profileImageUrl,
+                    ct.clan_id::text as "ownerId",
+                    c.name as "ownerName",
+                    c.clan_image_url as "profileImageUrl",
                     ST_AsGeoJSON(ct.area) as geojson, 
                     ct.area_sqm as area
                 FROM clan_territories ct
@@ -657,9 +656,9 @@ io.on('connection', (socket) => {
         } else {
              query = `
                 SELECT 
-                    owner_id as ownerId, 
-                    username as ownerName, 
-                    profile_image_url as profileImageUrl, 
+                    owner_id as "ownerId", 
+                    username as "ownerName", 
+                    profile_image_url as "profileImageUrl", 
                     ST_AsGeoJSON(area) as geojson, 
                     area_sqm as area
                 FROM territories;
@@ -669,19 +668,12 @@ io.on('connection', (socket) => {
         const result = await pool.query(query);
         const activeTerritories = result.rows
             .filter(row => row.geojson)
-            .map(row => ({ 
-                ...row,
-                ownerId: row.ownerid.toString(),
-                geojson: JSON.parse(row.geojson), 
-            }));
+            .map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
             
         const playerProfileResult = await pool.query('SELECT 1 FROM territories WHERE owner_id = $1 AND username IS NOT NULL', [googleId]);
         const playerHasRecord = playerProfileResult.rowCount > 0;
 
-        socket.emit('existingTerritories', { 
-            territories: activeTerritories, 
-            playerHasRecord: playerHasRecord 
-        });
+        socket.emit('existingTerritories', { territories: activeTerritories, playerHasRecord });
 
         if (gameMode === 'clan' && clanId && activeClanBases[clanId]) {
             socket.emit('clanBaseActivated', activeClanBases[clanId]);
@@ -732,82 +724,88 @@ io.on('connection', (socket) => {
     
     const client = await pool.connect();
     try {
+        await client.query('BEGIN');
         const areaResult = await client.query(`SELECT ST_Area(${newClaimGeom}::geography) as area;`);
         const newArea = areaResult.rows[0].area;
         if (newArea < MINIMUM_CLAIM_AREA_SQM) {
             socket.emit('claimRejected', { reason: `Area is too small (${Math.round(newArea)}m²).` });
+            await client.query('ROLLBACK');
+            client.release();
             return;
         }
-
-        await client.query('BEGIN');
         
-        let batchUpdateData;
+        let batchUpdateData = [];
+        let finalOwnerIds = [];
 
         if (gameMode === 'clan') {
             const memberInfo = await client.query('SELECT clan_id FROM clan_members WHERE user_id = $1', [player.googleId]);
-            if (memberInfo.rowCount === 0) {
-                socket.emit('claimRejected', { reason: 'You are not in a clan.' });
-                await client.query('ROLLBACK');
-                client.release();
-                return;
-            }
-            const clanId = memberInfo.rows[0].clan_id;
-
-            const existingTerritoryRes = await client.query('SELECT area FROM clan_territories WHERE clan_id = $1', [clanId]);
+            if (memberInfo.rowCount === 0) throw new Error('Player is not in a clan.');
             
-            let combinedGeom = newClaimGeom;
-            if (existingTerritoryRes.rowCount > 0 && existingTerritoryRes.rows[0].area) {
-                combinedGeom = `ST_Union((SELECT area FROM clan_territories WHERE clan_id = ${clanId}), ${newClaimGeom})`;
+            const clanId = memberInfo.rows[0].clan_id;
+            finalOwnerIds.push(clanId.toString());
+
+            // Find victim clans
+            const victimsResult = await client.query(`SELECT clan_id FROM clan_territories WHERE clan_id != $1 AND area IS NOT NULL AND ST_Intersects(area, ${newClaimGeom})`, [clanId]);
+            const victimClanIds = victimsResult.rows.map(r => r.clan_id);
+            finalOwnerIds.push(...victimClanIds.map(id => id.toString()));
+
+            for (const victimId of victimClanIds) {
+                const smartCutQuery = `
+                    WITH rem AS (SELECT (ST_Dump(ST_CollectionExtract(ST_Difference(area, ${newClaimGeom}), 3))).geom AS p FROM clan_territories WHERE clan_id = $1), 
+                         lg AS (SELECT p FROM rem ORDER BY ST_Area(p) DESC NULLS LAST LIMIT 1) 
+                    UPDATE clan_territories SET area = (SELECT p FROM lg), area_sqm = ST_Area(((SELECT p FROM lg))::geography) WHERE clan_id = $1;
+                `;
+                await client.query(smartCutQuery, [victimId]);
             }
-
-            const newTotalAreaRes = await client.query(`SELECT ST_Area((${combinedGeom})::geography) as area`);
-            const newTotalArea = newTotalAreaRes.rows[0].area;
-
+            
+            // Upsert the claiming clan's territory
             const upsertQuery = `
                 INSERT INTO clan_territories (clan_id, owner_id, area, area_sqm)
-                VALUES ($1, $2, ${combinedGeom}, $3)
+                VALUES ($1, $2, ${newClaimGeom}, $3)
                 ON CONFLICT (clan_id) DO UPDATE SET
-                    area = ${combinedGeom},
-                    area_sqm = $3,
+                    area = ST_Union(clan_territories.area, ${newClaimGeom}),
+                    area_sqm = ST_Area(ST_Union(clan_territories.area, ${newClaimGeom})::geography),
                     owner_id = $2;
             `;
-            await client.query(upsertQuery, [clanId, player.googleId, newTotalArea]);
-
-            const finalResult = await client.query(`
-                SELECT clan_id::text as ownerId, c.name as ownerName, c.clan_image_url as profileImageUrl, ST_AsGeoJSON(area) as geojson, area_sqm as area
-                FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = $1;
-            `, [clanId]);
+            await client.query(upsertQuery, [clanId, player.googleId, newArea]);
             
-            batchUpdateData = finalResult.rows.map(row => ({ ...row, ownerId: row.ownerid.toString(), geojson: JSON.parse(row.geojson) }));
+            // Fetch updated data for all affected clans
+            const finalResult = await client.query(`
+                SELECT clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm as area
+                FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[])
+            `, [finalOwnerIds]);
+            batchUpdateData = finalResult.rows.filter(r => r.geojson).map(r => ({ ...r, geojson: JSON.parse(r.geojson) }));
+
         } else { // Solo mode
+            finalOwnerIds.push(player.googleId);
+
             const victimsResult = await client.query(`SELECT owner_id FROM territories WHERE owner_id != $1 AND area IS NOT NULL AND ST_Intersects(area, ${newClaimGeom})`, [player.googleId]);
             const victimIds = victimsResult.rows.map(r => r.owner_id);
+            finalOwnerIds.push(...victimIds);
+
             for (const victimId of victimIds) {
                  const smartCutQuery = `
-                    WITH rem AS (SELECT (ST_Dump(ST_CollectionExtract(ST_Difference((SELECT area FROM territories WHERE owner_id = $1), ${newClaimGeom}), 3))).geom AS p), 
-                        lg AS (SELECT p FROM rem ORDER BY ST_Area(p) DESC NULLS LAST LIMIT 1) 
-                    UPDATE territories SET area = (SELECT p FROM lg), area_sqm = ST_Area((SELECT p FROM lg)::geography) WHERE owner_id = $1;
+                    WITH rem AS (SELECT (ST_Dump(ST_CollectionExtract(ST_Difference(area, ${newClaimGeom}), 3))).geom AS p FROM territories WHERE owner_id = $1), 
+                         lg AS (SELECT p FROM rem ORDER BY ST_Area(p) DESC NULLS LAST LIMIT 1) 
+                    UPDATE territories SET area = (SELECT p FROM lg), area_sqm = ST_Area(((SELECT p FROM lg))::geography) WHERE owner_id = $1;
                 `;
                 await client.query(smartCutQuery, [victimId]);
             }
 
             const upsertQuery = `
-                INSERT INTO territories (owner_id, area, area_sqm) VALUES ($1, ${newClaimGeom}, $2)
-                ON CONFLICT (owner_id) DO UPDATE SET 
-                    area = ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3),
-                    area_sqm = ST_Area((ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3))::geography);
+                UPDATE territories SET
+                    area = ST_CollectionExtract(ST_Union(COALESCE(area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3),
+                    area_sqm = ST_Area((ST_CollectionExtract(ST_Union(COALESCE(area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3))::geography)
+                WHERE owner_id = $1;
             `;
-            await client.query(upsertQuery, [player.googleId, newArea]);
+            await client.query(upsertQuery, [player.googleId]);
             
-            const updatedOwnerIds = [player.googleId, ...victimIds];
             const finalResult = await client.query(`
-                SELECT owner_id as ownerId, username as ownerName, profile_image_url as profileImageUrl, ST_AsGeoJSON(area) as geojson, area_sqm as area 
+                SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm as area 
                 FROM territories WHERE owner_id = ANY($1::varchar[])`, 
-                [updatedOwnerIds]
+                [finalOwnerIds]
             );
-            batchUpdateData = finalResult.rows
-                .filter(row => row.geojson)
-                .map(row => ({ ...row, ownerId: row.ownerid.toString(), geojson: JSON.parse(row.geojson) }));
+            batchUpdateData = finalResult.rows.filter(r => r.geojson).map(r => ({ ...r, geojson: JSON.parse(r.geojson) }));
         }
         
         await client.query('COMMIT');
@@ -857,12 +855,11 @@ io.on('connection', (socket) => {
     console.log(`[SERVER] User disconnected: ${socket.id}`);
     const player = players[socket.id];
     if (player) {
-        // If a leader with an active base disconnects, deactivate the base
         if (player.clanId && activeClanBases[player.clanId] && player.role === 'leader') {
             console.log(`[CLAN] Leader of clan ${player.clanId} disconnected, deactivating base.`);
             delete activeClanBases[player.clanId];
             Object.values(players).forEach(p => {
-              if (p.clanId === player.clanId && p.id !== socket.id) { // Don't message the disconnected socket
+              if (p.clanId === player.clanId && p.id !== socket.id) {
                   io.to(p.id).emit('clanBaseDeactivated');
               }
             });
