@@ -38,7 +38,7 @@ try {
 
 // --- Constants & Database Pool ---
 const PORT = process.env.PORT || 10000;
-const SERVER_TICK_RATE_MS = 100;
+const SERVER_TICK_RATE_MS = 1000;
 const MINIMUM_CLAIM_AREA_SQM = 100;
 
 const pool = new Pool({
@@ -637,16 +637,20 @@ async function broadcastAllPlayers() {
     if (playerIds.length === 0) return;
     const googleIds = Object.values(players).map(p => p.googleId).filter(id => id);
     if (googleIds.length === 0) return;
-    const profileQuery = await pool.query('SELECT owner_id, username, profile_image_url FROM territories WHERE owner_id = ANY($1::varchar[])', [googleIds]);
-    const profiles = profileQuery.rows.reduce((acc, row) => {
-        acc[row.owner_id] = { username: row.username, imageUrl: row.profile_image_url };
-        return acc;
-    }, {});
-    const allPlayersData = Object.values(players).map(p => {
-        const profile = profiles[p.googleId] || {};
-        return { id: p.id, name: profile.username || p.name, imageUrl: profile.imageUrl, lastKnownPosition: p.lastKnownPosition };
-    });
-    io.emit('allPlayersUpdate', allPlayersData);
+    try {
+        const profileQuery = await pool.query('SELECT owner_id, username, profile_image_url FROM territories WHERE owner_id = ANY($1::varchar[])', [googleIds]);
+        const profiles = profileQuery.rows.reduce((acc, row) => {
+            acc[row.owner_id] = { username: row.username, imageUrl: row.profile_image_url };
+            return acc;
+        }, {});
+        const allPlayersData = Object.values(players).map(p => {
+            const profile = profiles[p.googleId] || {};
+            return { id: p.id, name: profile.username || p.name, imageUrl: profile.imageUrl, lastKnownPosition: p.lastKnownPosition };
+        });
+        io.emit('allPlayersUpdate', allPlayersData);
+    } catch(e) {
+        console.error("[Broadcast] Error fetching profiles for broadcast:", e);
+    }
 }
 
 io.on('connection', (socket) => {
@@ -659,7 +663,7 @@ io.on('connection', (socket) => {
     const clanId = memberInfo.rowCount > 0 ? memberInfo.rows[0].clan_id : null;
 
     players[socket.id] = { id: socket.id, name, googleId, clanId, gameMode, activeTrail: [], lastKnownPosition: null, isDrawing: false };
-    console.log(`[SERVER] Player ${socket.id} (${googleId}) joined in [${gameMode}] mode.`);
+    console.log(`[SERVER] Player ${socket.id} (${googleId}) joined in [${gameMode}] mode. Clan ID: ${clanId}`);
 
     try {
         let query;
@@ -705,10 +709,41 @@ io.on('connection', (socket) => {
             playerHasRecord: playerHasRecord 
         });
 
+        if (gameMode === 'clan' && clanId && activeClanBases[clanId]) {
+            socket.emit('clanBaseActivated', activeClanBases[clanId]);
+        }
+
     } catch (err) { 
       console.error('[DB] ERROR fetching initial territories:', err);
       socket.emit('existingTerritories', { territories: [], playerHasRecord: false });
     }
+  });
+
+  socket.on('locationUpdate', (data) => {
+    const player = players[socket.id];
+    if (!player) return;
+    
+    player.lastKnownPosition = data;
+    
+    if (player.isDrawing && Array.isArray(player.activeTrail)) {
+        player.activeTrail.push(data);
+        socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data });
+    }
+  });
+
+  socket.on('startDrawingTrail', () => {
+    const player = players[socket.id];
+    if (!player) return;
+    player.isDrawing = true;
+    player.activeTrail = [];
+    socket.broadcast.emit('trailStarted', { id: socket.id, name: player.name });
+  });
+
+  socket.on('stopDrawingTrail', () => {
+    const player = players[socket.id];
+    if (!player) return;
+    player.isDrawing = false;
+    io.emit('trailCleared', { id: socket.id });
   });
 
   socket.on('claimTerritory', async ({ trail, gameMode }) => {
@@ -816,34 +851,6 @@ io.on('connection', (socket) => {
         client.release();
     }
   });
-  
-  socket.on('activateClanBase', ({ center, radius }) => {
-      const player = players[socket.id];
-      if (!player || !player.clanId) return;
-
-      console.log(`[CLAN] Leader of clan ${player.clanId} activated a base.`);
-      activeClanBases[player.clanId] = { center, radius };
-
-      Object.values(players).forEach(p => {
-          if (p.clanId === player.clanId) {
-              io.to(p.id).emit('clanBaseActivated', { center, radius });
-          }
-      });
-  });
-
-  socket.on('deactivateClanBase', () => {
-      const player = players[socket.id];
-      if (!player || !player.clanId) return;
-
-      console.log(`[CLAN] Leader of clan ${player.clanId} deactivated the base.`);
-      delete activeClanBases[player.clanId];
-
-      Object.values(players).forEach(p => {
-          if (p.clanId === player.clanId) {
-              io.to(p.id).emit('clanBaseDeactivated');
-          }
-      });
-  });
 
   socket.on('disconnect', () => {
     console.log(`[SERVER] User disconnected: ${socket.id}`);
@@ -854,7 +861,7 @@ io.on('connection', (socket) => {
 
 
 // --- Server Start ---
-setInterval(async () => { await broadcastAllPlayers(); }, SERVER_TICK_RATE_MS);
+setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
 const main = async () => {
   server.listen(PORT, () => {
     console.log(`Server listening on *:${PORT}`);
