@@ -268,10 +268,10 @@ app.get('/leaderboard/clans', async (req, res) => {
             SELECT 
                 c.id, c.name, c.tag, c.clan_image_url,
                 COUNT(cm.user_id) as member_count,
-                COALESCE(SUM(t.area_sqm), 0) as total_area_sqm
+                COALESCE(SUM(ct.area_sqm), 0) as total_area_sqm
             FROM clans c
             LEFT JOIN clan_members cm ON c.id = cm.clan_id
-            LEFT JOIN territories t ON cm.user_id = t.owner_id
+            LEFT JOIN clan_territories ct ON c.id = ct.clan_id
             GROUP BY c.id
             ORDER BY total_area_sqm DESC
             LIMIT 100;
@@ -742,11 +742,26 @@ io.on('connection', (socket) => {
             }
             const clanId = memberInfo.rows[0].clan_id;
 
+            const existingTerritoryRes = await client.query(
+                `SELECT ST_Union(area) as total_area FROM clan_territories WHERE clan_id = $1`,
+                [clanId]
+            );
+
+            let combinedGeom = newClaimGeom;
+            if (existingTerritoryRes.rows[0] && existingTerritoryRes.rows[0].total_area) {
+                const existingGeomWKT = `ST_GeomFromEWKT('${existingTerritoryRes.rows[0].total_area}')`;
+                combinedGeom = `ST_Union(${existingGeomWKT}, ${newClaimGeom})`;
+            }
+
+            await client.query('DELETE FROM clan_territories WHERE clan_id = $1', [clanId]);
+            const newTotalAreaRes = await client.query(`SELECT ST_Area((${combinedGeom})::geography) as area`);
+            const newTotalArea = newTotalAreaRes.rows[0].area;
+
             const upsertQuery = `
                 INSERT INTO clan_territories (clan_id, owner_id, area, area_sqm)
-                VALUES ($1, $2, ${newClaimGeom}, $3);
+                VALUES ($1, $2, ${combinedGeom}, $3);
             `;
-            await client.query(upsertQuery, [clanId, player.googleId, newArea]);
+            await client.query(upsertQuery, [clanId, player.googleId, newTotalArea]);
 
             finalResultQuery = `
                 SELECT clan_id::text as owner_id, c.name as owner_name, c.clan_image_url as profile_image_url, ST_AsGeoJSON(area) as geojson, area_sqm 
