@@ -582,6 +582,54 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
 });
 
 
+// --- ADMIN ENDPOINTS ---
+app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+        await client.query("TRUNCATE TABLE clan_join_requests, clan_territories, clan_members RESTART IDENTITY;");
+        await client.query("TRUNCATE TABLE clans RESTART IDENTITY CASCADE;");
+        await client.query("TRUNCATE TABLE territories RESTART IDENTITY CASCADE;");
+        
+        console.log('[ADMIN] All database tables truncated.');
+
+        if (admin.apps.length > 0) {
+            const bucket = admin.storage().bucket();
+            const [profileFiles] = await bucket.getFiles({ prefix: 'profile_images/' });
+            if (profileFiles.length > 0) {
+                await Promise.all(profileFiles.map(file => file.delete()));
+                 console.log('[ADMIN] All profile images deleted from storage.');
+            }
+            const [clanFiles] = await bucket.getFiles({ prefix: 'clan_images/' });
+             if (clanFiles.length > 0) {
+                await Promise.all(clanFiles.map(file => file.delete()));
+                 console.log('[ADMIN] All clan images deleted from storage.');
+            }
+        }
+        await client.query("COMMIT");
+        io.emit('allTerritoriesCleared');
+        res.status(200).send('SUCCESS: Factory reset complete.');
+    } catch (err) {
+        await client.query("ROLLBACK");
+        console.error('ERROR during factory reset:', err);
+        res.status(500).send(`ERROR during factory reset: ${err.message}`);
+    } finally { client.release(); }
+});
+
+app.get('/admin/reset-all-territories', checkAdminSecret, async (req, res) => {
+    try {
+        await pool.query("UPDATE territories SET area = NULL, area_sqm = NULL;");
+        await pool.query("TRUNCATE TABLE clan_territories;");
+        console.log('[ADMIN] All claimed territories deleted.');
+        io.emit('allTerritoriesCleared');
+        res.status(200).send('SUCCESS: All claimed territories deleted.');
+    } catch (err) {
+        console.error('ERROR clearing territories:', err);
+        res.status(500).send('ERROR clearing territories.');
+    }
+});
+
+
 // --- Socket.IO Logic ---
 async function broadcastAllPlayers() {
     const playerIds = Object.keys(players);
