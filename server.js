@@ -1,3 +1,5 @@
+// server/index.js (This code is correct, the issue is likely in deployment)
+
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -591,6 +593,19 @@ app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
     } finally { client.release(); }
 });
 
+app.get('/admin/reset-all-territories', checkAdminSecret, async (req, res) => {
+    try {
+        await pool.query("UPDATE territories SET area = NULL, area_sqm = NULL;");
+        await pool.query("TRUNCATE TABLE clan_territories;");
+        console.log('[ADMIN] All claimed territories deleted.');
+        io.emit('allTerritoriesCleared');
+        res.status(200).send('SUCCESS: All claimed territories deleted.');
+    } catch (err) {
+        console.error('ERROR clearing territories:', err);
+        res.status(500).send('ERROR clearing territories.');
+    }
+});
+
 
 // --- Socket.IO Logic ---
 async function broadcastAllPlayers() {
@@ -841,16 +856,20 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log(`[SERVER] User disconnected: ${socket.id}`);
     const player = players[socket.id];
-    if (player && player.clanId && player.role === 'leader' && activeClanBases[player.clanId]) {
-        delete activeClanBases[player.clanId];
-        Object.values(players).forEach(p => {
-          if (p.clanId === player.clanId) {
-              io.to(p.id).emit('clanBaseDeactivated');
-          }
-        });
+    if (player) {
+        // If a leader with an active base disconnects, deactivate the base
+        if (player.clanId && activeClanBases[player.clanId] && player.role === 'leader') {
+            console.log(`[CLAN] Leader of clan ${player.clanId} disconnected, deactivating base.`);
+            delete activeClanBases[player.clanId];
+            Object.values(players).forEach(p => {
+              if (p.clanId === player.clanId && p.id !== socket.id) { // Don't message the disconnected socket
+                  io.to(p.id).emit('clanBaseDeactivated');
+              }
+            });
+        }
+        io.emit('playerLeft', { id: socket.id });
+        delete players[socket.id];
     }
-    io.emit('playerLeft', { id: socket.id });
-    if(players[socket.id]) { delete players[socket.id]; }
   });
 });
 
