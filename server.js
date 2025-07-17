@@ -47,6 +47,7 @@ const pool = new Pool({
 });
 
 const players = {};
+const activeClanBases = {};
 
 // --- Database Schema Setup ---
 const setupDatabase = async () => {
@@ -654,7 +655,10 @@ io.on('connection', (socket) => {
   socket.on('playerJoined', async ({ googleId, name, gameMode }) => {
     if (!googleId || !gameMode) return;
     
-    players[socket.id] = { id: socket.id, name, googleId, gameMode, activeTrail: [], lastKnownPosition: null, isDrawing: false };
+    const memberInfo = await pool.query('SELECT clan_id FROM clan_members WHERE user_id = $1', [googleId]);
+    const clanId = memberInfo.rowCount > 0 ? memberInfo.rows[0].clan_id : null;
+
+    players[socket.id] = { id: socket.id, name, googleId, clanId, gameMode, activeTrail: [], lastKnownPosition: null, isDrawing: false };
     console.log(`[SERVER] Player ${socket.id} (${googleId}) joined in [${gameMode}] mode.`);
 
     try {
@@ -811,6 +815,34 @@ io.on('connection', (socket) => {
     } finally {
         client.release();
     }
+  });
+  
+  socket.on('activateClanBase', ({ center, radius }) => {
+      const player = players[socket.id];
+      if (!player || !player.clanId) return;
+
+      console.log(`[CLAN] Leader of clan ${player.clanId} activated a base.`);
+      activeClanBases[player.clanId] = { center, radius };
+
+      Object.values(players).forEach(p => {
+          if (p.clanId === player.clanId) {
+              io.to(p.id).emit('clanBaseActivated', { center, radius });
+          }
+      });
+  });
+
+  socket.on('deactivateClanBase', () => {
+      const player = players[socket.id];
+      if (!player || !player.clanId) return;
+
+      console.log(`[CLAN] Leader of clan ${player.clanId} deactivated the base.`);
+      delete activeClanBases[player.clanId];
+
+      Object.values(players).forEach(p => {
+          if (p.clanId === player.clanId) {
+              io.to(p.id).emit('clanBaseDeactivated');
+          }
+      });
   });
 
   socket.on('disconnect', () => {
