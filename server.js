@@ -722,9 +722,7 @@ io.on('connection', (socket) => {
   socket.on('locationUpdate', (data) => {
     const player = players[socket.id];
     if (!player) return;
-    
     player.lastKnownPosition = data;
-    
     if (player.isDrawing && Array.isArray(player.activeTrail)) {
         player.activeTrail.push(data);
         socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data });
@@ -850,6 +848,34 @@ io.on('connection', (socket) => {
     } finally {
         client.release();
     }
+  });
+  
+  socket.on('activateClanBase', ({ center, radius }) => {
+      const player = players[socket.id];
+      if (!player || !player.clanId) return;
+
+      console.log(`[CLAN] Leader of clan ${player.clanId} activated a base.`);
+      activeClanBases[player.clanId] = { center, radius };
+
+      Object.values(players).forEach(p => {
+          if (p.clanId === player.clanId) {
+              io.to(p.id).emit('clanBaseActivated', { center, radius });
+          }
+      });
+  });
+
+  socket.on('deactivateClanBase', () => {
+      const player = players[socket.id];
+      if (!player || !player.clanId) return;
+
+      console.log(`[CLAN] Leader of clan ${player.clanId} deactivated the base.`);
+      delete activeClanBases[player.clanId];
+
+      Object.values(players).forEach(p => {
+          if (p.clanId === player.clanId) {
+              io.to(p.id).emit('clanBaseDeactivated');
+          }
+      });
   });
 
   socket.on('disconnect', () => {
