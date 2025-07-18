@@ -631,173 +631,183 @@ async function broadcastAllPlayers() {
 }
 
 io.on('connection', (socket) => {
-    console.log(`[SERVER] User connected: ${socket.id}`);
-    
-    socket.on('playerJoined', async ({ googleId, name, gameMode }) => {
-        if (!googleId || !gameMode) {
-            console.error(`[Socket] Invalid playerJoined event from ${socket.id}`);
-            return;
-        }
-        
-        console.log(`[Socket] Player ${name} (${socket.id}) joining in [${gameMode}] mode.`);
-        
-        try {
-            const memberInfo = await pool.query('SELECT clan_id FROM clan_members WHERE user_id = $1', [googleId]);
-            const clanId = memberInfo.rowCount > 0 ? memberInfo.rows[0].clan_id : null;
-        
-            players[socket.id] = { id: socket.id, name, googleId, clanId, gameMode, lastKnownPosition: null };
-        
-            let query;
-            if (gameMode === 'clan') {
-                console.log(`[Socket] Fetching territories for CLAN mode.`);
-                query = `
-                    SELECT 
-                        ct.clan_id::text as "ownerId",
-                        c.name as "ownerName",
-                        c.clan_image_url as "profileImageUrl",
-                        ST_AsGeoJSON(ct.area) as geojson, 
-                        ct.area_sqm as area
-                    FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id;
-                `;
-            } else {
-                console.log(`[Socket] Fetching territories for SOLO mode.`);
-                 query = `
-                    SELECT 
-                        owner_id as "ownerId", 
-                        username as "ownerName", 
-                        profile_image_url as "profileImageUrl", 
-                        ST_AsGeoJSON(area) as geojson, 
-                        area_sqm as area
-                    FROM territories;
-                 `;
-            }
-    
-            const territoryResult = await pool.query(query);
-            const activeTerritories = territoryResult.rows
-                .filter(row => row.geojson)
-                .map(row => ({ 
-                    ...row,
-                    geojson: JSON.parse(row.geojson), 
-                }));
-                
-            const playerProfileResult = await pool.query('SELECT 1 FROM territories WHERE owner_id = $1 AND username IS NOT NULL', [googleId]);
-            const playerHasRecord = playerProfileResult.rowCount > 0;
-    
-            console.log(`[Socket] Found ${activeTerritories.length} territories. Sending 'existingTerritories' to ${socket.id}.`);
-            socket.emit('existingTerritories', { 
-                territories: activeTerritories, 
-                playerHasRecord: playerHasRecord 
-            });
-    
-        } catch (err) { 
-          console.error(`[Socket] FATAL ERROR in playerJoined for ${socket.id}:`, err);
-          socket.emit('error', { message: 'Failed to load game state.' });
-        }
-      });
+  console.log(`[SERVER] User connected: ${socket.id}`);
   
-    socket.on('locationUpdate', (data) => {
-        const player = players[socket.id];
-        if (!player) return;
-        player.lastKnownPosition = data;
-        socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data });
-    });
-  
-    socket.on('startDrawingTrail', () => {
-        const player = players[socket.id];
-        if (!player) return;
-        socket.broadcast.emit('trailStarted', { id: socket.id, name: player.name });
-    });
-  
-    socket.on('stopDrawingTrail', () => {
-        io.emit('trailCleared', { id: socket.id });
-    });
-  
-    socket.on('claimTerritory', async ({ trail, gameMode }) => {
-        const player = players[socket.id];
-        if (!player || !player.googleId || !gameMode) return;
-        if (!Array.isArray(trail) || trail.length < 4) {
-            return socket.emit('claimRejected', { reason: 'Trail is too short.' });
+  socket.on('playerJoined', async ({ googleId, name, gameMode }) => {
+    if (!googleId || !gameMode) {
+        console.error(`[Socket] Invalid playerJoined event from ${socket.id}`);
+        return;
+    }
+    
+    console.log(`[Socket] Player ${name} (${socket.id}) joining in [${gameMode}] mode.`);
+    
+    try {
+        const memberInfo = await pool.query('SELECT clan_id, role FROM clan_members WHERE user_id = $1', [googleId]);
+        const clanId = memberInfo.rowCount > 0 ? memberInfo.rows[0].clan_id : null;
+        const role = memberInfo.rowCount > 0 ? memberInfo.rows[0].role : null;
+    
+        players[socket.id] = { id: socket.id, name, googleId, clanId, role, gameMode, lastKnownPosition: null };
+    
+        let query;
+        if (gameMode === 'clan') {
+            console.log(`[Socket] Fetching territories for CLAN mode.`);
+            query = `
+                SELECT 
+                    ct.clan_id::text as "ownerId",
+                    c.name as "ownerName",
+                    c.clan_image_url as "profileImageUrl",
+                    ST_AsGeoJSON(ct.area) as geojson, 
+                    ct.area_sqm as area
+                FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id;
+            `;
+        } else {
+            console.log(`[Socket] Fetching territories for SOLO mode.`);
+             query = `
+                SELECT 
+                    owner_id as "ownerId", 
+                    username as "ownerName", 
+                    profile_image_url as "profileImageUrl", 
+                    ST_AsGeoJSON(area) as geojson, 
+                    area_sqm as area
+                FROM territories;
+             `;
         }
 
+        const territoryResult = await pool.query(query);
+        const activeTerritories = territoryResult.rows
+            .filter(row => row.geojson)
+            .map(row => ({ 
+                ...row,
+                geojson: JSON.parse(row.geojson), 
+            }));
+            
+        const playerProfileResult = await pool.query('SELECT 1 FROM territories WHERE owner_id = $1 AND username IS NOT NULL', [googleId]);
+        const playerHasRecord = playerProfileResult.rowCount > 0;
+
+        console.log(`[Socket] Found ${activeTerritories.length} territories. Sending 'existingTerritories' to ${socket.id}.`);
+        socket.emit('existingTerritories', { 
+            territories: activeTerritories, 
+            playerHasRecord: playerHasRecord 
+        });
+
+    } catch (err) { 
+      console.error(`[Socket] FATAL ERROR in playerJoined for ${socket.id}:`, err);
+      socket.emit('error', { message: 'Failed to load game state.' });
+    }
+  });
+
+  socket.on('locationUpdate', (data) => {
+    const player = players[socket.id];
+    if (!player) return;
+    player.lastKnownPosition = data;
+    socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data });
+  });
+
+  socket.on('startDrawingTrail', () => {
+    const player = players[socket.id];
+    if (!player) return;
+    socket.broadcast.emit('trailStarted', { id: socket.id, name: player.name });
+  });
+
+  socket.on('stopDrawingTrail', () => {
+    io.emit('trailCleared', { id: socket.id });
+  });
+
+  socket.on('claimTerritory', async (req) => {
+    const player = players[socket.id];
+    if (!player || !player.googleId || !req.gameMode) return;
+    
+    const { gameMode, trail, baseClaim } = req;
+    let newClaimGeom;
+
+    if (baseClaim) {
+        const { center, radius } = baseClaim;
+        if (!center || !radius) return socket.emit('claimRejected', { reason: 'Invalid base data.' });
+        newClaimGeom = `ST_Buffer(ST_SetSRID(ST_MakePoint(${center.lng}, ${center.lat}), 4326)::geography, ${radius})::geometry`;
+    } else if (trail && trail.length >= 4) {
         const coordinatesString = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
         const newClaimWKT = `POLYGON((${coordinatesString}, ${trail[0].lng} ${trail[0].lat}))`;
-        const newClaimGeom = `ST_SetSRID(ST_GeomFromText('${newClaimWKT}'), 4326)`;
-        
-        const client = await pool.connect();
-        try {
-            await client.query('BEGIN');
+        newClaimGeom = `ST_SetSRID(ST_GeomFromText('${newClaimWKT}'), 4326)`;
+    } else {
+        return socket.emit('claimRejected', { reason: 'Invalid trail data.' });
+    }
     
-            const areaResult = await client.query(`SELECT ST_Area(${newClaimGeom}::geography) as area;`);
-            const newArea = areaResult.rows[0].area;
-            if (newArea < MINIMUM_CLAIM_AREA_SQM) {
-                await client.query('ROLLBACK');
-                return socket.emit('claimRejected', { reason: `Area is too small (${Math.round(newArea)}m²).` });
-            }
-            
-            let batchUpdateData;
-            let ownerIdToUpdate;
-            
-            if (gameMode === 'clan') {
-                ownerIdToUpdate = player.clanId;
-                if (!ownerIdToUpdate) throw new Error('Player not in clan for clan claim');
-    
-                const upsertQuery = `
-                    INSERT INTO clan_territories (clan_id, owner_id, area, area_sqm) VALUES ($1, $2, ${newClaimGeom}, $3)
-                    ON CONFLICT (clan_id) DO UPDATE SET
-                        area = ST_Union(clan_territories.area, ${newClaimGeom}),
-                        area_sqm = ST_Area(ST_Union(clan_territories.area, ${newClaimGeom})::geography),
-                        owner_id = $2;
-                `;
-                await client.query(upsertQuery, [ownerIdToUpdate, player.googleId, newArea]);
-            } else { // Solo mode
-                ownerIdToUpdate = player.googleId;
-                const upsertQuery = `
-                    INSERT INTO territories (owner_id, area, area_sqm) VALUES ($1, ${newClaimGeom}, $2)
-                    ON CONFLICT (owner_id) DO UPDATE SET 
-                        area = ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3),
-                        area_sqm = ST_Area((ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3))::geography);
-                `;
-                await client.query(upsertQuery, [ownerIdToUpdate, newArea]);
-            }
-            
-            await client.query('COMMIT');
-            
-            const finalResultQuery = gameMode === 'clan' ? `
-                SELECT 
-                    ct.clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", 
-                    ST_AsGeoJSON(ct.area) as geojson, ct.area_sqm as area
-                FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = $1
-            ` : `
-                SELECT 
-                    owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", 
-                    ST_AsGeoJSON(area) as geojson, area_sqm as area 
-                FROM territories WHERE owner_id = $1
-            `;
-    
-            const finalResult = await pool.query(finalResultQuery, [ownerIdToUpdate]);
-            batchUpdateData = finalResult.rows.filter(r => r.geojson).map(r => ({ ...r, geojson: JSON.parse(r.geojson) }));
-    
-            if (batchUpdateData.length > 0) {
-                io.emit('batchTerritoryUpdate', batchUpdateData);
-            }
-    
-        } catch (err) {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        const areaResult = await client.query(`SELECT ST_Area(${newClaimGeom}::geography) as area;`);
+        const newArea = areaResult.rows[0].area;
+        if (newArea < MINIMUM_CLAIM_AREA_SQM) {
             await client.query('ROLLBACK');
-            console.error('[DB] FATAL Error during territory claim:', err);
-            socket.emit('claimRejected', { reason: 'Server error during claim.' });
-        } finally {
-            client.release();
+            return socket.emit('claimRejected', { reason: `Area is too small (${Math.round(newArea)}m²).` });
         }
-    });
+        
+        let finalTotalArea = newArea;
+        let ownerIdToUpdate;
+        
+        if (gameMode === 'clan') {
+            ownerIdToUpdate = player.clanId;
+            if (!ownerIdToUpdate) throw new Error('Player not in clan for clan claim');
+            const upsertQuery = `
+                INSERT INTO clan_territories (clan_id, owner_id, area, area_sqm) VALUES ($1, $2, ${newClaimGeom}, $3)
+                ON CONFLICT (clan_id) DO UPDATE SET
+                    area = ST_Union(clan_territories.area, ${newClaimGeom}),
+                    area_sqm = ST_Area(ST_Union(clan_territories.area, ${newClaimGeom})::geography),
+                    owner_id = $2
+                RETURNING area_sqm;
+            `;
+            const result = await client.query(upsertQuery, [ownerIdToUpdate, player.googleId, newArea]);
+            finalTotalArea = result.rows[0].area_sqm;
+        } else { // Solo mode
+            ownerIdToUpdate = player.googleId;
+            const upsertQuery = `
+                INSERT INTO territories (owner_id, area, area_sqm) VALUES ($1, ${newClaimGeom}, $2)
+                ON CONFLICT (owner_id) DO UPDATE SET 
+                    area = ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3),
+                    area_sqm = ST_Area((ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3))::geography)
+                RETURNING area_sqm;
+            `;
+            const result = await client.query(upsertQuery, [ownerIdToUpdate, newArea]);
+            finalTotalArea = result.rows[0].area_sqm;
+        }
+        
+        await client.query('COMMIT');
+        
+        io.to(socket.id).emit('claimSuccessful', { newTotalArea: finalTotalArea });
+        
+        const finalResultQuery = gameMode === 'clan' ? `
+            SELECT clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm as area
+            FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = $1;
+        ` : `
+            SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm as area 
+            FROM territories WHERE owner_id = $1`;
+        
+        const finalResult = await pool.query(finalResultQuery, [ownerIdToUpdate]);
+        const batchUpdateData = finalResult.rows.filter(r => r.geojson).map(r => ({ ...r, geojson: JSON.parse(r.geojson) }));
+
+        if (batchUpdateData.length > 0) {
+            io.emit('batchTerritoryUpdate', batchUpdateData);
+        }
+        io.emit('trailCleared', { id: socket.id });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('[DB] FATAL Error during territory claim:', err);
+        socket.emit('claimRejected', { reason: 'Server error during claim.' });
+    } finally {
+        client.release();
+    }
+  });
   
-    socket.on('disconnect', () => {
-      const player = players[socket.id];
-      if (player) {
-        console.log(`[SERVER] User ${player.name} disconnected: ${socket.id}`);
-        delete players[socket.id];
-        io.emit('playerLeft', { id: socket.id });
-      }
-    });
+  socket.on('disconnect', () => {
+    const player = players[socket.id];
+    if (player) {
+      console.log(`[SERVER] User ${player.name} disconnected: ${socket.id}`);
+      delete players[socket.id];
+      io.emit('playerLeft', { id: socket.id });
+    }
+  });
 });
 
 
