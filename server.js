@@ -723,12 +723,10 @@ io.on('connection', (socket) => {
     if (baseClaim && trail && trail.length >= 4) {
         const { center, radius } = baseClaim;
         if (!center || !radius) return socket.emit('claimRejected', { reason: 'Invalid base data for merge.' });
-
         const trailCoords = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
         const trailWKT = `POLYGON((${trailCoords}, ${trail[0].lng} ${trail[0].lat}))`;
         const trailGeom = `ST_SetSRID(ST_GeomFromText('${trailWKT}'), 4326)`;
         const circleGeom = `ST_Buffer(ST_SetSRID(ST_MakePoint(${center.lng}, ${center.lat}), 4326)::geography, ${radius})::geometry`;
-        
         newClaimGeom = `ST_Union(${trailGeom}, ${circleGeom})`;
     } else if (trail && trail.length >= 4) {
         const coordinatesString = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
@@ -750,11 +748,14 @@ io.on('connection', (socket) => {
         }
         
         let finalTotalArea;
-        let ownerIdToUpdate;
+        let batchUpdateData;
+        let ownerIdsToUpdate = [];
         
         if (gameMode === 'clan') {
-            ownerIdToUpdate = player.clanId;
-            if (!ownerIdToUpdate) throw new Error('Player not in clan for clan claim');
+            const clanId = player.clanId;
+            if (!clanId) throw new Error('Player not in clan for clan claim');
+            ownerIdsToUpdate.push(clanId.toString());
+
             const upsertQuery = `
                 INSERT INTO clan_territories (clan_id, owner_id, area, area_sqm) VALUES ($1, $2, ${newClaimGeom}, $3)
                 ON CONFLICT (clan_id) DO UPDATE SET
@@ -763,10 +764,44 @@ io.on('connection', (socket) => {
                     owner_id = $2
                 RETURNING area_sqm;
             `;
-            const result = await client.query(upsertQuery, [ownerIdToUpdate, player.googleId, newArea]);
+            const result = await client.query(upsertQuery, [clanId, player.googleId, newArea]);
             finalTotalArea = result.rows[0].area_sqm;
-        } else { // Solo mode
-            ownerIdToUpdate = player.googleId;
+
+        } else { // Solo mode with Area Steal
+            const attackerId = player.googleId;
+            ownerIdsToUpdate.push(attackerId);
+
+            const victimsResult = await client.query(
+                `SELECT owner_id FROM territories WHERE owner_id != $1 AND area IS NOT NULL AND ST_Intersects(area, ${newClaimGeom})`, 
+                [attackerId]
+            );
+            const victimIds = victimsResult.rows.map(r => r.owner_id);
+            ownerIdsToUpdate.push(...victimIds);
+
+            for (const victimId of victimIds) {
+                console.log(`[GAME] Attacker ${attackerId} is cutting territory from victim ${victimId}`);
+                const smartCutQuery = `
+                    WITH new_geom AS (
+                        SELECT ST_Difference(t.area, ${newClaimGeom}) as geom
+                        FROM territories t
+                        WHERE t.owner_id = $1
+                    ),
+                    dumped AS (
+                        SELECT (ST_Dump(geom)).geom as single_geom
+                        FROM new_geom
+                    ),
+                    largest_piece AS (
+                        SELECT single_geom FROM dumped ORDER BY ST_Area(single_geom) DESC LIMIT 1
+                    )
+                    UPDATE territories
+                    SET 
+                        area = (SELECT single_geom FROM largest_piece),
+                        area_sqm = ST_Area(((SELECT single_geom FROM largest_piece))::geography)
+                    WHERE owner_id = $1;
+                `;
+                await client.query(smartCutQuery, [victimId]);
+            }
+
             const upsertQuery = `
                 INSERT INTO territories (owner_id, area, area_sqm) VALUES ($1, ${newClaimGeom}, $2)
                 ON CONFLICT (owner_id) DO UPDATE SET 
@@ -774,7 +809,7 @@ io.on('connection', (socket) => {
                     area_sqm = ST_Area((ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3))::geography)
                 RETURNING area_sqm;
             `;
-            const result = await client.query(upsertQuery, [ownerIdToUpdate, newArea]);
+            const result = await client.query(upsertQuery, [attackerId, newArea]);
             finalTotalArea = result.rows[0].area_sqm;
         }
         
@@ -784,13 +819,13 @@ io.on('connection', (socket) => {
         
         const finalResultQuery = gameMode === 'clan' ? `
             SELECT clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm as area
-            FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = $1;
+            FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[]);
         ` : `
             SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm as area 
-            FROM territories WHERE owner_id = $1`;
+            FROM territories WHERE owner_id = ANY($1::varchar[])`;
         
-        const finalResult = await pool.query(finalResultQuery, [ownerIdToUpdate]);
-        const batchUpdateData = finalResult.rows.filter(r => r.geojson).map(r => ({ ...r, geojson: JSON.parse(r.geojson) }));
+        const finalResult = await pool.query(finalResultQuery, [ownerIdsToUpdate]);
+        batchUpdateData = finalResult.rows.filter(r => r.geojson).map(r => ({ ...r, geojson: JSON.parse(r.geojson) }));
 
         if (batchUpdateData.length > 0) {
             io.emit('batchTerritoryUpdate', batchUpdateData);
