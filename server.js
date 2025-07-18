@@ -609,7 +609,6 @@ app.get('/admin/reset-all-territories', checkAdminSecret, async (req, res) => {
 });
 
 // --- Socket.IO Logic ---
-// FIX: Re-added the missing function definition
 async function broadcastAllPlayers() {
     const playerIds = Object.keys(players);
     if (playerIds.length === 0) return;
@@ -635,17 +634,22 @@ io.on('connection', (socket) => {
     console.log(`[SERVER] User connected: ${socket.id}`);
     
     socket.on('playerJoined', async ({ googleId, name, gameMode }) => {
-        if (!googleId || !gameMode) return;
+        if (!googleId || !gameMode) {
+            console.error(`[Socket] Invalid playerJoined event from ${socket.id}`);
+            return;
+        }
         
-        const memberInfo = await pool.query('SELECT clan_id FROM clan_members WHERE user_id = $1', [googleId]);
-        const clanId = memberInfo.rowCount > 0 ? memberInfo.rows[0].clan_id : null;
-    
-        players[socket.id] = { id: socket.id, name, googleId, clanId, gameMode, lastKnownPosition: null };
-        console.log(`[SERVER] Player ${socket.id} (${googleId}) joined in [${gameMode}] mode. Clan ID: ${clanId}`);
-    
+        console.log(`[Socket] Player ${name} (${socket.id}) joining in [${gameMode}] mode.`);
+        
         try {
+            const memberInfo = await pool.query('SELECT clan_id FROM clan_members WHERE user_id = $1', [googleId]);
+            const clanId = memberInfo.rowCount > 0 ? memberInfo.rows[0].clan_id : null;
+        
+            players[socket.id] = { id: socket.id, name, googleId, clanId, gameMode, lastKnownPosition: null };
+        
             let query;
             if (gameMode === 'clan') {
+                console.log(`[Socket] Fetching territories for CLAN mode.`);
                 query = `
                     SELECT 
                         ct.clan_id::text as "ownerId",
@@ -653,10 +657,10 @@ io.on('connection', (socket) => {
                         c.clan_image_url as "profileImageUrl",
                         ST_AsGeoJSON(ct.area) as geojson, 
                         ct.area_sqm as area
-                    FROM clan_territories ct
-                    JOIN clans c ON ct.clan_id = c.id;
+                    FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id;
                 `;
             } else {
+                console.log(`[Socket] Fetching territories for SOLO mode.`);
                  query = `
                     SELECT 
                         owner_id as "ownerId", 
@@ -668,8 +672,8 @@ io.on('connection', (socket) => {
                  `;
             }
     
-            const result = await pool.query(query);
-            const activeTerritories = result.rows
+            const territoryResult = await pool.query(query);
+            const activeTerritories = territoryResult.rows
                 .filter(row => row.geojson)
                 .map(row => ({ 
                     ...row,
@@ -679,13 +683,15 @@ io.on('connection', (socket) => {
             const playerProfileResult = await pool.query('SELECT 1 FROM territories WHERE owner_id = $1 AND username IS NOT NULL', [googleId]);
             const playerHasRecord = playerProfileResult.rowCount > 0;
     
+            console.log(`[Socket] Found ${activeTerritories.length} territories. Sending 'existingTerritories' to ${socket.id}.`);
             socket.emit('existingTerritories', { 
                 territories: activeTerritories, 
                 playerHasRecord: playerHasRecord 
             });
     
         } catch (err) { 
-          console.error('[DB] ERROR fetching initial territories:', err);
+          console.error(`[Socket] FATAL ERROR in playerJoined for ${socket.id}:`, err);
+          socket.emit('error', { message: 'Failed to load game state.' });
         }
       });
   
