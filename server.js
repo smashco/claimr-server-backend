@@ -383,6 +383,22 @@ app.put('/clans/:id/photo', authenticate, async (req, res) => {
     }
 });
 
+// --- THIS IS THE ENDPOINT REQUIRED BY THE BACKUP SCRIPT ---
+app.post('/clans/:id/set-base', authenticate, async (req, res) => {
+    const { id } = req.params;
+    const { baseLocation } = req.body;
+    if (!baseLocation || !baseLocation.lat || !baseLocation.lng) return res.status(400).json({ error: 'baseLocation is required' });
+    try {
+        const pointWKT = `POINT(${baseLocation.lng} ${baseLocation.lat})`;
+        const query = `UPDATE clans SET base_location = ST_SetSRID(ST_GeomFromText($1), 4326) WHERE id = $2`;
+        await pool.query(query, [pointWKT, id]);
+        res.sendStatus(200);
+    } catch (err) {
+        console.error('[API] Error setting clan base:', err);
+        res.status(500).json({ error: 'Failed to set clan base' });
+    }
+});
+
 app.delete('/clans/members/me', authenticate, async (req, res) => {
     const { googleId } = req.user;
     const client = await pool.connect();
@@ -633,12 +649,11 @@ io.on('connection', (socket) => {
   socket.on('playerJoined', async ({ googleId, name, gameMode }) => {
     if (!googleId || !gameMode) return;
     
-    const memberInfo = await pool.query('SELECT clan_id, role FROM clan_members WHERE user_id = $1', [googleId]);
+    const memberInfo = await pool.query('SELECT clan_id FROM clan_members WHERE user_id = $1', [googleId]);
     const clanId = memberInfo.rowCount > 0 ? memberInfo.rows[0].clan_id : null;
-    const role = memberInfo.rowCount > 0 ? memberInfo.rows[0].role : null;
 
-    players[socket.id] = { id: socket.id, name, googleId, clanId, role, gameMode, lastKnownPosition: null };
-    console.log(`[SERVER] Player ${socket.id} (${name}) joined in [${gameMode}] mode.`);
+    players[socket.id] = { id: socket.id, name, googleId, clanId, gameMode, lastKnownPosition: null };
+    console.log(`[SERVER] Player ${socket.id} (${googleId}) joined in [${gameMode}] mode. Clan ID: ${clanId}`);
 
     try {
         let query;
@@ -650,7 +665,8 @@ io.on('connection', (socket) => {
                     c.clan_image_url as "profileImageUrl",
                     ST_AsGeoJSON(ct.area) as geojson, 
                     ct.area_sqm as area
-                FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id;
+                FROM clan_territories ct
+                JOIN clans c ON ct.clan_id = c.id;
             `;
         } else {
              query = `
@@ -667,16 +683,18 @@ io.on('connection', (socket) => {
         const result = await pool.query(query);
         const activeTerritories = result.rows
             .filter(row => row.geojson)
-            .map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
+            .map(row => ({ 
+                ...row,
+                geojson: JSON.parse(row.geojson), 
+            }));
             
         const playerProfileResult = await pool.query('SELECT 1 FROM territories WHERE owner_id = $1 AND username IS NOT NULL', [googleId]);
         const playerHasRecord = playerProfileResult.rowCount > 0;
 
-        socket.emit('existingTerritories', { territories: activeTerritories, playerHasRecord });
-
-        if (gameMode === 'clan' && clanId && activeClanBases[clanId]) {
-            socket.emit('clanBaseActivated', activeClanBases[clanId]);
-        }
+        socket.emit('existingTerritories', { 
+            territories: activeTerritories, 
+            playerHasRecord: playerHasRecord 
+        });
 
     } catch (err) { 
       console.error('[DB] ERROR fetching initial territories:', err);
@@ -700,88 +718,73 @@ io.on('connection', (socket) => {
     io.emit('trailCleared', { id: socket.id });
   });
 
-  socket.on('claimTerritory', async (req) => {
+  socket.on('claimTerritory', async ({ trail, gameMode }) => {
     const player = players[socket.id];
-    if (!player || !player.googleId || !req.gameMode) return;
-    
-    const { gameMode, trail, baseClaim } = req;
-    let newClaimGeom;
-
-    if (baseClaim) {
-        const { center, radius } = baseClaim;
-        if (!center || !radius) return socket.emit('claimRejected', { reason: 'Invalid base data.' });
-        newClaimGeom = `ST_Buffer(ST_SetSRID(ST_MakePoint(${center.lng}, ${center.lat}), 4326)::geography, ${radius})::geometry`;
-    } else if (trail && trail.length >= 4) {
-        const coordinatesString = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
-        const newClaimWKT = `POLYGON((${coordinatesString}, ${trail[0].lng} ${trail[0].lat}))`;
-        newClaimGeom = `ST_SetSRID(ST_GeomFromText('${newClaimWKT}'), 4326)`;
-    } else {
-        return socket.emit('claimRejected', { reason: 'Invalid trail data.' });
+    if (!player || !player.googleId || !gameMode) return;
+    if (!Array.isArray(trail) || trail.length < 4) {
+        return socket.emit('claimRejected', { reason: 'Trail is too short.' });
     }
+
+    const coordinatesString = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
+    const newClaimWKT = `POLYGON((${coordinatesString}, ${trail[0].lng} ${trail[0].lat}))`;
+    const newClaimGeom = `ST_SetSRID(ST_GeomFromText('${newClaimWKT}'), 4326)`;
     
     const client = await pool.connect();
     try {
         const areaResult = await client.query(`SELECT ST_Area(${newClaimGeom}::geography) as area;`);
         const newArea = areaResult.rows[0].area;
-
         if (newArea < MINIMUM_CLAIM_AREA_SQM) {
             return socket.emit('claimRejected', { reason: `Area is too small (${Math.round(newArea)}m²).` });
         }
 
         await client.query('BEGIN');
         
-        let finalTotalArea = newArea;
         let batchUpdateData;
-        
+        let ownerIdsToUpdate = [];
+
         if (gameMode === 'clan') {
-           const clanId = player.clanId;
-           if (!clanId) throw new Error('Player is not in a clan for a clan claim.');
-           const upsertQuery = `
+            const clanId = player.clanId;
+            if (!clanId) throw new Error('Player not in clan for clan claim');
+            ownerIdsToUpdate.push(clanId.toString());
+
+            const upsertQuery = `
                 INSERT INTO clan_territories (clan_id, owner_id, area, area_sqm) VALUES ($1, $2, ${newClaimGeom}, $3)
                 ON CONFLICT (clan_id) DO UPDATE SET
                     area = ST_Union(clan_territories.area, ${newClaimGeom}),
                     area_sqm = ST_Area(ST_Union(clan_territories.area, ${newClaimGeom})::geography),
-                    owner_id = $2 RETURNING area_sqm;
+                    owner_id = $2;
             `;
-            const result = await client.query(upsertQuery, [clanId, player.googleId, newArea]);
-            finalTotalArea = result.rows[0].area_sqm;
-        } else { // Solo mode logic
+            await client.query(upsertQuery, [clanId, player.googleId, newArea]);
+        } else { // Solo mode
+            ownerIdsToUpdate.push(player.googleId);
+
             const upsertQuery = `
                 INSERT INTO territories (owner_id, area, area_sqm) VALUES ($1, ${newClaimGeom}, $2)
                 ON CONFLICT (owner_id) DO UPDATE SET 
                     area = ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3),
-                    area_sqm = ST_Area((ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3))::geography)
-                RETURNING area_sqm;
+                    area_sqm = ST_Area((ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3))::geography);
             `;
-            const result = await client.query(upsertQuery, [player.googleId, newArea]);
-            finalTotalArea = result.rows[0].area_sqm;
+            await client.query(upsertQuery, [player.googleId, newArea]);
         }
         
-        let finalResultQuery, finalResultQueryParams;
-        if (gameMode === 'clan') {
-            finalResultQuery = `
-                SELECT clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm as area
-                FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = $1;
-            `;
-            finalResultQueryParams = [player.clanId];
-        } else {
-             finalResultQuery = `
-                SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm as area 
-                FROM territories WHERE owner_id = $1`;
-             finalResultQueryParams = [player.googleId];
-        }
-
-        const finalResult = await client.query(finalResultQuery, finalResultQueryParams);
-        batchUpdateData = finalResult.rows.filter(r => r.geojson).map(r => ({ ...r, geojson: JSON.parse(r.geojson) }));
-
         await client.query('COMMIT');
         
-        io.to(socket.id).emit('claimSuccessful', { newTotalArea: finalTotalArea });
-        
+        const finalResult = await pool.query(`
+            SELECT 
+                ${gameMode === 'clan' ? 'ct.clan_id::text' : 't.owner_id'} as "ownerId",
+                ${gameMode === 'clan' ? 'c.name' : 't.username'} as "ownerName",
+                ${gameMode === 'clan' ? 'c.clan_image_url' : 't.profile_image_url'} as "profileImageUrl",
+                ST_AsGeoJSON(${gameMode === 'clan' ? 'ct.area' : 't.area'}) as geojson,
+                ${gameMode === 'clan' ? 'ct.area_sqm' : 't.area_sqm'} as area
+            FROM ${gameMode === 'clan' ? 'clan_territories ct JOIN clans c ON ct.clan_id = c.id' : 'territories t'}
+            WHERE ${gameMode === 'clan' ? 'ct.clan_id' : 't.owner_id'} = ANY($1::${gameMode === 'clan' ? 'int[]' : 'varchar[]'})
+        `, [ownerIdsToUpdate]);
+
+        batchUpdateData = finalResult.rows.filter(r => r.geojson).map(r => ({ ...r, geojson: JSON.parse(r.geojson) }));
+
         if (batchUpdateData.length > 0) {
             io.emit('batchTerritoryUpdate', batchUpdateData);
         }
-        io.emit('trailCleared', { id: socket.id });
 
     } catch (err) {
         await client.query('ROLLBACK');
@@ -791,52 +794,16 @@ io.on('connection', (socket) => {
         client.release();
     }
   });
-  
-  socket.on('activateClanBase', ({ center, radius }) => {
-      const player = players[socket.id];
-      if (!player || !player.clanId) return;
-      console.log(`[CLAN] Leader of clan ${player.clanId} activated a base.`);
-      activeClanBases[player.clanId] = { center, radius };
-      
-      Object.values(players).forEach(p => {
-          if (p.clanId === player.clanId) {
-              io.to(p.id).emit('clanBaseActivated', { center, radius });
-          }
-      });
-  });
-
-  socket.on('deactivateClanBase', () => {
-      const player = players[socket.id];
-      if (!player || !player.clanId) return;
-      console.log(`[CLAN] Leader of clan ${player.clanId} deactivated the base.`);
-      delete activeClanBases[player.clanId];
-      
-       Object.values(players).forEach(p => {
-          if (p.clanId === player.clanId) {
-              io.to(p.id).emit('clanBaseDeactivated');
-          }
-      });
-  });
 
   socket.on('disconnect', () => {
     const player = players[socket.id];
     if (player) {
       console.log(`[SERVER] User ${player.name} disconnected: ${socket.id}`);
-      if (player.clanId && player.role === 'leader' && activeClanBases[player.clanId]) {
-        console.log(`[CLAN] Leader of clan ${player.clanId} disconnected, deactivating base.`);
-        delete activeClanBases[player.clanId];
-        Object.values(players).forEach(p => {
-          if (p.clanId === player.clanId && p.id !== socket.id) {
-              io.to(p.id).emit('clanBaseDeactivated');
-          }
-        });
-      }
       delete players[socket.id];
       io.emit('playerLeft', { id: socket.id });
     }
   });
 });
-
 
 // --- Server Start ---
 setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
