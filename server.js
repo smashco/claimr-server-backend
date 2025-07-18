@@ -642,10 +642,11 @@ io.on('connection', (socket) => {
     console.log(`[Socket] Player ${name} (${socket.id}) joining in [${gameMode}] mode.`);
     
     try {
-        const memberInfo = await pool.query('SELECT clan_id FROM clan_members WHERE user_id = $1', [googleId]);
+        const memberInfo = await pool.query('SELECT clan_id, role FROM clan_members WHERE user_id = $1', [googleId]);
         const clanId = memberInfo.rowCount > 0 ? memberInfo.rows[0].clan_id : null;
+        const role = memberInfo.rowCount > 0 ? memberInfo.rows[0].role : null;
     
-        players[socket.id] = { id: socket.id, name, googleId, clanId, gameMode, lastKnownPosition: null };
+        players[socket.id] = { id: socket.id, name, googleId, clanId, role, gameMode, lastKnownPosition: null };
     
         let query;
         if (gameMode === 'clan') {
@@ -657,8 +658,7 @@ io.on('connection', (socket) => {
                     c.clan_image_url as "profileImageUrl",
                     ST_AsGeoJSON(ct.area) as geojson, 
                     ct.area_sqm as area
-                FROM clan_territories ct
-                JOIN clans c ON ct.clan_id = c.id;
+                FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id;
             `;
         } else {
             console.log(`[Socket] Fetching territories for SOLO mode.`);
@@ -720,16 +720,22 @@ io.on('connection', (socket) => {
     const { gameMode, trail, baseClaim } = req;
     let newClaimGeom;
 
-    if (baseClaim) {
+    if (baseClaim && trail && trail.length >= 4) {
         const { center, radius } = baseClaim;
-        if (!center || !radius) return socket.emit('claimRejected', { reason: 'Invalid base data.' });
-        newClaimGeom = `ST_Buffer(ST_SetSRID(ST_MakePoint(${center.lng}, ${center.lat}), 4326)::geography, ${radius})::geometry`;
+        if (!center || !radius) return socket.emit('claimRejected', { reason: 'Invalid base data for merge.' });
+
+        const trailCoords = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
+        const trailWKT = `POLYGON((${trailCoords}, ${trail[0].lng} ${trail[0].lat}))`;
+        const trailGeom = `ST_SetSRID(ST_GeomFromText('${trailWKT}'), 4326)`;
+        const circleGeom = `ST_Buffer(ST_SetSRID(ST_MakePoint(${center.lng}, ${center.lat}), 4326)::geography, ${radius})::geometry`;
+        
+        newClaimGeom = `ST_Union(${trailGeom}, ${circleGeom})`;
     } else if (trail && trail.length >= 4) {
         const coordinatesString = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
         const newClaimWKT = `POLYGON((${coordinatesString}, ${trail[0].lng} ${trail[0].lat}))`;
         newClaimGeom = `ST_SetSRID(ST_GeomFromText('${newClaimWKT}'), 4326)`;
     } else {
-        return socket.emit('claimRejected', { reason: 'Invalid trail data.' });
+        return socket.emit('claimRejected', { reason: 'Invalid trail or claim data.' });
     }
     
     const client = await pool.connect();
@@ -743,7 +749,7 @@ io.on('connection', (socket) => {
             return socket.emit('claimRejected', { reason: `Area is too small (${Math.round(newArea)}m²).` });
         }
         
-        let finalTotalArea = newArea;
+        let finalTotalArea;
         let ownerIdToUpdate;
         
         if (gameMode === 'clan') {
