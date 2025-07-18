@@ -642,11 +642,10 @@ io.on('connection', (socket) => {
     console.log(`[Socket] Player ${name} (${socket.id}) joining in [${gameMode}] mode.`);
     
     try {
-        const memberInfo = await pool.query('SELECT clan_id, role FROM clan_members WHERE user_id = $1', [googleId]);
+        const memberInfo = await pool.query('SELECT clan_id FROM clan_members WHERE user_id = $1', [googleId]);
         const clanId = memberInfo.rowCount > 0 ? memberInfo.rows[0].clan_id : null;
-        const role = memberInfo.rowCount > 0 ? memberInfo.rows[0].role : null;
     
-        players[socket.id] = { id: socket.id, name, googleId, clanId, role, gameMode, lastKnownPosition: null };
+        players[socket.id] = { id: socket.id, name, googleId, clanId, gameMode, lastKnownPosition: null };
     
         let query;
         if (gameMode === 'clan') {
@@ -658,7 +657,8 @@ io.on('connection', (socket) => {
                     c.clan_image_url as "profileImageUrl",
                     ST_AsGeoJSON(ct.area) as geojson, 
                     ct.area_sqm as area
-                FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id;
+                FROM clan_territories ct
+                JOIN clans c ON ct.clan_id = c.id;
             `;
         } else {
             console.log(`[Socket] Fetching territories for SOLO mode.`);
