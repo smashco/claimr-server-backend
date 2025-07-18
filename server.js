@@ -646,7 +646,7 @@ io.on('connection', (socket) => {
         const clanId = memberInfo.rowCount > 0 ? memberInfo.rows[0].clan_id : null;
         const role = memberInfo.rowCount > 0 ? memberInfo.rows[0].role : null;
     
-        players[socket.id] = { id: socket.id, name, googleId, clanId, role, gameMode, lastKnownPosition: null };
+        players[socket.id] = { id: socket.id, name, googleId, clanId, role, gameMode, lastKnownPosition: null, isDrawing: false, activeTrail: [] };
     
         let query;
         if (gameMode === 'clan') {
@@ -696,20 +696,63 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('locationUpdate', (data) => {
-    const player = players[socket.id];
-    if (!player) return;
-    player.lastKnownPosition = data;
+  socket.on('locationUpdate', async (data) => {
+    const attacker = players[socket.id];
+    if (!attacker || !attacker.isDrawing) return;
+
+    attacker.lastKnownPosition = data;
+    attacker.activeTrail.push(data);
     socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data });
+
+    if (attacker.activeTrail.length < 2) return;
+
+    const lastPoint = attacker.activeTrail[attacker.activeTrail.length - 1];
+    const secondLastPoint = attacker.activeTrail[attacker.activeTrail.length - 2];
+    const attackerSegmentWKT = `LINESTRING(${secondLastPoint.lng} ${secondLastPoint.lat}, ${lastPoint.lng} ${lastPoint.lat})`;
+    const attackerSegmentGeom = `ST_SetSRID(ST_GeomFromText('${attackerSegmentWKT}'), 4326)`;
+
+    for (const victimId in players) {
+        if (victimId === socket.id) continue;
+
+        const victim = players[victimId];
+        if (victim && victim.isDrawing && victim.activeTrail.length >= 2) {
+            const victimTrailWKT = 'LINESTRING(' + victim.activeTrail.map(p => `${p.lng} ${p.lat}`).join(', ') + ')';
+            const victimTrailGeom = `ST_SetSRID(ST_GeomFromText('${victimTrailWKT}'), 4326)`;
+
+            try {
+                const intersectionQuery = `SELECT ST_Intersects(${attackerSegmentGeom}, ${victimTrailGeom}) as intersects;`;
+                const result = await pool.query(intersectionQuery);
+                
+                if (result.rows[0].intersects) {
+                    console.log(`[GAME] TRAIL CUT! Attacker ${attacker.name} cut Victim ${victim.name}`);
+                    
+                    io.to(victimId).emit('runTerminated', { reason: `Your trail was cut by ${attacker.name}!` });
+                    
+                    victim.isDrawing = false;
+                    victim.activeTrail = [];
+                    
+                    io.emit('trailCleared', { id: victimId });
+                }
+            } catch (err) {
+                console.error('[DB] Error during trail intersection check:', err);
+            }
+        }
+    }
   });
 
   socket.on('startDrawingTrail', () => {
     const player = players[socket.id];
     if (!player) return;
+    player.isDrawing = true;
+    player.activeTrail = [];
     socket.broadcast.emit('trailStarted', { id: socket.id, name: player.name });
   });
 
   socket.on('stopDrawingTrail', () => {
+    const player = players[socket.id];
+    if (!player) return;
+    player.isDrawing = false;
+    player.activeTrail = [];
     io.emit('trailCleared', { id: socket.id });
   });
 
