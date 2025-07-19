@@ -26,7 +26,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: "*", 
-    methods: ["GET", "POST", "PUT"]
+    methods: ["GET", "POST", "PUT", "DELETE"] // Added DELETE method for CORS
   }
 });
 
@@ -137,7 +137,7 @@ const setupDatabase = async () => {
 };
 
 // --- Middleware ---
-// ONLY ONE DEFINITION FOR checkAdminSecret
+// THIS IS THE ONLY DECLARATION FOR checkAdminSecret
 const checkAdminSecret = (req, res, next) => {
     const { secret } = req.query;
     if (!process.env.ADMIN_SECRET_KEY || secret !== process.env.ADMIN_SECRET_KEY) {
@@ -290,7 +290,7 @@ app.get('/leaderboard/clans', async (req, res) => {
             LEFT JOIN clan_members cm ON c.id = cm.clan_id
             LEFT JOIN clan_territories ct ON c.id = ct.clan_id
             LEFT JOIN territories t_leader ON c.leader_id = t_leader.owner_id
-            GROUP BY c.id, ct.area_sqm, t_leader.username, c.leader_id -- Add c.leader_id to GROUP BY
+            GROUP BY c.id, ct.area_sqm, t_leader.username, c.leader_id
             ORDER BY total_area_sqm DESC
             LIMIT 100;
         `;
@@ -566,7 +566,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
             
             const newMemberSocketId = Object.keys(players).find(id => players[id].googleId === applicant_google_id);
             if (newMemberSocketId) {
-                const newClanInfoRes = await client.query(`
+                const newClanInfoRes = await pool.query(`
                     SELECT c.id, c.name, c.tag, cm.role, (c.base_location IS NOT NULL) as base_is_set
                     FROM clans c JOIN clan_members cm ON c.id = cm.clan_id
                     WHERE c.id = $1 AND cm.user_id = $2;
