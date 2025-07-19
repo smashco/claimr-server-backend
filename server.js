@@ -23,7 +23,6 @@ const app = express();
 app.use(express.json());
 const server = http.createServer(app);
 
-// --- UPDATED CORS SETTINGS ---
 const io = new Server(server, {
   cors: {
     origin: "*", 
@@ -49,7 +48,7 @@ try {
 
 // --- Constants & Database Pool ---
 const PORT = process.env.PORT || 10000;
-const SERVER_TICK_RATE_MS = 500; // Broadcast updates twice per second
+const SERVER_TICK_RATE_MS = 500;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -65,6 +64,7 @@ const setupDatabase = async () => {
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
     console.log('[DB] PostGIS extension is enabled.');
 
+    // --- UPDATED TABLE SCHEMA ---
     await client.query(`
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
@@ -72,6 +72,7 @@ const setupDatabase = async () => {
         owner_name VARCHAR(255),
         username VARCHAR(50) UNIQUE,
         profile_image_url TEXT,
+        identity_color VARCHAR(10) DEFAULT '#39FF14',
         area GEOMETRY(GEOMETRY, 4326),
         area_sqm REAL,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -165,16 +166,36 @@ const authenticate = async (req, res, next) => {
 };
 
 // --- API Endpoints ---
-app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
+app.get('/', (req, res) => { res.send('ClaimrunX Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
+
+// --- NEW ENDPOINT TO UPDATE USER PREFERENCES (LIKE COLOR) ---
+app.put('/users/me/preferences', authenticate, async (req, res) => {
+    const { googleId } = req.user;
+    const { identityColor } = req.body;
+
+    if (!identityColor) {
+        return res.status(400).json({ message: 'identityColor is required.' });
+    }
+
+    try {
+        const query = 'UPDATE territories SET identity_color = $1 WHERE owner_id = $2';
+        await pool.query(query, [identityColor, googleId]);
+        res.status(200).json({ success: true, message: 'Preferences updated.' });
+    } catch (err) {
+        console.error('[API] Error updating user preferences:', err);
+        res.status(500).json({ message: 'Server error while updating preferences.' });
+    }
+});
 
 app.get('/check-profile', async (req, res) => {
     const { googleId } = req.query;
     if (!googleId) return res.status(400).json({ error: 'googleId is required.' });
     try {
+        // --- UPDATED QUERY TO INCLUDE identity_color ---
         const query = `
             SELECT 
-                t.username, t.profile_image_url, t.area_sqm,
+                t.username, t.profile_image_url, t.area_sqm, t.identity_color,
                 c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
                 (c.base_location IS NOT NULL) as base_is_set
             FROM territories t
@@ -190,6 +211,7 @@ app.get('/check-profile', async (req, res) => {
                 profileExists: true,
                 username: row.username,
                 profileImageUrl: row.profile_image_url,
+                identityColor: row.identity_color, // Added to response
                 area_sqm: row.area_sqm || 0,
                 clan_info: null
             };
@@ -211,6 +233,9 @@ app.get('/check-profile', async (req, res) => {
         res.status(500).json({ error: 'Server error while checking profile.' });
     }
 });
+
+// ... (THE REST OF YOUR server.js FILE REMAINS EXACTLY THE SAME) ...
+// (app.get('/check-username', ...), (app.post('/setup-profile', ...), etc. all stay)
 
 app.get('/check-username', async (req, res) => {
     const { username } = req.query;
