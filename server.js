@@ -23,11 +23,11 @@ const app = express();
 app.use(express.json());
 const server = http.createServer(app);
 
-// --- UPDATED CORS SETTINGS TO FIX CONNECTION ISSUE ---
+// --- UPDATED CORS SETTINGS ---
 const io = new Server(server, {
   cors: {
-    origin: "*", // Allow all origins
-    methods: ["GET", "POST"] // Explicitly allow GET and POST methods for the handshake
+    origin: "*", 
+    methods: ["GET", "POST"]
   }
 });
 
@@ -678,7 +678,8 @@ io.on('connection', (socket) => {
                     profile_image_url as "profileImageUrl", 
                     ST_AsGeoJSON(area) as geojson, 
                     area_sqm as area
-                FROM territories;
+                FROM territories
+                WHERE area IS NOT NULL AND NOT ST_IsEmpty(area);
              `;
         }
 
