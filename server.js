@@ -367,7 +367,6 @@ app.get('/clans/:id', authenticate, async (req, res) => {
     }
 });
 
-
 app.put('/clans/:id/photo', authenticate, async (req, res) => {
     const { id } = req.params;
     const { imageUrl } = req.body;
@@ -823,8 +822,10 @@ io.on('connection', (socket) => {
             .map(r => ({ ...r, geojson: JSON.parse(r.geojson) }));
 
         if (batchUpdateData.length > 0) {
+            console.log(`[GAME] Broadcasting territory updates for ${ownerIdsToUpdate.length} owners.`);
             io.emit('batchTerritoryUpdate', batchUpdateData);
         }
+        
         io.emit('trailCleared', { id: socket.id });
 
     } catch (err) {
