@@ -137,6 +137,7 @@ const setupDatabase = async () => {
 };
 
 // --- Middleware ---
+// ONLY ONE DEFINITION FOR checkAdminSecret
 const checkAdminSecret = (req, res, next) => {
     const { secret } = req.query;
     if (!process.env.ADMIN_SECRET_KEY || secret !== process.env.ADMIN_SECRET_KEY) {
@@ -284,12 +285,12 @@ app.get('/leaderboard/clans', async (req, res) => {
                 COUNT(cm.user_id)::integer as member_count,
                 COALESCE(ct.area_sqm, 0) as total_area_sqm,
                 t_leader.username as leader_name,
-                c.leader_id -- Ensure leader_id is selected here
+                c.leader_id
             FROM clans c
             LEFT JOIN clan_members cm ON c.id = cm.clan_id
             LEFT JOIN clan_territories ct ON c.id = ct.clan_id
             LEFT JOIN territories t_leader ON c.leader_id = t_leader.owner_id
-            GROUP BY c.id, ct.area_sqm, t_leader.username
+            GROUP BY c.id, ct.area_sqm, t_leader.username, c.leader_id -- Add c.leader_id to GROUP BY
             ORDER BY total_area_sqm DESC
             LIMIT 100;
         `;
@@ -346,7 +347,7 @@ app.get('/clans', authenticate, async (req, res) => {
             SELECT 
                 c.id, c.name, c.tag, c.description, c.clan_image_url,
                 t.username as leader_name,
-                c.leader_id, -- Ensure leader_id is selected here
+                c.leader_id,
                 (SELECT COUNT(*)::integer FROM clan_members cm WHERE cm.clan_id = c.id) as member_count,
                 (SELECT status FROM clan_join_requests cjr WHERE cjr.clan_id = c.id AND cjr.user_id = $1 AND cjr.status = 'pending') as join_request_status
             FROM clans c
@@ -368,7 +369,7 @@ app.get('/clans/:id', authenticate, async (req, res) => {
             SELECT 
                 c.id, c.name, c.tag, c.description, c.clan_image_url,
                 t.username as leader_name,
-                c.leader_id, -- Ensure leader_id is selected here
+                c.leader_id,
                 (SELECT COUNT(*)::integer FROM clan_members cm WHERE cm.clan_id = c.id) as member_count,
                 COALESCE((SELECT area_sqm FROM clan_territories WHERE clan_id = c.id), 0) as total_area_sqm
             FROM clans c
@@ -597,7 +598,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
 });
 
 // --- ADMIN ENDPOINTS ---
-const checkAdminSecret = (req, res, next) => { // Redefine if it was inside previous snippet
+const checkAdminSecret = (req, res, next) => {
     const { secret } = req.query;
     if (!process.env.ADMIN_SECRET_KEY || secret !== process.env.ADMIN_SECRET_KEY) {
         return res.status(403).send('Forbidden: Invalid or missing secret key.');
@@ -624,7 +625,7 @@ app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
             }
             const [clanFiles] = await bucket.getFiles({ prefix: 'clan_images/' });
              if (clanFiles.length > 0) {
-                await Promise(clanFiles.map(file => file.delete())); // Corrected: Promise.all
+                await Promise.all(clanFiles.map(file => file.delete()));
                  console.log('[ADMIN] All clan images deleted from storage.');
             }
         }
