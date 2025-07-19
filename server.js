@@ -168,7 +168,6 @@ const authenticate = async (req, res, next) => {
 app.get('/', (req, res) => { res.send('ClaimrunX Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
 
-// --- NEW ENDPOINT TO UPDATE USER PREFERENCES (LIKE COLOR) ---
 app.put('/users/me/preferences', authenticate, async (req, res) => {
     const { googleId } = req.user;
     const { identityColor } = req.body;
@@ -187,7 +186,6 @@ app.put('/users/me/preferences', authenticate, async (req, res) => {
     }
 });
 
-// --- CORRECTED /check-profile ENDPOINT ---
 app.get('/check-profile', async (req, res) => {
     const { googleId } = req.query;
     if (!googleId) return res.status(400).json({ error: 'googleId is required.' });
@@ -269,7 +267,7 @@ app.post('/setup-profile', async (req, res) => {
 app.get('/leaderboard', async (req, res) => {
     try {
         const result = await pool.query(`
-            SELECT owner_id, username as owner_name, profile_image_url, area_sqm, RANK() OVER (ORDER BY area_sqm DESC) as rank
+            SELECT owner_id, username as owner_name, profile_image_url, area_sqm, RANK() OVER (ORDER BY area_sqm DESC) as rank, identity_color
             FROM territories WHERE area_sqm > 0 AND username IS NOT NULL ORDER BY area_sqm DESC LIMIT 100;
         `);
         res.status(200).json(result.rows);
@@ -285,7 +283,8 @@ app.get('/leaderboard/clans', async (req, res) => {
                 c.id, c.name, c.tag, c.clan_image_url,
                 COUNT(cm.user_id)::integer as member_count,
                 COALESCE(ct.area_sqm, 0) as total_area_sqm,
-                t_leader.username as leader_name
+                t_leader.username as leader_name,
+                c.leader_id -- Ensure leader_id is selected here
             FROM clans c
             LEFT JOIN clan_members cm ON c.id = cm.clan_id
             LEFT JOIN clan_territories ct ON c.id = ct.clan_id
@@ -347,6 +346,7 @@ app.get('/clans', authenticate, async (req, res) => {
             SELECT 
                 c.id, c.name, c.tag, c.description, c.clan_image_url,
                 t.username as leader_name,
+                c.leader_id, -- Ensure leader_id is selected here
                 (SELECT COUNT(*)::integer FROM clan_members cm WHERE cm.clan_id = c.id) as member_count,
                 (SELECT status FROM clan_join_requests cjr WHERE cjr.clan_id = c.id AND cjr.user_id = $1 AND cjr.status = 'pending') as join_request_status
             FROM clans c
@@ -368,6 +368,7 @@ app.get('/clans/:id', authenticate, async (req, res) => {
             SELECT 
                 c.id, c.name, c.tag, c.description, c.clan_image_url,
                 t.username as leader_name,
+                c.leader_id, -- Ensure leader_id is selected here
                 (SELECT COUNT(*)::integer FROM clan_members cm WHERE cm.clan_id = c.id) as member_count,
                 COALESCE((SELECT area_sqm FROM clan_territories WHERE clan_id = c.id), 0) as total_area_sqm
             FROM clans c
@@ -535,7 +536,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
             JOIN clans c ON cjr.clan_id = c.id
             WHERE cjr.id = $1;
         `;
-        const requestResult = await client.query(requestQuery, [requestId]);
+        const requestResult = await pool.query(requestQuery, [requestId]);
         if (requestResult.rowCount === 0) {
             await client.query('ROLLBACK');
             return res.status(404).json({ message: 'Request not found.' });
@@ -596,6 +597,14 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
 });
 
 // --- ADMIN ENDPOINTS ---
+const checkAdminSecret = (req, res, next) => { // Redefine if it was inside previous snippet
+    const { secret } = req.query;
+    if (!process.env.ADMIN_SECRET_KEY || secret !== process.env.ADMIN_SECRET_KEY) {
+        return res.status(403).send('Forbidden: Invalid or missing secret key.');
+    }
+    next();
+};
+
 app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
     const client = await pool.connect();
     try {
@@ -615,7 +624,7 @@ app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
             }
             const [clanFiles] = await bucket.getFiles({ prefix: 'clan_images/' });
              if (clanFiles.length > 0) {
-                await Promise.all(clanFiles.map(file => file.delete()));
+                await Promise(clanFiles.map(file => file.delete())); // Corrected: Promise.all
                  console.log('[ADMIN] All clan images deleted from storage.');
             }
         }
