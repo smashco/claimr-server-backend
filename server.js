@@ -5,6 +5,10 @@ const { Server } = require("socket.io");
 const { Pool } = require('pg');
 const admin = require('firebase-admin');
 
+// --- Require the Game Logic Handlers ---
+const handleSoloClaim = require('./game_logic/solo_handler');
+const handleClanClaim = require('./game_logic/clan_handler');
+
 // --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
   console.error('SERVER ERROR: Unhandled Rejection at:', promise, 'reason:', reason);
@@ -18,7 +22,14 @@ process.on('uncaughtException', (error) => {
 const app = express();
 app.use(express.json());
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+
+// --- UPDATED CORS SETTINGS TO FIX CONNECTION ISSUE ---
+const io = new Server(server, {
+  cors: {
+    origin: "*", // Allow all origins
+    methods: ["GET", "POST"] // Explicitly allow GET and POST methods for the handshake
+  }
+});
 
 // --- Firebase Admin SDK Initialization ---
 try {
@@ -39,7 +50,6 @@ try {
 // --- Constants & Database Pool ---
 const PORT = process.env.PORT || 10000;
 const SERVER_TICK_RATE_MS = 1000;
-const MINIMUM_CLAIM_AREA_SQM = 100;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -125,7 +135,6 @@ const setupDatabase = async () => {
     client.release();
   }
 };
-
 
 // --- Middleware ---
 const checkAdminSecret = (req, res, next) => {
@@ -560,7 +569,6 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     }
 });
 
-
 // --- ADMIN ENDPOINTS ---
 app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
     const client = await pool.connect();
@@ -608,117 +616,6 @@ app.get('/admin/reset-all-territories', checkAdminSecret, async (req, res) => {
     }
 });
 
-// --- HELPER FUNCTIONS FOR CLAIM LOGIC ---
-
-async function handleSoloClaim(socket, player, trail, baseClaim, client) {
-    const attackerId = player.googleId;
-    let newClaimGeom;
-
-    // Logic for the very first solo claim (merging trail with the initial circle)
-    if (baseClaim && trail && trail.length >= 4) {
-        const { center, radius } = baseClaim;
-        if (!center || !radius) return socket.emit('claimRejected', { reason: 'Invalid base data for merge.' });
-        const trailCoords = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
-        const trailWKT = `POLYGON((${trailCoords}, ${trail[0].lng} ${trail[0].lat}))`;
-        const trailGeom = `ST_SetSRID(ST_GeomFromText('${trailWKT}'), 4326)`;
-        const circleGeom = `ST_Buffer(ST_SetSRID(ST_MakePoint(${center.lng}, ${center.lat}), 4326)::geography, ${radius})::geometry`;
-        newClaimGeom = `ST_Union(${trailGeom}, ${circleGeom})`;
-    } 
-    // Logic for a standard expansion claim
-    else if (trail && trail.length >= 4) {
-        const coordinatesString = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
-        const newClaimWKT = `POLYGON((${coordinatesString}, ${trail[0].lng} ${trail[0].lat}))`;
-        newClaimGeom = `ST_SetSRID(ST_GeomFromText('${newClaimWKT}'), 4326)`;
-    } else {
-        return socket.emit('claimRejected', { reason: 'Invalid trail for solo claim.' });
-    }
-    
-    const areaResult = await client.query(`SELECT ST_Area(${newClaimGeom}::geography) as area;`);
-    const newArea = areaResult.rows[0].area;
-    if (newArea < MINIMUM_CLAIM_AREA_SQM) {
-        throw new Error(`Area is too small (${Math.round(newArea)}m²).`);
-    }
-
-    // --- Area Steal Logic ---
-    const victimsResult = await client.query(
-        `SELECT owner_id FROM territories WHERE owner_id != $1 AND area IS NOT NULL AND ST_Intersects(area, ${newClaimGeom})`, 
-        [attackerId]
-    );
-    const victimIds = victimsResult.rows.map(r => r.owner_id);
-    const ownerIdsToUpdate = [attackerId, ...victimIds];
-
-    for (const victimId of victimIds) {
-        console.log(`[GAME] Attacker ${attackerId} is cutting territory from victim ${victimId}`);
-        const smartCutQuery = `
-            WITH new_geom AS (SELECT ST_Difference(t.area, ${newClaimGeom}) as geom FROM territories t WHERE t.owner_id = $1),
-            dumped AS (SELECT (ST_Dump(geom)).geom as single_geom FROM new_geom),
-            largest_piece AS (SELECT single_geom FROM dumped ORDER BY ST_Area(single_geom) DESC LIMIT 1)
-            UPDATE territories SET 
-                area = (SELECT single_geom FROM largest_piece),
-                area_sqm = ST_Area(((SELECT single_geom FROM largest_piece))::geography)
-            WHERE owner_id = $1;
-        `;
-        await client.query(smartCutQuery, [victimId]);
-    }
-
-    const upsertQuery = `
-        INSERT INTO territories (owner_id, area, area_sqm) VALUES ($1, ${newClaimGeom}, $2)
-        ON CONFLICT (owner_id) DO UPDATE SET 
-            area = ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3),
-            area_sqm = ST_Area((ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3))::geography)
-        RETURNING area_sqm;
-    `;
-    const result = await client.query(upsertQuery, [attackerId, newArea]);
-    const finalTotalArea = result.rows[0].area_sqm;
-
-    return { finalTotalArea, ownerIdsToUpdate };
-}
-
-
-async function handleClanClaim(socket, player, trail, baseClaim, client) {
-    const clanId = player.clanId;
-    if (!clanId) throw new Error('Player not in a clan for a clan claim.');
-
-    let newClaimGeom;
-    // Logic for any clan claim starting from an active base
-    if (baseClaim && trail && trail.length >= 4) {
-        const { center, radius } = baseClaim;
-        if (!center || !radius) return socket.emit('claimRejected', { reason: 'Invalid clan base data for merge.' });
-        const trailCoords = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
-        const trailWKT = `POLYGON((${trailCoords}, ${trail[0].lng} ${trail[0].lat}))`;
-        const trailGeom = `ST_SetSRID(ST_GeomFromText('${trailWKT}'), 4326)`;
-        const circleGeom = `ST_Buffer(ST_SetSRID(ST_MakePoint(${center.lng}, ${center.lat}), 4326)::geography, ${radius})::geometry`;
-        newClaimGeom = `ST_Union(${trailGeom}, ${circleGeom})`;
-    } 
-    // Logic for a standard expansion claim (not starting from a base circle, but from existing territory)
-    else if (trail && trail.length >= 4) {
-        const coordinatesString = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
-        const newClaimWKT = `POLYGON((${coordinatesString}, ${trail[0].lng} ${trail[0].lat}))`;
-        newClaimGeom = `ST_SetSRID(ST_GeomFromText('${newClaimWKT}'), 4326)`;
-    } else {
-        return socket.emit('claimRejected', { reason: 'Invalid trail for clan claim.' });
-    }
-
-    const areaResult = await client.query(`SELECT ST_Area(${newClaimGeom}::geography) as area;`);
-    const newArea = areaResult.rows[0].area;
-    if (newArea < MINIMUM_CLAIM_AREA_SQM) {
-        throw new Error(`Area is too small (${Math.round(newArea)}m²).`);
-    }
-    
-    const ownerIdsToUpdate = [clanId.toString()];
-    const upsertQuery = `
-        INSERT INTO clan_territories (clan_id, owner_id, area, area_sqm) VALUES ($1, $2, ${newClaimGeom}, $3)
-        ON CONFLICT (clan_id) DO UPDATE SET
-            area = ST_Union(clan_territories.area, ${newClaimGeom}),
-            area_sqm = ST_Area(ST_Union(clan_territories.area, ${newClaimGeom})::geography),
-            owner_id = $2
-        RETURNING area_sqm;
-    `;
-    const result = await client.query(upsertQuery, [clanId, player.googleId, newArea]);
-    const finalTotalArea = result.rows[0].area_sqm;
-
-    return { finalTotalArea, ownerIdsToUpdate };
-}
 
 // --- Socket.IO Logic ---
 async function broadcastAllPlayers() {
@@ -886,7 +783,7 @@ io.on('connection', (socket) => {
             throw new Error('Invalid game mode specified.');
         }
 
-        if (!result) { // A rejection might have happened inside the handler
+        if (!result) { 
             await client.query('ROLLBACK');
             return;
         }
@@ -895,10 +792,8 @@ io.on('connection', (socket) => {
         
         await client.query('COMMIT');
         
-        // Notify the claiming player of success
         socket.emit('claimSuccessful', { newTotalArea: finalTotalArea });
         
-        // Prepare and broadcast the updated territory data to all players
         const finalResultQuery = gameMode === 'clan' ? `
             SELECT clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm as area
             FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[]);
@@ -919,9 +814,15 @@ io.on('connection', (socket) => {
     } catch (err) {
         await client.query('ROLLBACK');
         console.error('[DB] FATAL Error during territory claim:', err);
-        // Use the error message if it's one we created, otherwise a generic one.
-        const reason = err.message.startsWith('Area is too small') ? err.message : 'Server error during claim.';
+        
+        let reason = 'Server error during claim.';
+        if (err && err.message && typeof err.message === 'string') {
+            if (err.message.startsWith('Area is too small')) {
+                reason = err.message;
+            }
+        }
         socket.emit('claimRejected', { reason });
+
     } finally {
         client.release();
     }
@@ -930,13 +831,12 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     const player = players[socket.id];
     if (player) {
-      console.log(`[SERVER] User ${player.name} disconnected: ${socket.id}`);
+      console.log(`[SERVER] User ${player?.name || 'Unknown'} disconnected: ${socket.id}`);
       delete players[socket.id];
       io.emit('playerLeft', { id: socket.id });
     }
   });
 });
-
 
 // --- Server Start ---
 setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
