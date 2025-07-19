@@ -137,7 +137,7 @@ const setupDatabase = async () => {
 };
 
 // --- Middleware ---
-// THIS IS THE ONLY DECLARATION FOR checkAdminSecret
+// THIS IS THE ONLY DECLARATION FOR checkAdminSecret. It must not be duplicated.
 const checkAdminSecret = (req, res, next) => {
     const { secret } = req.query;
     if (!process.env.ADMIN_SECRET_KEY || secret !== process.env.ADMIN_SECRET_KEY) {
@@ -554,7 +554,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
         }
         
         if (status === 'approved') {
-            const memberCountRes = await client.query('SELECT COUNT(*) as count FROM clan_members WHERE clan_id = $1', [clan_id]);
+            const memberCountRes = await pool.query('SELECT COUNT(*) as count FROM clan_members WHERE clan_id = $1', [clan_id]);
             const memberCount = parseInt(memberCountRes.rows[0].count, 10);
             if (memberCount >= 20) {
                  await client.query('ROLLBACK');
