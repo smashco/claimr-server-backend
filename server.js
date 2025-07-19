@@ -49,7 +49,7 @@ try {
 
 // --- Constants & Database Pool ---
 const PORT = process.env.PORT || 10000;
-const SERVER_TICK_RATE_MS = 1000;
+const SERVER_TICK_RATE_MS = 500; // Broadcast updates twice per second
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -616,7 +616,6 @@ app.get('/admin/reset-all-territories', checkAdminSecret, async (req, res) => {
     }
 });
 
-
 // --- Socket.IO Logic ---
 async function broadcastAllPlayers() {
     const playerIds = Object.keys(players);
@@ -700,6 +699,19 @@ io.on('connection', (socket) => {
             playerHasRecord: playerHasRecord 
         });
 
+        const activeTrails = [];
+        for (const playerId in players) {
+          if (playerId !== socket.id && players[playerId].isDrawing && players[playerId].activeTrail.length > 0) {
+            activeTrails.push({
+              id: playerId,
+              trail: players[playerId].activeTrail
+            });
+          }
+        }
+        if (activeTrails.length > 0) {
+          socket.emit('existingLiveTrails', activeTrails);
+        }
+
     } catch (err) { 
       console.error(`[Socket] FATAL ERROR in playerJoined for ${socket.id}:`, err);
       socket.emit('error', { message: 'Failed to load game state.' });
@@ -707,17 +719,20 @@ io.on('connection', (socket) => {
   });
 
   socket.on('locationUpdate', async (data) => {
-    const attacker = players[socket.id];
-    if (!attacker || !attacker.isDrawing) return;
+    const player = players[socket.id];
+    if (!player) return;
 
-    attacker.lastKnownPosition = data;
-    attacker.activeTrail.push(data);
+    player.lastKnownPosition = data;
+
+    if (!player.isDrawing) return;
+
+    player.activeTrail.push(data);
     socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data });
 
-    if (attacker.activeTrail.length < 2) return;
+    if (player.activeTrail.length < 2) return;
 
-    const lastPoint = attacker.activeTrail[attacker.activeTrail.length - 1];
-    const secondLastPoint = attacker.activeTrail[attacker.activeTrail.length - 2];
+    const lastPoint = player.activeTrail[player.activeTrail.length - 1];
+    const secondLastPoint = player.activeTrail[player.activeTrail.length - 2];
     const attackerSegmentWKT = `LINESTRING(${secondLastPoint.lng} ${secondLastPoint.lat}, ${lastPoint.lng} ${lastPoint.lat})`;
     const attackerSegmentGeom = `ST_SetSRID(ST_GeomFromText('${attackerSegmentWKT}'), 4326)`;
 
@@ -734,9 +749,9 @@ io.on('connection', (socket) => {
                 const result = await pool.query(intersectionQuery);
                 
                 if (result.rows[0].intersects) {
-                    console.log(`[GAME] TRAIL CUT! Attacker ${attacker.name} cut Victim ${victim.name}`);
+                    console.log(`[GAME] TRAIL CUT! Attacker ${player.name} cut Victim ${victim.name}`);
                     
-                    io.to(victimId).emit('runTerminated', { reason: `Your trail was cut by ${attacker.name}!` });
+                    io.to(victimId).emit('runTerminated', { reason: `Your trail was cut by ${player.name}!` });
                     
                     victim.isDrawing = false;
                     victim.activeTrail = [];
