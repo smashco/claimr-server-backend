@@ -1,3 +1,5 @@
+// claimr_server/server.js
+
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -56,88 +58,91 @@ const pool = new Pool({
 });
 
 const players = {};
+// claimr_server/server.js - PASTE AFTER SEGMENT 1
 
 // --- Database Schema Setup ---
 const setupDatabase = async () => {
-  const client = await pool.connect();
-  try {
-    await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
-    console.log('[DB] PostGIS extension is enabled.');
+    const client = await pool.connect();
+    try {
+      await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
+      console.log('[DB] PostGIS extension is enabled.');
+  
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS territories (
+          id SERIAL PRIMARY KEY,
+          owner_id VARCHAR(255) NOT NULL UNIQUE,
+          owner_name VARCHAR(255),
+          username VARCHAR(50) UNIQUE,
+          profile_image_url TEXT,
+          identity_color VARCHAR(10) DEFAULT '#39FF14',
+          area GEOMETRY(GEOMETRY, 4326),
+          area_sqm REAL,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      console.log('[DB] "territories" table is ready.');
+  
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS clans (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(50) NOT NULL UNIQUE,
+          tag VARCHAR(5) NOT NULL UNIQUE,
+          description TEXT,
+          clan_image_url TEXT,
+          leader_id VARCHAR(255) NOT NULL,
+          base_location GEOMETRY(POINT, 4326),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      console.log('[DB] "clans" table is ready.');
+  
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS clan_members (
+          clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
+          user_id VARCHAR(255) NOT NULL,
+          role VARCHAR(20) NOT NULL DEFAULT 'member',
+          joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (clan_id, user_id)
+        );
+      `);
+      console.log('[DB] "clan_members" table is ready.');
+  
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS clan_join_requests (
+          id SERIAL PRIMARY KEY,
+          clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
+          user_id VARCHAR(255) NOT NULL,
+          status VARCHAR(20) NOT NULL DEFAULT 'pending',
+          requested_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(clan_id, user_id)
+        );
+      `);
+      console.log('[DB] "clan_join_requests" table is ready.');
+      
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS clan_territories (
+          id SERIAL PRIMARY KEY,
+          clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE UNIQUE,
+          owner_id VARCHAR(255) NOT NULL,
+          area GEOMETRY(GEOMETRY, 4326),
+          area_sqm REAL,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      console.log('[DB] "clan_territories" table is ready.');
+  
+    } catch (err) {
+      console.error('[DB] FATAL ERROR during database setup:', err);
+      throw err;
+    } finally {
+      client.release();
+    }
+  };
 
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS territories (
-        id SERIAL PRIMARY KEY,
-        owner_id VARCHAR(255) NOT NULL UNIQUE,
-        owner_name VARCHAR(255),
-        username VARCHAR(50) UNIQUE,
-        profile_image_url TEXT,
-        identity_color VARCHAR(10) DEFAULT '#39FF14',
-        area GEOMETRY(GEOMETRY, 4326),
-        area_sqm REAL,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    console.log('[DB] "territories" table is ready.');
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS clans (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(50) NOT NULL UNIQUE,
-        tag VARCHAR(5) NOT NULL UNIQUE,
-        description TEXT,
-        clan_image_url TEXT,
-        leader_id VARCHAR(255) NOT NULL,
-        base_location GEOMETRY(POINT, 4326),
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    console.log('[DB] "clans" table is ready.');
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS clan_members (
-        clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
-        user_id VARCHAR(255) NOT NULL,
-        role VARCHAR(20) NOT NULL DEFAULT 'member',
-        joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (clan_id, user_id)
-      );
-    `);
-    console.log('[DB] "clan_members" table is ready.');
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS clan_join_requests (
-        id SERIAL PRIMARY KEY,
-        clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
-        user_id VARCHAR(255) NOT NULL,
-        status VARCHAR(20) NOT NULL DEFAULT 'pending',
-        requested_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(clan_id, user_id)
-      );
-    `);
-    console.log('[DB] "clan_join_requests" table is ready.');
-    
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS clan_territories (
-        id SERIAL PRIMARY KEY,
-        clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE UNIQUE,
-        owner_id VARCHAR(255) NOT NULL,
-        area GEOMETRY(GEOMETRY, 4326),
-        area_sqm REAL,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    console.log('[DB] "clan_territories" table is ready.');
-
-  } catch (err) {
-    console.error('[DB] FATAL ERROR during database setup:', err);
-    throw err;
-  } finally {
-    client.release();
-  }
-};
+  // claimr_server/server.js - PASTE AFTER SEGMENT 2
 
 // --- Middleware ---
-// THIS IS THE ONLY DECLARATION FOR checkAdminSecret. It must not be duplicated.
+// THIS IS THE ONLY DECLARATION FOR checkAdminSecret.
 const checkAdminSecret = (req, res, next) => {
     const { secret } = req.query;
     if (!process.env.ADMIN_SECRET_KEY || secret !== process.env.ADMIN_SECRET_KEY) {
@@ -164,6 +169,8 @@ const authenticate = async (req, res, next) => {
     res.status(403).send('Unauthorized: Invalid token.');
   }
 };
+
+// claimr_server/server.js - PASTE AFTER SEGMENT 3
 
 // --- API Endpoints ---
 app.get('/', (req, res) => { res.send('ClaimrunX Server is running!'); });
@@ -598,14 +605,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
 });
 
 // --- ADMIN ENDPOINTS ---
-const checkAdminSecret = (req, res, next) => {
-    const { secret } = req.query;
-    if (!process.env.ADMIN_SECRET_KEY || secret !== process.env.ADMIN_SECRET_KEY) {
-        return res.status(403).send('Forbidden: Invalid or missing secret key.');
-    }
-    next();
-};
-
+// The checkAdminSecret middleware is defined once above.
 app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
     const client = await pool.connect();
     try {
