@@ -26,7 +26,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: "*", 
-    methods: ["GET", "POST"]
+    methods: ["GET", "POST", "PUT"]
   }
 });
 
@@ -64,7 +64,6 @@ const setupDatabase = async () => {
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
     console.log('[DB] PostGIS extension is enabled.');
 
-    // --- UPDATED TABLE SCHEMA ---
     await client.query(`
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
@@ -87,7 +86,7 @@ const setupDatabase = async () => {
         tag VARCHAR(5) NOT NULL UNIQUE,
         description TEXT,
         clan_image_url TEXT,
-        leader_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id),
+        leader_id VARCHAR(255) NOT NULL,
         base_location GEOMETRY(POINT, 4326),
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
@@ -97,7 +96,7 @@ const setupDatabase = async () => {
     await client.query(`
       CREATE TABLE IF NOT EXISTS clan_members (
         clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
-        user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
+        user_id VARCHAR(255) NOT NULL,
         role VARCHAR(20) NOT NULL DEFAULT 'member',
         joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (clan_id, user_id)
@@ -109,7 +108,7 @@ const setupDatabase = async () => {
       CREATE TABLE IF NOT EXISTS clan_join_requests (
         id SERIAL PRIMARY KEY,
         clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
-        user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
+        user_id VARCHAR(255) NOT NULL,
         status VARCHAR(20) NOT NULL DEFAULT 'pending',
         requested_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(clan_id, user_id)
@@ -188,15 +187,21 @@ app.put('/users/me/preferences', authenticate, async (req, res) => {
     }
 });
 
+// --- CORRECTED /check-profile ENDPOINT ---
 app.get('/check-profile', async (req, res) => {
     const { googleId } = req.query;
     if (!googleId) return res.status(400).json({ error: 'googleId is required.' });
     try {
-        // --- UPDATED QUERY TO INCLUDE identity_color ---
         const query = `
             SELECT 
-                t.username, t.profile_image_url, t.area_sqm, t.identity_color,
-                c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
+                t.username, 
+                t.profile_image_url, 
+                t.area_sqm,
+                t.identity_color,
+                c.id as clan_id, 
+                c.name as clan_name, 
+                c.tag as clan_tag, 
+                cm.role as clan_role,
                 (c.base_location IS NOT NULL) as base_is_set
             FROM territories t
             LEFT JOIN clan_members cm ON t.owner_id = cm.user_id
@@ -211,7 +216,7 @@ app.get('/check-profile', async (req, res) => {
                 profileExists: true,
                 username: row.username,
                 profileImageUrl: row.profile_image_url,
-                identityColor: row.identity_color, // Added to response
+                identityColor: row.identity_color,
                 area_sqm: row.area_sqm || 0,
                 clan_info: null
             };
@@ -229,13 +234,10 @@ app.get('/check-profile', async (req, res) => {
             res.json({ profileExists: false });
         }
     } catch (err) {
-        console.error('[API] Error checking profile:', err);
+        console.error('[API] Error in /check-profile:', err);
         res.status(500).json({ error: 'Server error while checking profile.' });
     }
 });
-
-// ... (THE REST OF YOUR server.js FILE REMAINS EXACTLY THE SAME) ...
-// (app.get('/check-username', ...), (app.post('/setup-profile', ...), etc. all stay)
 
 app.get('/check-username', async (req, res) => {
     const { username } = req.query;
