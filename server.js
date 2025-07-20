@@ -7,9 +7,7 @@ const { Server } = require("socket.io");
 const { Pool } = require('pg');
 const admin = require('firebase-admin');
 
-// --- Require the Game Logic Handlers ---
-const handleSoloClaim = require('./game_logic/solo_handler');
-// const handleClanClaim = require('./game_logic/clan_handler'); // Keep for future use
+// --- REMOVED: require('./game_logic/solo_handler'); and clan_handler ---
 
 // --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -693,7 +691,7 @@ io.on('connection', (socket) => {
         players[socket.id] = { id: socket.id, name, googleId, clanId, role, gameMode, lastKnownPosition: null, isDrawing: false, activeTrail: [] };
     
         let territoryQuery;
-        let identityQuery;
+        let identityQuery; // Declare identityQuery here
 
         if (gameMode === 'clan') {
             console.log(`[Socket] Fetching territories for CLAN mode.`);
@@ -729,9 +727,12 @@ io.on('connection', (socket) => {
             );
         }
 
-        const [territoryResult] = await Promise.all([pool.query(territoryQuery), identityQuery]);
+        const [territoryResult] = await Promise.all([
+          pool.query(territoryQuery),
+          identityColor ? identityQuery : Promise.resolve(null) // Only await if identityQuery was actually created
+        ]);
 
-        const activeTerritories = territoryResult.rows
+        const activeTerritories = territoryResult[0].rows // territoryResult is an array from Promise.all
             .filter(row => row.geojson)
             .map(row => ({ 
                 ...row,
@@ -829,71 +830,107 @@ io.on('connection', (socket) => {
     io.emit('trailCleared', { id: socket.id });
   });
 
+  // --- CONSOLIDATED CLAIM TERRITORY LOGIC ---
   socket.on('claimTerritory', async (req) => {
     const player = players[socket.id];
     if (!player || !player.googleId) return;
     
-    // --- CORRECTED DESTRUCTURING ---
-    const { gameMode, trail, baseClaim } = req;
-    const client = await pool.connect();
+    // Destructure all relevant data from the client request
+    const { gameMode, trail, isExpansion, initialBase } = req; // Added isExpansion and initialBase
+    
+    const client = await pool.connect(); // Get a client for transaction
     try {
-        await client.query('BEGIN');
-        
-        let result;
+        await client.query('BEGIN'); // Start transaction
+
+        if (!trail || trail.length < 3) { // Basic validation
+            throw new Error('Trail is too short to form a polygon.');
+        }
+
+        const trailPointsWKT = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
+        const trailPolygonGeom = `ST_SetSRID(ST_MakePolygon(ST_GeomFromText('LINESTRING(${trailPointsWKT})')), 4326)`;
+
+        let finalGeometryQuery;
+        let ownerIdsToUpdate = [player.googleId];
+        let totalAreaQuery = `SELECT area_sqm FROM territories WHERE owner_id = $1`;
+
         if (gameMode === 'solo') {
-            // Pass the entire baseClaim object to the handler
-            result = await handleSoloClaim(socket, player, trail, baseClaim, client);
+            const existingTerritoryRes = await client.query('SELECT area FROM territories WHERE owner_id = $1', [player.googleId]);
+            const existingTerritoryGeom = existingTerritoryRes.rows[0]?.area;
+
+            if (isExpansion) {
+                if (!existingTerritoryGeom) {
+                    throw new Error('No existing territory to expand for this player.');
+                }
+                // Perform a union (merge) of existing territory and the new trail
+                finalGeometryQuery = `ST_Multi(ST_Union(ST_GeomFromEWKB($1), ${trailPolygonGeom}))`;
+                // Pass existing territory as EWKB to avoid re-parsing GeoJSON in query
+                const existingTerritoryEWKB = existingTerritoryRes.rows[0].area.toString('hex'); // Get EWKB as hex string
+                await client.query(
+                    `UPDATE territories SET area = ${finalGeometryQuery}, area_sqm = ST_Area(${finalGeometryQuery}::geography) WHERE owner_id = $2`,
+                    [existingTerritoryEWKB, player.googleId]
+                );
+            } else { // Initial Claim
+                if (existingTerritoryGeom) {
+                    throw new Error('You already have a base. Expand it instead of trying to claim a new one.');
+                }
+                if (!initialBase || !initialBase.center || !initialBase.radius) {
+                    throw new Error('Missing initialBase data for first claim.');
+                }
+                const initialBasePointWKT = `POINT(${initialBase.center.lng} ${initialBase.center.lat})`;
+                // Create a circle polygon from the initialBase point and radius using ST_Buffer
+                const initialBaseCircleGeom = `ST_SetSRID(ST_Buffer(ST_GeomFromText('${initialBasePointWKT}'), ${initialBase.radius}), 4326)`;
+                
+                // Union the generated circle and the new trail polygon
+                finalGeometryQuery = `ST_Multi(ST_Union(${initialBaseCircleGeom}, ${trailPolygonGeom}))`;
+
+                await client.query(
+                    `UPDATE territories SET area = ${finalGeometryQuery}, area_sqm = ST_Area(${finalGeometryQuery}::geography) WHERE owner_id = $1`,
+                    [player.googleId]
+                );
+            }
+            
+            const totalAreaRes = await client.query(totalAreaQuery, [player.googleId]);
+            const finalTotalArea = totalAreaRes.rows[0]?.area_sqm || 0;
+
+            await client.query('COMMIT'); // Commit transaction
+            
+            socket.emit('claimSuccessful', { newTotalArea: finalTotalArea }); // Send success to client
+
+            // Broadcast the updated territory for all players to see
+            const updatedTerritoryRes = await pool.query(
+                `SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm, identity_color as "identityColor" FROM territories WHERE owner_id = $1`,
+                [player.googleId]
+            );
+            const batchUpdateData = updatedTerritoryRes.rows
+                .filter(r => r.geojson)
+                .map(r => ({ ...r, geojson: JSON.parse(r.geojson) }));
+
+            if (batchUpdateData.length > 0) {
+                console.log(`[GAME] Broadcasting territory update for ${player.name}.`);
+                io.emit('batchTerritoryUpdate', batchUpdateData);
+            }
+
         } else if (gameMode === 'clan') {
-            // result = await handleClanClaim(socket, player, trail, baseClaim, client);
+            // Clan mode claim logic (currently not implemented, client should not send this yet)
             throw new Error('Clan claim mode not implemented yet.');
         } else {
             throw new Error('Invalid game mode specified.');
         }
 
-        if (!result) { 
-            await client.query('ROLLBACK');
-            return;
-        }
-
-        const { finalTotalArea, ownerIdsToUpdate } = result;
-        
-        await client.query('COMMIT');
-        
-        socket.emit('claimSuccessful', { newTotalArea: finalTotalArea });
-        
-        const finalResultQuery = gameMode === 'clan' ? `
-            SELECT clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm 
-            FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[]);
-        ` : `
-            SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm, identity_color as "identityColor"
-            FROM territories WHERE owner_id = ANY($1::varchar[])`;
-        
-        const finalResult = await pool.query(finalResultQuery, [ownerIdsToUpdate]);
-        const batchUpdateData = finalResult.rows
-            .filter(r => r.geojson)
-            .map(r => ({ ...r, geojson: JSON.parse(r.geojson) }));
-
-        if (batchUpdateData.length > 0) {
-            console.log(`[GAME] Broadcasting territory updates for ${ownerIdsToUpdate.length} owners.`);
-            io.emit('batchTerritoryUpdate', batchUpdateData);
-        }
-        
-        io.emit('trailCleared', { id: socket.id });
+        io.emit('trailCleared', { id: socket.id }); // Clear trail visual on map for all clients
 
     } catch (err) {
-        await client.query('ROLLBACK');
-        console.error('[DB] FATAL Error during territory claim:', err);
+        await client.query('ROLLBACK'); // Rollback transaction on error
+        console.error('[DB] Error during territory claim:', err);
         
         let reason = 'Server error during claim.';
         if (err && err.message && typeof err.message === 'string') {
-            if (err.message.startsWith('Claimed area is too small')) {
-                reason = err.message;
-            }
+            reason = err.message; // Use specific error message if available
         }
-        socket.emit('claimRejected', { reason });
+        socket.emit('claimRejected', { reason }); // Notify client of rejection
 
     } finally {
-        client.release();
+        client.release(); // Release client back to pool
     }
   });
   
