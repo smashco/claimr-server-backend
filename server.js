@@ -9,8 +9,7 @@ const admin = require('firebase-admin');
 
 // --- Require the Game Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
-// Keep a placeholder for clan handler if it exists
-// const handleClanClaim = require('./game_logic/clan_handler'); 
+// const handleClanClaim = require('./game_logic/clan_handler'); // Keep for future use
 
 // --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -653,14 +652,21 @@ async function broadcastAllPlayers() {
     const googleIds = Object.values(players).map(p => p.googleId).filter(id => id);
     if (googleIds.length === 0) return;
     try {
-        const profileQuery = await pool.query('SELECT owner_id, username, profile_image_url FROM territories WHERE owner_id = ANY($1::varchar[])', [googleIds]);
+        const profileQuery = await pool.query('SELECT owner_id, username, profile_image_url, identity_color FROM territories WHERE owner_id = ANY($1::varchar[])', [googleIds]);
         const profiles = profileQuery.rows.reduce((acc, row) => {
-            acc[row.owner_id] = { username: row.username, imageUrl: row.profile_image_url };
+            acc[row.owner_id] = { username: row.username, imageUrl: row.profile_image_url, identityColor: row.identity_color };
             return acc;
         }, {});
         const allPlayersData = Object.values(players).map(p => {
             const profile = profiles[p.googleId] || {};
-            return { id: p.id, name: profile.username || p.name, imageUrl: profile.imageUrl, lastKnownPosition: p.lastKnownPosition };
+            return { 
+                id: p.id, 
+                name: profile.username || p.name, 
+                imageUrl: profile.imageUrl, 
+                lastKnownPosition: p.lastKnownPosition,
+                identityColor: profile.identityColor,
+                isDrawing: p.isDrawing 
+            };
         });
         io.emit('allPlayersUpdate', allPlayersData);
     } catch(e) {
@@ -696,7 +702,7 @@ io.on('connection', (socket) => {
                     ct.clan_id::text as "ownerId",
                     c.name as "ownerName",
                     c.clan_image_url as "profileImageUrl",
-                    '#00FFFF' as "identityColor", -- Default Cyan for clans
+                    '#00FFFF' as "identityColor",
                     ST_AsGeoJSON(ct.area) as geojson, 
                     ct.area_sqm
                 FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id;
@@ -716,7 +722,6 @@ io.on('connection', (socket) => {
              `;
         }
         
-        // Update player's identity color in the database
         if (identityColor) {
             identityQuery = pool.query(
                 'UPDATE territories SET identity_color = $1 WHERE owner_id = $2',
@@ -828,19 +833,18 @@ io.on('connection', (socket) => {
     const player = players[socket.id];
     if (!player || !player.googleId) return;
     
-    // Note: baseClaim was the old name, now it's baseCenter/baseRadius
-    const { gameMode, trail, baseCenter, baseRadius } = req;
+    // --- CORRECTED DESTRUCTURING ---
+    const { gameMode, trail, baseClaim } = req;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         
         let result;
         if (gameMode === 'solo') {
-            const baseClaimData = baseCenter ? { lat: baseCenter.lat, lng: baseCenter.lng, radius: baseRadius } : null;
-            result = await handleSoloClaim(socket, player, trail, baseClaimData, client);
+            // Pass the entire baseClaim object to the handler
+            result = await handleSoloClaim(socket, player, trail, baseClaim, client);
         } else if (gameMode === 'clan') {
-            // Placeholder for when clan logic is added
-            // result = await handleClanClaim(socket, player, trail, baseClaimData, client);
+            // result = await handleClanClaim(socket, player, trail, baseClaim, client);
             throw new Error('Clan claim mode not implemented yet.');
         } else {
             throw new Error('Invalid game mode specified.');

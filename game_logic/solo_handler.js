@@ -1,86 +1,102 @@
-// game_logic/solo_handler.js
-const { createPolygonGeom } = require('./utils');
-const MINIMUM_CLAIM_AREA_SQM = 100;
+// claimr_server/game_logic/solo_handler.js
+
+const turf = require('@turf/turf');
+const wellknown = require('wellknown');
+
+const MINIMUM_CLAIM_AREA_SQM = 100; // Minimum area in square meters to be a valid claim
 
 /**
- * Handles a territory claim for a player in Solo Mode.
- * @param {object} socket - The socket.io socket of the player.
- * @param {object} player - The player object from the server's state.
- * @param {Array<Object>} trail - The array of LatLng points for the new trail.
- * @param {object|null} baseClaim - Data for the initial small circle on a player's first run.
- * @param {object} client - The PostgreSQL client for database transactions.
- * @returns {Promise<object|undefined>} An object with finalTotalArea and ownerIdsToUpdate, or undefined if rejected.
+ * Handles a territory claim for a solo player.
+ * @param {SocketIO.Socket} socket - The socket of the player making the claim.
+ * @param {object} player - The player object from the server's memory.
+ * @param {Array<object>} trail - An array of {lat, lng} points for the trail.
+ * @param {object} baseClaim - An object with {lat, lng, radius} for the first claim.
+ * @param {pg.PoolClient} client - The database client for transactions.
+ * @returns {Promise<object|null>} An object with finalTotalArea and ownerIdsToUpdate, or null on handled error.
  */
 async function handleSoloClaim(socket, player, trail, baseClaim, client) {
-    const attackerId = player.googleId;
-    let newClaimGeom;
-
-    const trailGeom = createPolygonGeom(trail);
-    if (!trailGeom) {
-        return socket.emit('claimRejected', { reason: 'Invalid trail for solo claim.' });
-    }
-
-    // If a baseClaim exists, it means this is the player's very first run.
-    // Merge their trail with the small starting circle.
-    if (baseClaim) {
-        const { center, radius } = baseClaim;
-        if (!center || !radius) {
-            return socket.emit('claimRejected', { reason: 'Invalid base data for merge.' });
-        }
-        const circleGeom = `ST_Buffer(ST_SetSRID(ST_MakePoint(${center.lng}, ${center.lat}), 4326)::geography, ${radius})::geometry`;
-        newClaimGeom = `ST_Union(${trailGeom}, ${circleGeom})`;
-    } 
-    // Otherwise, it's a standard expansion.
-    else {
-        newClaimGeom = trailGeom;
-    }
+    const { googleId, name } = player;
     
-    // Check if the newly formed area is large enough.
-    const areaResult = await client.query(`SELECT ST_Area(${newClaimGeom}::geography) as area;`);
-    const newArea = areaResult.rows[0].area;
-    if (newArea < MINIMUM_CLAIM_AREA_SQM) {
-        throw new Error(`Area is too small (${Math.round(newArea)}m²).`);
+    // 1. Basic Validation
+    if (!trail || trail.length < 4) { // A polygon needs at least 3 unique vertices + closing point
+        socket.emit('claimRejected', { reason: 'Trail is too short to form a polygon.' });
+        return null;
     }
 
-    // --- Area Steal Logic ---
-    // Find all other players whose territory intersects with the new claim.
-    const victimsResult = await client.query(
-        `SELECT owner_id FROM territories WHERE owner_id != $1 AND area IS NOT NULL AND ST_Intersects(area, ${newClaimGeom})`, 
-        [attackerId]
-    );
-    const victimIds = victimsResult.rows.map(r => r.owner_id);
-    const ownerIdsToUpdate = [attackerId, ...victimIds];
+    // 2. Convert Trail to a PostGIS Geometry String (Well-Known Text)
+    const trailCoordinates = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
+    const trailWkt = `POLYGON((${trailCoordinates}))`;
+    const newTrailGeom = `ST_SetSRID(ST_GeomFromText('${trailWkt}'), 4326)`;
 
-    for (const victimId of victimIds) {
-        console.log(`[GAME] Attacker ${attackerId} is cutting territory from victim ${victimId}`);
-        // This query subtracts the new claim from the victim's territory.
-        // It then takes the largest remaining piece to prevent creating tiny, disconnected fragments.
-        const smartCutQuery = `
-            WITH new_geom AS (SELECT ST_Difference(t.area, ${newClaimGeom}) as geom FROM territories t WHERE t.owner_id = $1),
-            dumped AS (SELECT (ST_Dump(geom)).geom as single_geom FROM new_geom),
-            largest_piece AS (SELECT single_geom FROM dumped ORDER BY ST_Area(single_geom) DESC LIMIT 1)
-            UPDATE territories SET 
-                area = (SELECT single_geom FROM largest_piece),
-                area_sqm = ST_Area(((SELECT single_geom FROM largest_piece))::geography)
-            WHERE owner_id = $1;
-        `;
-        await client.query(smartCutQuery, [victimId]);
+    // 3. Get Player's Existing Territory (if any)
+    const existingTerritoryQuery = 'SELECT ST_AsBinary(area) as area_wkb FROM territories WHERE owner_id = $1';
+    const territoryResult = await client.query(existingTerritoryQuery, [googleId]);
+
+    const hasExistingTerritory = territoryResult.rowCount > 0 && territoryResult.rows[0].area_wkb !== null;
+    
+    let finalGeometrySql;
+    let queryParams = [googleId, name]; // Base parameters for the final query
+
+    // 4. Perform Geometric Union based on player state
+    if (hasExistingTerritory) {
+        // PLAYER HAS TERRITORY: Merge new trail with existing area
+        console.log(`[GAME] Merging new trail for existing player ${name}`);
+        const existingTerritoryGeom = `ST_GeomFromWKB($3)`; // Use parameter binding for safety
+        finalGeometrySql = `ST_Union(${existingTerritoryGeom}, ${newTrailGeom})`;
+        queryParams.push(territoryResult.rows[0].area_wkb); // Add the existing geometry buffer to params
+
+    } else {
+        // FIRST CLAIM: Merge new trail with the starting base circle
+        if (!baseClaim || !baseClaim.lat || !baseClaim.lng || !baseClaim.radius) {
+            // This is the error you were seeing. It means baseClaim is missing or malformed.
+            socket.emit('claimRejected', { reason: 'Invalid base data for merge.' });
+            return null;
+        }
+        console.log(`[GAME] Merging new trail with base circle for new player ${name}`);
+
+        const center = [baseClaim.lng, baseClaim.lat];
+        const radiusInMeters = baseClaim.radius;
+        // Use turf.js to generate a GeoJSON circle
+        const circleGeoJSON = turf.circle(center, radiusInMeters, { units: 'meters', steps: 64 });
+        // Convert the GeoJSON to a WKT string that PostGIS can understand
+        const circleWkt = wellknown.stringify(circleGeoJSON);
+        const circleGeom = `ST_SetSRID(ST_GeomFromText('${circleWkt}'), 4326)`;
+
+        finalGeometrySql = `ST_Union(${newTrailGeom}, ${circleGeom})`;
     }
 
-    // --- Add/Update the Attacker's Territory ---
-    // Upsert the attacker's territory. If it doesn't exist, create it.
-    // If it does, merge the new geometry with the old one.
-    const upsertQuery = `
-        INSERT INTO territories (owner_id, area, area_sqm) VALUES ($1, ${newClaimGeom}, $2)
-        ON CONFLICT (owner_id) DO UPDATE SET 
-            area = ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3),
-            area_sqm = ST_Area((ST_CollectionExtract(ST_Union(COALESCE(territories.area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newClaimGeom}), 3))::geography)
+    // 5. Update Database with the new, merged geometry
+    const updateQuery = `
+        WITH new_geom_collection AS (
+            SELECT ${finalGeometrySql} as geom_collection
+        ),
+        new_geom AS (
+            SELECT ST_CollectionExtract(geom_collection, 3) as geom FROM new_geom_collection
+        )
+        INSERT INTO territories (owner_id, owner_name, area, area_sqm)
+        SELECT $1, $2, new_geom.geom, ST_Area(new_geom.geom::geography)
+        FROM new_geom
+        WHERE ST_Area(new_geom.geom::geography) > ${MINIMUM_CLAIM_AREA_SQM}
+        ON CONFLICT (owner_id) DO UPDATE
+        SET 
+            area = (SELECT geom FROM new_geom),
+            area_sqm = (SELECT ST_Area(geom::geography) FROM new_geom)
         RETURNING area_sqm;
     `;
-    const result = await client.query(upsertQuery, [attackerId, newArea]);
-    const finalTotalArea = result.rows[0].area_sqm;
+    
+    // Execute the query with the correct parameters
+    const updateResult = await client.query(updateQuery, queryParams);
 
-    return { finalTotalArea, ownerIdsToUpdate };
+    if (updateResult.rowCount === 0) {
+        throw new Error(`Claimed area is too small (min ${MINIMUM_CLAIM_AREA_SQM} sqm).`);
+    }
+
+    const finalTotalArea = updateResult.rows[0].area_sqm;
+
+    return {
+        finalTotalArea,
+        ownerIdsToUpdate: [googleId]
+    };
 }
 
 module.exports = handleSoloClaim;
