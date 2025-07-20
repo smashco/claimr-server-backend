@@ -1,13 +1,17 @@
-// claimr_server/server.js
-
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
 const { Pool } = require('pg');
 const admin = require('firebase-admin');
+const turf = require('@turf/turf'); // For server-side geospatial ops
 
-// --- REMOVED: require('./game_logic/solo_handler'); and clan_handler ---
+// --- Require the Game Logic Handlers ---
+// Ensure these file paths are correct in your project structure:
+// claimr_server/game_logic/solo_handler.js
+// claimr_server/game_logic/clan_handler.js
+const handleSoloClaim = require('./game_logic/solo_handler');
+const handleClanClaim = require('./game_logic/clan_handler');
 
 // --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -43,100 +47,103 @@ try {
     console.log('[Firebase Admin] Skipping initialization (FIREBASE_SERVICE_ACCOUNT env var not set).');
   }
 } catch (error) {
-  console.error('[Firebase Admin] FATAL: Failed to initialize.', error.message);
+  console.error('[Firebase Admin] FATAL: Failed to initialize Firebase Admin.', error.message);
 }
 
 // --- Constants & Database Pool ---
 const PORT = process.env.PORT || 10000;
-const SERVER_TICK_RATE_MS = 500;
+const SERVER_TICK_RATE_MS = 500; // Broadcast updates twice per second
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-const players = {};
+// --- In-Memory Player State (for live updates) ---
+// Structure: { socketId: { id, name, googleId, clanId, role, gameMode, lastKnownPosition, isDrawing, activeTrail } }
+const players = {}; 
 
-// --- Database Schema Setup ---
+// --- Database Schema Setup (Ensure this matches the latest requirements) ---
 const setupDatabase = async () => {
-    const client = await pool.connect();
-    try {
-      await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
-      console.log('[DB] PostGIS extension is enabled.');
-  
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS territories (
-          id SERIAL PRIMARY KEY,
-          owner_id VARCHAR(255) NOT NULL UNIQUE,
-          owner_name VARCHAR(255),
-          username VARCHAR(50) UNIQUE,
-          profile_image_url TEXT,
-          identity_color VARCHAR(10) DEFAULT '#39FF14',
-          area GEOMETRY(GEOMETRY, 4326),
-          area_sqm REAL,
-          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
-      console.log('[DB] "territories" table is ready.');
-  
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS clans (
-          id SERIAL PRIMARY KEY,
-          name VARCHAR(50) NOT NULL UNIQUE,
-          tag VARCHAR(5) NOT NULL UNIQUE,
-          description TEXT,
-          clan_image_url TEXT,
-          leader_id VARCHAR(255) NOT NULL,
-          base_location GEOMETRY(POINT, 4326),
-          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
-      console.log('[DB] "clans" table is ready.');
-  
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS clan_members (
-          clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
-          user_id VARCHAR(255) NOT NULL,
-          role VARCHAR(20) NOT NULL DEFAULT 'member',
-          joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-          PRIMARY KEY (clan_id, user_id)
-        );
-      `);
-      console.log('[DB] "clan_members" table is ready.');
-  
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS clan_join_requests (
-          id SERIAL PRIMARY KEY,
-          clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
-          user_id VARCHAR(255) NOT NULL,
-          status VARCHAR(20) NOT NULL DEFAULT 'pending',
-          requested_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-          UNIQUE(clan_id, user_id)
-        );
-      `);
-      console.log('[DB] "clan_join_requests" table is ready.');
-      
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS clan_territories (
-          id SERIAL PRIMARY KEY,
-          clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE UNIQUE,
-          owner_id VARCHAR(255) NOT NULL,
-          area GEOMETRY(GEOMETRY, 4326),
-          area_sqm REAL,
-          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
-      console.log('[DB] "clan_territories" table is ready.');
-  
-    } catch (err) {
-      console.error('[DB] FATAL ERROR during database setup:', err);
-      throw err;
-    } finally {
-      client.release();
-    }
-  };
+  const client = await pool.connect();
+  try {
+    await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
+    console.log('[DB] PostGIS extension is enabled.');
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS territories (
+        id SERIAL PRIMARY KEY,
+        owner_id VARCHAR(255) NOT NULL UNIQUE,
+        owner_name VARCHAR(255),
+        username VARCHAR(50) UNIQUE,
+        profile_image_url TEXT,
+        identity_color VARCHAR(10) DEFAULT '#39FF14',
+        area GEOMETRY(GEOMETRY, 4326),
+        area_sqm REAL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[DB] "territories" table is ready.');
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS clans (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(50) NOT NULL UNIQUE,
+        tag VARCHAR(5) NOT NULL UNIQUE,
+        description TEXT,
+        clan_image_url TEXT,
+        leader_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
+        base_location GEOMETRY(POINT, 4326),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[DB] "clans" table is ready.');
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS clan_members (
+        clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
+        user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
+        role VARCHAR(20) NOT NULL DEFAULT 'member',
+        joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (clan_id, user_id)
+      );
+    `);
+    console.log('[DB] "clan_members" table is ready.');
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS clan_join_requests (
+        id SERIAL PRIMARY KEY,
+        clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
+        user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        requested_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(clan_id, user_id)
+      );
+    `);
+    console.log('[DB] "clan_join_requests" table is ready.');
+    
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS clan_territories (
+        id SERIAL PRIMARY KEY,
+        clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE UNIQUE,
+        owner_id VARCHAR(255) NOT NULL,
+        area GEOMETRY(GEOMETRY, 4326),
+        area_sqm REAL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[DB] "clan_territories" table is ready.');
+
+  } catch (err) {
+    console.error('[DB] FATAL ERROR during database setup:', err);
+    throw err;
+  } finally {
+    client.release();
+  }
+};
 
 // --- Middleware ---
+// This is the ONLY declaration for checkAdminSecret. It must not be duplicated.
 const checkAdminSecret = (req, res, next) => {
     const { secret } = req.query;
     if (!process.env.ADMIN_SECRET_KEY || secret !== process.env.ADMIN_SECRET_KEY) {
@@ -165,7 +172,7 @@ const authenticate = async (req, res, next) => {
 };
 
 // --- API Endpoints ---
-app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
+app.get('/', (req, res) => { res.send('ClaimrunX Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
 
 app.put('/users/me/preferences', authenticate, async (req, res) => {
@@ -272,6 +279,7 @@ app.get('/leaderboard', async (req, res) => {
         `);
         res.status(200).json(result.rows);
     } catch (err) {
+        console.error('[API] Error fetching leaderboard:', err);
         res.status(500).json({ error: 'Failed to fetch leaderboard' });
     }
 });
@@ -348,6 +356,7 @@ app.get('/clans', authenticate, async (req, res) => {
                 t.username as leader_name,
                 c.leader_id,
                 (SELECT COUNT(*)::integer FROM clan_members cm WHERE cm.clan_id = c.id) as member_count,
+                (SELECT area_sqm FROM clan_territories ct WHERE ct.clan_id = c.id) as total_area_sqm,
                 (SELECT status FROM clan_join_requests cjr WHERE cjr.clan_id = c.id AND cjr.user_id = $1 AND cjr.status = 'pending') as join_request_status
             FROM clans c
             JOIN territories t ON c.leader_id = t.owner_id
@@ -536,7 +545,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
             JOIN clans c ON cjr.clan_id = c.id
             WHERE cjr.id = $1;
         `;
-        const requestResult = await pool.query(requestQuery, [requestId]);
+        const requestResult = await client.query(requestQuery, [requestId]);
         if (requestResult.rowCount === 0) {
             await client.query('ROLLBACK');
             return res.status(404).json({ message: 'Request not found.' });
@@ -597,6 +606,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
 });
 
 // --- ADMIN ENDPOINTS ---
+// The checkAdminSecret middleware is defined once above.
 app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
     const client = await pool.connect();
     try {
@@ -661,9 +671,8 @@ async function broadcastAllPlayers() {
                 id: p.id, 
                 name: profile.username || p.name, 
                 imageUrl: profile.imageUrl, 
-                lastKnownPosition: p.lastKnownPosition,
-                identityColor: profile.identityColor,
-                isDrawing: p.isDrawing 
+                identityColor: profile.identityColor, 
+                lastKnownPosition: p.lastKnownPosition 
             };
         });
         io.emit('allPlayersUpdate', allPlayersData);
@@ -675,7 +684,7 @@ async function broadcastAllPlayers() {
 io.on('connection', (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
   
-  socket.on('playerJoined', async ({ googleId, name, gameMode, identityColor }) => {
+  socket.on('playerJoined', async ({ googleId, name, gameMode, profileImageUrl, identityColor }) => {
     if (!googleId || !gameMode) {
         console.error(`[Socket] Invalid playerJoined event from ${socket.id}`);
         return;
@@ -690,49 +699,35 @@ io.on('connection', (socket) => {
     
         players[socket.id] = { id: socket.id, name, googleId, clanId, role, gameMode, lastKnownPosition: null, isDrawing: false, activeTrail: [] };
     
-        let territoryQuery;
-        let identityQuery; // Declare identityQuery here
-
+        let query;
         if (gameMode === 'clan') {
             console.log(`[Socket] Fetching territories for CLAN mode.`);
-            territoryQuery = `
+            query = `
                 SELECT 
                     ct.clan_id::text as "ownerId",
                     c.name as "ownerName",
                     c.clan_image_url as "profileImageUrl",
-                    '#00FFFF' as "identityColor",
                     ST_AsGeoJSON(ct.area) as geojson, 
-                    ct.area_sqm
+                    ct.area_sqm as area
                 FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id;
             `;
         } else {
             console.log(`[Socket] Fetching territories for SOLO mode.`);
-             territoryQuery = `
+             query = `
                 SELECT 
                     owner_id as "ownerId", 
                     username as "ownerName", 
                     profile_image_url as "profileImageUrl", 
-                    identity_color as "identityColor",
+                    identity_color, 
                     ST_AsGeoJSON(area) as geojson, 
-                    area_sqm
+                    area_sqm as area
                 FROM territories
                 WHERE area IS NOT NULL AND NOT ST_IsEmpty(area);
              `;
         }
-        
-        if (identityColor) {
-            identityQuery = pool.query(
-                'UPDATE territories SET identity_color = $1 WHERE owner_id = $2',
-                [identityColor, googleId]
-            );
-        }
 
-        const [territoryResult] = await Promise.all([
-          pool.query(territoryQuery),
-          identityColor ? identityQuery : Promise.resolve(null) // Only await if identityQuery was actually created
-        ]);
-
-        const activeTerritories = territoryResult[0].rows // territoryResult is an array from Promise.all
+        const territoryResult = await pool.query(query);
+        const activeTerritories = territoryResult.rows
             .filter(row => row.geojson)
             .map(row => ({ 
                 ...row,
@@ -830,107 +825,68 @@ io.on('connection', (socket) => {
     io.emit('trailCleared', { id: socket.id });
   });
 
-  // --- CONSOLIDATED CLAIM TERRITORY LOGIC ---
   socket.on('claimTerritory', async (req) => {
     const player = players[socket.id];
-    if (!player || !player.googleId) return;
+    if (!player || !player.googleId || !req.gameMode) return;
     
-    // Destructure all relevant data from the client request
-    const { gameMode, trail, isExpansion, initialBase } = req; // Added isExpansion and initialBase
-    
-    const client = await pool.connect(); // Get a client for transaction
+    const { gameMode, trail, baseClaim } = req;
+    const client = await pool.connect();
     try {
-        await client.query('BEGIN'); // Start transaction
-
-        if (!trail || trail.length < 3) { // Basic validation
-            throw new Error('Trail is too short to form a polygon.');
-        }
-
-        const trailPointsWKT = trail.map(p => `${p.lng} ${p.lat}`).join(', ');
-        const trailPolygonGeom = `ST_SetSRID(ST_MakePolygon(ST_GeomFromText('LINESTRING(${trailPointsWKT})')), 4326)`;
-
-        let finalGeometryQuery;
-        let ownerIdsToUpdate = [player.googleId];
-        let totalAreaQuery = `SELECT area_sqm FROM territories WHERE owner_id = $1`;
-
+        await client.query('BEGIN');
+        
+        let result;
         if (gameMode === 'solo') {
-            const existingTerritoryRes = await client.query('SELECT area FROM territories WHERE owner_id = $1', [player.googleId]);
-            const existingTerritoryGeom = existingTerritoryRes.rows[0]?.area;
-
-            if (isExpansion) {
-                if (!existingTerritoryGeom) {
-                    throw new Error('No existing territory to expand for this player.');
-                }
-                // Perform a union (merge) of existing territory and the new trail
-                finalGeometryQuery = `ST_Multi(ST_Union(ST_GeomFromEWKB($1), ${trailPolygonGeom}))`;
-                // Pass existing territory as EWKB to avoid re-parsing GeoJSON in query
-                const existingTerritoryEWKB = existingTerritoryRes.rows[0].area.toString('hex'); // Get EWKB as hex string
-                await client.query(
-                    `UPDATE territories SET area = ${finalGeometryQuery}, area_sqm = ST_Area(${finalGeometryQuery}::geography) WHERE owner_id = $2`,
-                    [existingTerritoryEWKB, player.googleId]
-                );
-            } else { // Initial Claim
-                if (existingTerritoryGeom) {
-                    throw new Error('You already have a base. Expand it instead of trying to claim a new one.');
-                }
-                if (!initialBase || !initialBase.center || !initialBase.radius) {
-                    throw new Error('Missing initialBase data for first claim.');
-                }
-                const initialBasePointWKT = `POINT(${initialBase.center.lng} ${initialBase.center.lat})`;
-                // Create a circle polygon from the initialBase point and radius using ST_Buffer
-                const initialBaseCircleGeom = `ST_SetSRID(ST_Buffer(ST_GeomFromText('${initialBasePointWKT}'), ${initialBase.radius}), 4326)`;
-                
-                // Union the generated circle and the new trail polygon
-                finalGeometryQuery = `ST_Multi(ST_Union(${initialBaseCircleGeom}, ${trailPolygonGeom}))`;
-
-                await client.query(
-                    `UPDATE territories SET area = ${finalGeometryQuery}, area_sqm = ST_Area(${finalGeometryQuery}::geography) WHERE owner_id = $1`,
-                    [player.googleId]
-                );
-            }
-            
-            const totalAreaRes = await client.query(totalAreaQuery, [player.googleId]);
-            const finalTotalArea = totalAreaRes.rows[0]?.area_sqm || 0;
-
-            await client.query('COMMIT'); // Commit transaction
-            
-            socket.emit('claimSuccessful', { newTotalArea: finalTotalArea }); // Send success to client
-
-            // Broadcast the updated territory for all players to see
-            const updatedTerritoryRes = await pool.query(
-                `SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm, identity_color as "identityColor" FROM territories WHERE owner_id = $1`,
-                [player.googleId]
-            );
-            const batchUpdateData = updatedTerritoryRes.rows
-                .filter(r => r.geojson)
-                .map(r => ({ ...r, geojson: JSON.parse(r.geojson) }));
-
-            if (batchUpdateData.length > 0) {
-                console.log(`[GAME] Broadcasting territory update for ${player.name}.`);
-                io.emit('batchTerritoryUpdate', batchUpdateData);
-            }
-
+            result = await handleSoloClaim(socket, player, trail, baseClaim, client);
         } else if (gameMode === 'clan') {
-            // Clan mode claim logic (currently not implemented, client should not send this yet)
-            throw new Error('Clan claim mode not implemented yet.');
+            result = await handleClanClaim(socket, player, trail, baseClaim, client);
         } else {
             throw new Error('Invalid game mode specified.');
         }
 
-        io.emit('trailCleared', { id: socket.id }); // Clear trail visual on map for all clients
+        if (!result) { 
+            await client.query('ROLLBACK');
+            return;
+        }
+
+        const { finalTotalArea, areaClaimed, ownerIdsToUpdate } = result; // areaClaimed for AAR
+        
+        await client.query('COMMIT');
+        
+        socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed }); // Send areaClaimed
+        
+        const finalResultQuery = gameMode === 'clan' ? `
+            SELECT clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm as area
+            FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[]);
+        ` : `
+            SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", identity_color, ST_AsGeoJSON(area) as geojson, area_sqm as area 
+            FROM territories WHERE owner_id = ANY($1::varchar[])`;
+        
+        const finalResult = await pool.query(finalResultQuery, [ownerIdsToUpdate]);
+        const batchUpdateData = finalResult.rows
+            .filter(r => r.geojson)
+            .map(r => ({ ...r, geojson: JSON.parse(r.geojson), identity_color: r.identity_color })); // Pass identity_color
+
+        if (batchUpdateData.length > 0) {
+            console.log(`[GAME] Broadcasting territory updates for ${ownerIdsToUpdate.length} owners.`);
+            io.emit('batchTerritoryUpdate', batchUpdateData);
+        }
+        
+        io.emit('trailCleared', { id: socket.id });
 
     } catch (err) {
-        await client.query('ROLLBACK'); // Rollback transaction on error
-        console.error('[DB] Error during territory claim:', err);
+        await client.query('ROLLBACK');
+        console.error('[DB] FATAL Error during territory claim:', err);
         
         let reason = 'Server error during claim.';
         if (err && err.message && typeof err.message === 'string') {
-            reason = err.message; // Use specific error message if available
+            if (err.message.startsWith('Area is too small')) {
+                reason = err.message;
+            }
         }
-        socket.emit('claimRejected', { reason }); // Notify client of rejection
+        socket.emit('claimRejected', { reason });
 
     } finally {
-        client.release(); // Release client back to pool
+        client.release();
     }
   });
   
