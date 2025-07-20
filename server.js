@@ -9,7 +9,8 @@ const admin = require('firebase-admin');
 
 // --- Require the Game Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
-const handleClanClaim = require('./game_logic/clan_handler');
+// Keep a placeholder for clan handler if it exists
+// const handleClanClaim = require('./game_logic/clan_handler'); 
 
 // --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -28,7 +29,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: "*", 
-    methods: ["GET", "POST", "PUT", "DELETE"] // Added DELETE method for CORS
+    methods: ["GET", "POST", "PUT", "DELETE"]
   }
 });
 
@@ -58,7 +59,6 @@ const pool = new Pool({
 });
 
 const players = {};
-// claimr_server/server.js - PASTE AFTER SEGMENT 1
 
 // --- Database Schema Setup ---
 const setupDatabase = async () => {
@@ -139,10 +139,7 @@ const setupDatabase = async () => {
     }
   };
 
-  // claimr_server/server.js - PASTE AFTER SEGMENT 2
-
 // --- Middleware ---
-// THIS IS THE ONLY DECLARATION FOR checkAdminSecret.
 const checkAdminSecret = (req, res, next) => {
     const { secret } = req.query;
     if (!process.env.ADMIN_SECRET_KEY || secret !== process.env.ADMIN_SECRET_KEY) {
@@ -170,10 +167,8 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// claimr_server/server.js - PASTE AFTER SEGMENT 3
-
 // --- API Endpoints ---
-app.get('/', (req, res) => { res.send('ClaimrunX Server is running!'); });
+app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
 
 app.put('/users/me/preferences', authenticate, async (req, res) => {
@@ -605,7 +600,6 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
 });
 
 // --- ADMIN ENDPOINTS ---
-// The checkAdminSecret middleware is defined once above.
 app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
     const client = await pool.connect();
     try {
@@ -677,7 +671,7 @@ async function broadcastAllPlayers() {
 io.on('connection', (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
   
-  socket.on('playerJoined', async ({ googleId, name, gameMode }) => {
+  socket.on('playerJoined', async ({ googleId, name, gameMode, identityColor }) => {
     if (!googleId || !gameMode) {
         console.error(`[Socket] Invalid playerJoined event from ${socket.id}`);
         return;
@@ -692,33 +686,46 @@ io.on('connection', (socket) => {
     
         players[socket.id] = { id: socket.id, name, googleId, clanId, role, gameMode, lastKnownPosition: null, isDrawing: false, activeTrail: [] };
     
-        let query;
+        let territoryQuery;
+        let identityQuery;
+
         if (gameMode === 'clan') {
             console.log(`[Socket] Fetching territories for CLAN mode.`);
-            query = `
+            territoryQuery = `
                 SELECT 
                     ct.clan_id::text as "ownerId",
                     c.name as "ownerName",
                     c.clan_image_url as "profileImageUrl",
+                    '#00FFFF' as "identityColor", -- Default Cyan for clans
                     ST_AsGeoJSON(ct.area) as geojson, 
-                    ct.area_sqm as area
+                    ct.area_sqm
                 FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id;
             `;
         } else {
             console.log(`[Socket] Fetching territories for SOLO mode.`);
-             query = `
+             territoryQuery = `
                 SELECT 
                     owner_id as "ownerId", 
                     username as "ownerName", 
                     profile_image_url as "profileImageUrl", 
+                    identity_color as "identityColor",
                     ST_AsGeoJSON(area) as geojson, 
-                    area_sqm as area
+                    area_sqm
                 FROM territories
                 WHERE area IS NOT NULL AND NOT ST_IsEmpty(area);
              `;
         }
+        
+        // Update player's identity color in the database
+        if (identityColor) {
+            identityQuery = pool.query(
+                'UPDATE territories SET identity_color = $1 WHERE owner_id = $2',
+                [identityColor, googleId]
+            );
+        }
 
-        const territoryResult = await pool.query(query);
+        const [territoryResult] = await Promise.all([pool.query(territoryQuery), identityQuery]);
+
         const activeTerritories = territoryResult.rows
             .filter(row => row.geojson)
             .map(row => ({ 
@@ -819,18 +826,22 @@ io.on('connection', (socket) => {
 
   socket.on('claimTerritory', async (req) => {
     const player = players[socket.id];
-    if (!player || !player.googleId || !req.gameMode) return;
+    if (!player || !player.googleId) return;
     
-    const { gameMode, trail, baseClaim } = req;
+    // Note: baseClaim was the old name, now it's baseCenter/baseRadius
+    const { gameMode, trail, baseCenter, baseRadius } = req;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         
         let result;
         if (gameMode === 'solo') {
-            result = await handleSoloClaim(socket, player, trail, baseClaim, client);
+            const baseClaimData = baseCenter ? { lat: baseCenter.lat, lng: baseCenter.lng, radius: baseRadius } : null;
+            result = await handleSoloClaim(socket, player, trail, baseClaimData, client);
         } else if (gameMode === 'clan') {
-            result = await handleClanClaim(socket, player, trail, baseClaim, client);
+            // Placeholder for when clan logic is added
+            // result = await handleClanClaim(socket, player, trail, baseClaimData, client);
+            throw new Error('Clan claim mode not implemented yet.');
         } else {
             throw new Error('Invalid game mode specified.');
         }
@@ -847,10 +858,10 @@ io.on('connection', (socket) => {
         socket.emit('claimSuccessful', { newTotalArea: finalTotalArea });
         
         const finalResultQuery = gameMode === 'clan' ? `
-            SELECT clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm as area
+            SELECT clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm 
             FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[]);
         ` : `
-            SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm as area 
+            SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", ST_AsGeoJSON(area) as geojson, area_sqm, identity_color as "identityColor"
             FROM territories WHERE owner_id = ANY($1::varchar[])`;
         
         const finalResult = await pool.query(finalResultQuery, [ownerIdsToUpdate]);
@@ -871,7 +882,7 @@ io.on('connection', (socket) => {
         
         let reason = 'Server error during claim.';
         if (err && err.message && typeof err.message === 'string') {
-            if (err.message.startsWith('Area is too small')) {
+            if (err.message.startsWith('Claimed area is too small')) {
                 reason = err.message;
             }
         }
