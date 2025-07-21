@@ -273,7 +273,7 @@ app.get('/leaderboard', async (req, res) => {
         res.status(200).json(result.rows);
     } catch (err) {
         console.error('[API] Error fetching leaderboard:', err);
-        res.status(500).json({ error: 'Failed to fetch leaderboard' });
+        res.status(500).json({ error: 'Failed to fetch leaderboard.' });
     }
 });
 
@@ -294,9 +294,10 @@ app.get('/leaderboard/clans', async (req, res) => {
         `;
         const result = await pool.query(query);
         res.status(200).json(result.rows);
-    } catch (err) {
+    }
+    catch (err) {
         console.error('[API] Error fetching clan leaderboard:', err);
-        res.status(500).json({ error: 'Failed to fetch clan leaderboard' });
+        res.status(500).json({ error: 'Failed to fetch clan leaderboard.' });
     }
 });
 
@@ -612,7 +613,7 @@ app.get('/admin/reset-all-territories', checkAdminSecret, async (req, res) => {
         res.status(200).send('SUCCESS: All claimed territories deleted.');
     } catch (err) {
         console.error('ERROR clearing territories:', err);
-        res.status(500).send('ERROR clearing territories.');
+        res.status(500).json({ error: 'ERROR clearing territories.' }); // Corrected: send JSON response
     }
 });
 
@@ -654,7 +655,7 @@ io.on('connection', (socket) => {
     }
     console.log(`[Socket] Player ${name} (${socket.id}) joining in [${gameMode}] mode.`);
     const client = await pool.connect(); 
-    let player; // Declare player here to be accessible throughout the scope
+    let player; // Declare player here to ensure it's accessible consistently
     try {
         const memberInfoRes = await client.query('SELECT clan_id, role FROM clan_members WHERE user_id = $1', [googleId]);
         const clanId = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].clan_id : null;
@@ -709,7 +710,7 @@ io.on('connection', (socket) => {
 
         const activeTrails = [];
         for (const playerId in players) {
-          if (playerId !== socket.id && players[playerId].isDrawing && players[playerId].activeTrail.length > 0) {
+          if (players[playerId].isDrawing && players[playerId].activeTrail.length > 0) { // Check if player is drawing
             activeTrails.push({ id: playerId, trail: players[playerId].activeTrail });
           }
         }
@@ -855,11 +856,11 @@ io.on('connection', (socket) => {
         
         socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
         
-        // --- FIX FOR INTEGER OUT OF RANGE ERROR ---
-        // Separate solo (VARCHAR) and clan (INTEGER) owner IDs more explicitly
+        // FIX FOR INTEGER OUT OF RANGE ERROR:
+        // Filter ownerIdsToUpdate into strictly solo (string) and clan (number) IDs
         const soloOwnersToUpdate = ownerIdsToUpdate.filter(id => typeof id === 'string' && id.includes('google-oauth'));
-        // Convert clan IDs from string (from clan_id::text) back to Number for the query to work with INT[]
-        const clanOwnersToUpdate = ownerIdsToUpdate.filter(id => typeof id === 'string' && !id.includes('google-oauth')).map(Number); 
+        // Convert clan IDs from string (from clan_id::text) back to actual Numbers for the query to work with INT[]
+        const clanOwnersToUpdate = ownerIdsToUpdate.filter(id => typeof id === 'string' && !id.includes('google-oauth')).map(id => parseInt(id, 10));
 
         let batchUpdateData = [];
         if (soloOwnersToUpdate.length > 0) {
