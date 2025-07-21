@@ -4,7 +4,7 @@ const http = require('http');
 const { Server } = require("socket.io");
 const { Pool } = require('pg');
 const admin = require('firebase-admin');
-const turf = require('@turf/turf'); // turf is client-side in the original prompt, but useful server-side too
+const turf = require('@turf/turf'); 
 
 // --- Require the Game Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
@@ -16,7 +16,7 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 process.on('uncaughtException', (error) => {
   console.error('SERVER ERROR: Uncaught Exception:', error);
-  process.exit(1); // Exit process on uncaught exceptions
+  process.exit(1); 
 });
 
 // --- App & Server Setup ---
@@ -49,16 +49,15 @@ try {
 
 // --- Constants & Database Pool ---
 const PORT = process.env.PORT || 10000;
-const SERVER_TICK_RATE_MS = 500; // How often to broadcast all players
-const DISCONNECT_TRAIL_PERSIST_SECONDS = 60; // Trail persists for 60 seconds after disconnect
+const SERVER_TICK_RATE_MS = 500; 
+const DISCONNECT_TRAIL_PERSIST_SECONDS = 60; 
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Global players object to store real-time state
-const players = {}; // { socketId: { id, name, googleId, clanId, role, gameMode, lastKnownPosition, isDrawing, activeTrail, disconnectTimer, hasShield } }
+const players = {}; 
 
 // --- Database Schema Setup ---
 const setupDatabase = async () => {
@@ -67,25 +66,23 @@ const setupDatabase = async () => {
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
     console.log('[DB] PostGIS extension is enabled.');
 
-    // Updated territories table: Added original_base_point for shield logic and has_shield
     await client.query(`
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
         owner_id VARCHAR(255) NOT NULL UNIQUE,
         owner_name VARCHAR(255),
-        username VARCHAR(50), -- Removed UNIQUE to allow multiple users with null username (e.g. before profile setup)
+        username VARCHAR(50), 
         profile_image_url TEXT,
         identity_color VARCHAR(10) DEFAULT '#39FF14',
         area GEOMETRY(GEOMETRY, 4326),
         area_sqm REAL,
-        original_base_point GEOMETRY(POINT, 4326), -- New: Stores the initial claim point for shield logic
-        has_shield BOOLEAN DEFAULT FALSE, -- Placeholder for superpower
+        original_base_point GEOMETRY(POINT, 4326), 
+        has_shield BOOLEAN DEFAULT FALSE, 
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
     console.log('[DB] "territories" table is ready.');
 
-    // Updated clans table: Added has_shield
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
         id SERIAL PRIMARY KEY,
@@ -94,8 +91,8 @@ const setupDatabase = async () => {
         description TEXT,
         clan_image_url TEXT,
         leader_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-        base_location GEOMETRY(POINT, 4326), -- Permanent clan base point
-        has_shield BOOLEAN DEFAULT FALSE, -- Placeholder for superpower
+        base_location GEOMETRY(POINT, 4326), 
+        has_shield BOOLEAN DEFAULT FALSE, 
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -124,7 +121,6 @@ const setupDatabase = async () => {
     `);
     console.log('[DB] "clan_join_requests" table is ready.');
     
-    // Clan territories are now managed as a single geometry per clan
     await client.query(`
       CREATE TABLE IF NOT EXISTS clan_territories (
         clan_id INTEGER NOT NULL PRIMARY KEY REFERENCES clans(id) ON DELETE CASCADE,
@@ -194,7 +190,7 @@ app.get('/check-profile', async (req, res) => {
     try {
         const query = `
             SELECT 
-                t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, -- Added has_shield
+                t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, 
                 c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
                 (c.base_location IS NOT NULL) as base_is_set
             FROM territories t
@@ -211,7 +207,7 @@ app.get('/check-profile', async (req, res) => {
                 profileImageUrl: row.profile_image_url,
                 identityColor: row.identity_color,
                 area_sqm: row.area_sqm || 0,
-                has_shield: row.has_shield, // Include shield status
+                has_shield: row.has_shield, 
                 clan_info: null
             };
             if (row.clan_id) {
@@ -242,7 +238,6 @@ app.post('/setup-profile', async (req, res) => {
     const { googleId, username, imageUrl, displayName } = req.body;
     if (!googleId || !username || !imageUrl || !displayName) return res.status(400).json({ error: 'Missing required profile data.' });
     try {
-        // When setting up a profile, initialize area to an empty geometry if not already set, and original_base_point to null
         await pool.query(
             `INSERT INTO territories (owner_id, owner_name, username, profile_image_url, area, area_sqm, original_base_point) VALUES ($1, $2, $3, $4, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), 0, NULL)
              ON CONFLICT (owner_id) DO UPDATE SET username = $3, profile_image_url = $4, owner_name = $2;`,
@@ -255,7 +250,6 @@ app.post('/setup-profile', async (req, res) => {
     }
 });
 
-// Admin endpoint to toggle shield (placeholder for superpower)
 app.put('/admin/toggle-shield/:ownerId', checkAdminSecret, async (req, res) => {
     const { ownerId } = req.params;
     const { hasShield } = req.body;
@@ -323,7 +317,6 @@ app.post('/clans', authenticate, async (req, res) => {
         const newClan = clanResult.rows[0];
         await client.query('INSERT INTO clan_members(clan_id, user_id, role) VALUES($1, $2, $3)', [newClan.id, leaderId, 'leader']);
         
-        // Initialize an empty clan_territories entry for the new clan
         await client.query(`INSERT INTO clan_territories (clan_id, area, area_sqm) VALUES ($1, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), 0);`, [newClan.id]);
 
         await client.query('COMMIT');
@@ -371,7 +364,7 @@ app.get('/clans/:id', authenticate, async (req, res) => {
                 c.leader_id,
                 (SELECT COUNT(*)::integer FROM clan_members cm WHERE cm.clan_id = c.id) as member_count,
                 COALESCE((SELECT area_sqm FROM clan_territories WHERE clan_id = c.id), 0) as total_area_sqm,
-                (c.base_location IS NOT NULL) as base_is_set -- Added base_is_set here
+                (c.base_location IS NOT NULL) as base_is_set 
             FROM clans c
             JOIN territories t ON c.leader_id = t.owner_id
             WHERE c.id = $1;
@@ -410,13 +403,12 @@ app.put('/clans/:id/photo', authenticate, async (req, res) => {
 app.post('/clans/:id/set-base', authenticate, async (req, res) => {
     const { id } = req.params;
     const { baseLocation } = req.body;
-    const leaderId = req.user.googleId; // Ensure only leader can set base
-    if (!baseLocation || !baseLocation.lat || !baseLocation.lng) return res.status(400).json({ error: 'baseLocation is required' });
+    const leaderId = req.user.googleId; 
+    if (!baseLocation || !baseLocation.lat || !baseLocation.lng) return res.status(400).json({ error: 'baseLocation is required.' });
     
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        // Verify user is the leader of this clan
         const checkLeader = await client.query('SELECT 1 FROM clans WHERE id = $1 AND leader_id = $2', [id, leaderId]);
         if (checkLeader.rowCount === 0) {
             await client.query('ROLLBACK');
@@ -426,12 +418,11 @@ app.post('/clans/:id/set-base', authenticate, async (req, res) => {
         const pointWKT = `POINT(${baseLocation.lng} ${baseLocation.lat})`;
         await client.query(`UPDATE clans SET base_location = ST_SetSRID(ST_GeomFromText($1), 4326) WHERE id = $2`, [pointWKT, id]);
         
-        // When clan base is set, update all clan members' status (for client-side UI)
         const clanMembers = await client.query('SELECT user_id FROM clan_members WHERE clan_id = $1', [id]);
         for (const memberRow of clanMembers.rows) {
             const memberSocketId = Object.keys(players).find(sockId => players[sockId].googleId === memberRow.user_id);
             if (memberSocketId) {
-                io.to(memberSocketId).emit('clanBaseActivated', { center: baseLocation }); // Notify members base is active
+                io.to(memberSocketId).emit('clanBaseActivated', { center: baseLocation }); 
             }
         }
         await client.query('COMMIT');
@@ -461,9 +452,8 @@ app.delete('/clans/members/me', authenticate, async (req, res) => {
             return res.status(403).json({ message: "A leader cannot leave a clan with members. Transfer leadership first." });
         }
         if (role === 'leader' && member_count <= 1) {
-            // If leader is the only member, delete the clan and its territory
             await client.query('DELETE FROM clans WHERE id = $1', [clan_id]);
-            await client.query('DELETE FROM clan_territories WHERE clan_id = $1', [clan_id]); // Also delete territory
+            await client.query('DELETE FROM clan_territories WHERE clan_id = $1', [clan_id]); 
         } else {
             await client.query('DELETE FROM clan_members WHERE user_id = $1', [googleId]);
         }
@@ -546,7 +536,6 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
             await client.query('INSERT INTO clan_members (clan_id, user_id, role) VALUES ($1, $2, $3)', [clan_id, applicant_google_id, 'member']);
             await client.query('DELETE FROM clan_join_requests WHERE id = $1', [requestId]);
             
-            // Notify new member's client about clan status change
             const newMemberSocketId = Object.keys(players).find(id => players[id].googleId === applicant_google_id);
             if (newMemberSocketId) {
                 const newClanInfoRes = await client.query(`SELECT c.id, c.name, c.tag, cm.role, (c.base_location IS NOT NULL) as base_is_set FROM clans c JOIN clan_members cm ON c.id = cm.clan_id WHERE c.id = $1 AND cm.user_id = $2;`, [clan_id, applicant_google_id]);
@@ -572,7 +561,6 @@ app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
     const client = await pool.connect();
     try {
         await client.query("BEGIN");
-        // Clear all real-time player states
         for (const socketId in players) {
             if (players[socketId].disconnectTimer) {
                 clearTimeout(players[socketId].disconnectTimer);
@@ -598,7 +586,7 @@ app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
             }
         }
         await client.query("COMMIT");
-        io.emit('allTerritoriesCleared'); // Notify clients to reset their maps
+        io.emit('allTerritoriesCleared'); 
         res.status(200).send('SUCCESS: Factory reset complete.');
     } catch (err) {
         await client.query('ROLLBACK');
@@ -613,7 +601,6 @@ app.get('/admin/reset-all-territories', checkAdminSecret, async (req, res) => {
         await pool.query("UPDATE clans SET base_location = NULL;"); 
         await pool.query("UPDATE clan_territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0;"); 
         
-        // Clear all active trails from players in memory without disconnecting them
         for (const socketId in players) {
             players[socketId].isDrawing = false;
             players[socketId].activeTrail = [];
@@ -654,7 +641,6 @@ async function broadcastAllPlayers() {
 io.on('connection', (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
   
-  // Clear any existing disconnect timer if this socket reconnects (e.g. was client-side timer)
   if (players[socket.id] && players[socket.id].disconnectTimer) {
       clearTimeout(players[socket.id].disconnectTimer);
       players[socket.id].disconnectTimer = null;
@@ -700,7 +686,7 @@ io.on('connection', (socket) => {
                     ct.area_sqm as area
                 FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id;
             `;
-        } else { // Solo mode
+        } else { 
              query = `
                 SELECT 
                     owner_id as "ownerId", 
@@ -720,7 +706,6 @@ io.on('connection', (socket) => {
         console.log(`[Socket] Found ${activeTerritories.length} territories. Sending 'existingTerritories' to ${socket.id}.`);
         socket.emit('existingTerritories', { territories: activeTerritories, playerHasRecord: playerHasRecord });
 
-        // Also send existing live trails to new player
         const activeTrails = [];
         for (const playerId in players) {
           if (playerId !== socket.id && players[playerId].isDrawing && players[playerId].activeTrail.length > 0) {
@@ -731,12 +716,10 @@ io.on('connection', (socket) => {
           socket.emit('existingLiveTrails', activeTrails);
         }
 
-        // If player is a clan member, notify them of base status
         if (player.gameMode === 'clan' && player.clanId) {
             const clanBaseRes = await client.query('SELECT base_location FROM clans WHERE id = $1', [player.clanId]);
             if (clanBaseRes.rows.length > 0 && clanBaseRes.rows[0].base_location) {
                 const baseLoc = clanBaseRes.rows[0].base_location;
-                // ST_AsGeoJSON returns a GeoJSON string, need to parse its coordinates
                 const parsedBaseLoc = JSON.parse(await client.query(`SELECT ST_AsGeoJSON($1) as geojson`, [baseLoc])).geojson.coordinates;
                 socket.emit('clanBaseActivated', { center: { lat: parsedBaseLoc[1], lng: parsedBaseLoc[0] } });
             }
@@ -755,27 +738,26 @@ io.on('connection', (socket) => {
     if (!player || player.gameMode === 'spectator') return; 
     player.lastKnownPosition = data;
 
-    // Only process trail points if player is actively drawing (isDrawing = true)
     if (player.isDrawing) {
         player.activeTrail.push(data);
-        socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data }); // Broadcast only to others
+        socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data }); 
 
-        // Trail Cutting Logic
         if (player.activeTrail.length >= 2) { 
             const lastPoint = player.activeTrail[player.activeTrail.length - 1];
             const secondLastPoint = player.activeTrail[player.activeTrail.length - 2];
-            const attackerSegmentWKT = `LINESTRING(${secondLastPoint.lng} ${secondLastPoint.lat}, ${secondLastPoint.lng} ${secondLastPoint.lat})` == `LINESTRING(${lastPoint.lng} ${lastPoint.lat}, ${lastPoint.lng} ${lastPoint.lat})` ? `LINESTRING(${secondLastPoint.lng} ${secondLastPoint.lat}, ${lastPoint.lng} ${lastPoint.lat})` : `LINESTRING(${lastPoint.lng} ${lastPoint.lat}, ${lastPoint.lng} ${lastPoint.lat})`; // Ensure valid segment even if no movement
+            // Ensure attackerSegmentWKT is always valid, even if points are identical (no movement)
+            const attackerSegmentWKT = (secondLastPoint.lng === lastPoint.lng && secondLastPoint.lat === lastPoint.lat) 
+                ? `POINT(${lastPoint.lng} ${lastPoint.lat})` // Use POINT if no movement
+                : `LINESTRING(${secondLastPoint.lng} ${secondLastPoint.lat}, ${lastPoint.lng} ${lastPoint.lat})`;
             
             const attackerSegmentGeom = `ST_SetSRID(ST_GeomFromText('${attackerSegmentWKT}'), 4326)`;
 
-            const client = await pool.connect(); // New client for transaction
+            const client = await pool.connect(); 
             try {
-                // Check for intersections with other players' active trails
                 for (const victimId in players) {
                     if (victimId === socket.id) continue; 
                     const victim = players[victimId];
 
-                    // Friendly fire check: Clan members cannot cut each other's trails
                     if (player.gameMode === 'clan' && victim.gameMode === 'clan' && player.clanId === victim.clanId) {
                         continue; 
                     }
@@ -799,7 +781,7 @@ io.on('connection', (socket) => {
             } catch (err) {
                 console.error('[DB] Error during trail intersection check:', err);
             } finally {
-                client.release(); // Release client
+                client.release(); 
             }
         }
     }
@@ -836,14 +818,12 @@ io.on('connection', (socket) => {
 
     const { gameMode, trail, baseClaim } = req; 
     
-    // Validate trail length: 1 point for baseClaim, >=3 for expansion polygon
     if (trail.length < 1 || (!baseClaim && trail.length < 3)) { 
         console.warn(`[Claim] Invalid trail length for claim by ${player.name}. Trail length: ${trail.length}, BaseClaim: ${!!baseClaim}`);
         socket.emit('claimRejected', { reason: 'Invalid trail length.' });
         return;
     }
 
-    // Rate limit claims to prevent spamming
     if (player.lastClaimAttempt && (Date.now() - player.lastClaimAttempt.timestamp < 3000)) { 
         console.warn(`[Claim] Player ${player.name} attempting claims too fast.`);
         socket.emit('claimRejected', { reason: 'Please wait a moment before claiming again.' });
@@ -856,9 +836,9 @@ io.on('connection', (socket) => {
         await client.query('BEGIN'); 
         let result;
         if (gameMode === 'solo') {
-            result = await handleSoloClaim(io, socket, player, trail, baseClaim, client); // Pass io for broadcasting
+            result = await handleSoloClaim(io, socket, player, trail, baseClaim, client); 
         } else if (gameMode === 'clan') {
-            result = await handleClanClaim(io, socket, player, trail, baseClaim, client); // Pass io for broadcasting
+            result = await handleClanClaim(io, socket, player, trail, baseClaim, client); 
         } else {
             throw new Error('Invalid game mode specified.');
         }
@@ -875,10 +855,8 @@ io.on('connection', (socket) => {
         
         socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
         
-        // Fetch updated territory data for all affected owners for batch update
-        // We need to fetch from both territories and clan_territories tables
-        const soloOwnersToUpdate = ownerIdsToUpdate.filter(id => id.includes('google-oauth')).map(String); // googleIds are strings
-        const clanOwnersToUpdate = ownerIdsToUpdate.filter(id => !id.includes('google-oauth')).map(Number); // Clan IDs are numbers
+        const soloOwnersToUpdate = ownerIdsToUpdate.filter(id => id.includes('google-oauth')).map(String); 
+        const clanOwnersToUpdate = ownerIdsToUpdate.filter(id => !id.includes('google-oauth')).map(Number); 
 
         let batchUpdateData = [];
         if (soloOwnersToUpdate.length > 0) {
@@ -896,7 +874,7 @@ io.on('connection', (socket) => {
                 FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[]);`, [clanOwnersToUpdate]);
             batchUpdateData = batchUpdateData.concat(clanQueryResult.rows.filter(r => r.geojson).map(r => ({ 
                 ownerId: r.ownerId, ownerName: r.ownerName, profileImageUrl: r.profileImageUrl, 
-                identityColor: null, // Clans don't have identity_color directly on territory
+                identityColor: null, 
                 geojson: JSON.parse(r.geojson), area: r.area 
             })));
         }
@@ -906,7 +884,6 @@ io.on('connection', (socket) => {
             io.emit('batchTerritoryUpdate', batchUpdateData);
         }
         
-        // Clear player's active trail state and visuals after a successful claim
         player.isDrawing = false;
         player.activeTrail = [];
         io.emit('trailCleared', { id: socket.id });
@@ -929,7 +906,6 @@ io.on('connection', (socket) => {
     if (player) {
       console.log(`[SERVER] User ${player?.name || 'Unknown'} disconnected: ${socket.id}`);
       
-      // If player was drawing, start a disconnect timer for their trail
       if (player.isDrawing) {
         console.log(`[SERVER] Player ${player.name}'s trail will persist for ${DISCONNECT_TRAIL_PERSIST_SECONDS} seconds.`);
         player.disconnectTimer = setTimeout(() => {
@@ -937,10 +913,10 @@ io.on('connection', (socket) => {
             player.isDrawing = false; 
             player.activeTrail = []; 
             io.emit('trailCleared', { id: socket.id }); 
-            delete players[socket.id]; // Finally remove player if timer expires
+            delete players[socket.id]; 
         }, DISCONNECT_TRAIL_PERSIST_SECONDS * 1000);
       } else {
-        delete players[socket.id]; // Immediately remove if not drawing
+        delete players[socket.id]; 
         io.emit('playerLeft', { id: socket.id });
       }
     }
