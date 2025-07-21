@@ -108,7 +108,6 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
     const affectedOwnerIds = new Set(); 
     affectedOwnerIds.add(clanId.toString()); 
 
-    // --- Area Steal Mechanism (Clan vs Solo & Clan vs Clan) ---
     const intersectingSoloTerritoriesQuery = `
         SELECT owner_id, username, area, has_shield, ST_AsText(original_base_point) as original_base_point_wkt
         FROM territories

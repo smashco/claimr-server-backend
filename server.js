@@ -303,7 +303,7 @@ app.get('/leaderboard/clans', async (req, res) => {
 app.post('/clans', authenticate, async (req, res) => {
     const { name, tag, description } = req.body;
     const leaderId = req.user.googleId;
-    if (!name || !tag || !leaderId) return res.status(400).json({ error: 'Name, tag, and leaderId are required' });
+    if (!name || !tag || !leaderId) return res.status(400).json({ error: 'Name, tag, and leaderId are required.' });
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -350,7 +350,7 @@ app.get('/clans', authenticate, async (req, res) => {
         res.status(200).json(result.rows);
     } catch (err) {
         console.error('[API] Error fetching clans list:', err);
-        res.status(500).json({ error: 'Failed to fetch clans' });
+        res.status(500).json({ error: 'Failed to fetch clans.' });
     }
 });
 
@@ -370,7 +370,7 @@ app.get('/clans/:id', authenticate, async (req, res) => {
             WHERE c.id = $1;
         `;
         const clanResult = await pool.query(clanQuery, [id]);
-        if (clanResult.rowCount === 0) return res.status(404).json({ error: 'Clan not found' });
+        if (clanResult.rowCount === 0) return res.status(404).json({ error: 'Clan not found.' });
         const clanDetails = clanResult.rows[0];
         const membersQuery = `
             SELECT t.owner_id as user_id, t.username, t.profile_image_url, cm.role, COALESCE(t.area_sqm, 0) as area_claimed_sqm
@@ -383,7 +383,7 @@ app.get('/clans/:id', authenticate, async (req, res) => {
         res.status(200).json(clanDetails);
     } catch (err) {
         console.error('[API] Error fetching clan details:', err);
-        res.status(500).json({ error: 'Failed to fetch clan details' });
+        res.status(500).json({ error: 'Failed to fetch clan details.' });
     }
 });
 
@@ -654,6 +654,7 @@ io.on('connection', (socket) => {
     }
     console.log(`[Socket] Player ${name} (${socket.id}) joining in [${gameMode}] mode.`);
     const client = await pool.connect(); 
+    let player; // Declare player here to be accessible throughout the scope
     try {
         const memberInfoRes = await client.query('SELECT clan_id, role FROM clan_members WHERE user_id = $1', [googleId]);
         const clanId = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].clan_id : null;
@@ -661,7 +662,7 @@ io.on('connection', (socket) => {
         const playerProfileRes = await client.query('SELECT has_shield FROM territories WHERE owner_id = $1', [googleId]);
         const hasShield = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_shield : false;
 
-        players[socket.id] = { 
+        player = players[socket.id] = { // Assign to the declared player variable
             id: socket.id, 
             name, 
             googleId, 
@@ -746,7 +747,7 @@ io.on('connection', (socket) => {
             const lastPoint = player.activeTrail[player.activeTrail.length - 1];
             const secondLastPoint = player.activeTrail[player.activeTrail.length - 2];
             const attackerSegmentWKT = (secondLastPoint.lng === lastPoint.lng && secondLastPoint.lat === lastPoint.lat) 
-                ? `POINT(${lastPoint.lng} ${lastPoint.lat})` // Use POINT if no movement
+                ? `POINT(${lastPoint.lng} ${lastPoint.lat})` 
                 : `LINESTRING(${secondLastPoint.lng} ${secondLastPoint.lat}, ${lastPoint.lng} ${lastPoint.lat})`;
             
             const attackerSegmentGeom = `ST_SetSRID(ST_GeomFromText('${attackerSegmentWKT}'), 4326)`;
@@ -854,8 +855,11 @@ io.on('connection', (socket) => {
         
         socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
         
-        const soloOwnersToUpdate = ownerIdsToUpdate.filter(id => id.includes('google-oauth')).map(String); 
-        const clanOwnersToUpdate = ownerIdsToUpdate.filter(id => !id.includes('google-oauth')).map(Number); 
+        // --- FIX FOR INTEGER OUT OF RANGE ERROR ---
+        // Separate solo (VARCHAR) and clan (INTEGER) owner IDs more explicitly
+        const soloOwnersToUpdate = ownerIdsToUpdate.filter(id => typeof id === 'string' && id.includes('google-oauth'));
+        // Convert clan IDs from string (from clan_id::text) back to Number for the query to work with INT[]
+        const clanOwnersToUpdate = ownerIdsToUpdate.filter(id => typeof id === 'string' && !id.includes('google-oauth')).map(Number); 
 
         let batchUpdateData = [];
         if (soloOwnersToUpdate.length > 0) {

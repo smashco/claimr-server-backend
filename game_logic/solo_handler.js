@@ -2,7 +2,7 @@
 
 const turf = require('@turf/turf');
 
-async function handleSoloClaim(io, socket, player, trail, baseClaim, client) { // Added 'io' parameter
+async function handleSoloClaim(io, socket, player, trail, baseClaim, client) { 
     const userId = player.googleId;
     const isInitialBaseClaim = !!baseClaim;
     const playerHasShield = player.hasShield; 
