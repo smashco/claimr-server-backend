@@ -10,8 +10,6 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
     let newAreaSqM;
 
     if (isInitialBaseClaim) {
-        // --- FIX FOR REBUILDING ON ENEMY TERRITORY ---
-        // Check if the proposed base point is inside any existing territory
         const basePointWKT = `ST_SetSRID(ST_Point(${baseClaim.lng}, ${baseClaim.lat}), 4326)`;
         const intersectionCheckQuery = `SELECT 1 FROM territories WHERE ST_Intersects(area, ${basePointWKT});`;
         const intersectionResult = await client.query(intersectionCheckQuery);
@@ -21,7 +19,6 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
             socket.emit('claimRejected', { reason: 'Cannot claim a new base inside existing territory. Move to an unclaimed area.' });
             return null;
         }
-        // --- END OF FIX ---
 
         const center = [baseClaim.lng, baseClaim.lat];
         const radius = baseClaim.radius || 30; 
@@ -137,11 +134,17 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
                     victimSocket.emit('runTerminated', { reason: `${player.name} has stolen some of your territory!` }); 
                     }
                 } else {
+                    // --- FIX FOR PLAYER LOSING ALL TERRITORY ---
+                    // If the victim loses all their land, reset their original_base_point so they can start over.
                     await client.query(`
-                        UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0
+                        UPDATE territories 
+                        SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), 
+                            area_sqm = 0,
+                            original_base_point = NULL
                         WHERE owner_id = $1;
                     `, [victimId]);
-                    console.log(`[SoloClaim] Entire territory stolen from ${victimId}.`);
+                    // --- END OF FIX ---
+                    console.log(`[SoloClaim] Entire territory stolen from ${victimId}. Resetting their base point.`);
                     affectedOwnerIds.add(victimId);
                     const victimSocket = Object.values(io.sockets.sockets).find(s => s.player && s.player.googleId === victimId);
                     if (victimSocket) {
