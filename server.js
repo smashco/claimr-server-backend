@@ -73,7 +73,7 @@ const setupDatabase = async () => {
         id SERIAL PRIMARY KEY,
         owner_id VARCHAR(255) NOT NULL UNIQUE,
         owner_name VARCHAR(255),
-        username VARCHAR(50) UNIQUE,
+        username VARCHAR(50), -- Removed UNIQUE to allow multiple users with null username (e.g. before profile setup)
         profile_image_url TEXT,
         identity_color VARCHAR(10) DEFAULT '#39FF14',
         area GEOMETRY(GEOMETRY, 4326),
@@ -673,7 +673,7 @@ io.on('connection', (socket) => {
         const clanId = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].clan_id : null;
         const role = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].role : null;
         const playerProfileRes = await client.query('SELECT has_shield FROM territories WHERE owner_id = $1', [googleId]);
-        const hasShield = playerProfileRes.rowCount > 0 ? playerProfileRes.rows[0].has_shield : false;
+        const hasShield = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_shield : false;
 
         players[socket.id] = { 
             id: socket.id, 
@@ -764,7 +764,8 @@ io.on('connection', (socket) => {
         if (player.activeTrail.length >= 2) { 
             const lastPoint = player.activeTrail[player.activeTrail.length - 1];
             const secondLastPoint = player.activeTrail[player.activeTrail.length - 2];
-            const attackerSegmentWKT = `LINESTRING(${secondLastPoint.lng} ${secondLastPoint.lat}, ${lastPoint.lng} ${lastPoint.lat})`;
+            const attackerSegmentWKT = `LINESTRING(${secondLastPoint.lng} ${secondLastPoint.lat}, ${secondLastPoint.lng} ${secondLastPoint.lat})` == `LINESTRING(${lastPoint.lng} ${lastPoint.lat}, ${lastPoint.lng} ${lastPoint.lat})` ? `LINESTRING(${secondLastPoint.lng} ${secondLastPoint.lat}, ${lastPoint.lng} ${lastPoint.lat})` : `LINESTRING(${lastPoint.lng} ${lastPoint.lat}, ${lastPoint.lng} ${lastPoint.lat})`; // Ensure valid segment even if no movement
+            
             const attackerSegmentGeom = `ST_SetSRID(ST_GeomFromText('${attackerSegmentWKT}'), 4326)`;
 
             const client = await pool.connect(); // New client for transaction
@@ -835,12 +836,14 @@ io.on('connection', (socket) => {
 
     const { gameMode, trail, baseClaim } = req; 
     
-    if (trail.length < 1 || (trail.length < 3 && !baseClaim)) { 
+    // Validate trail length: 1 point for baseClaim, >=3 for expansion polygon
+    if (trail.length < 1 || (!baseClaim && trail.length < 3)) { 
         console.warn(`[Claim] Invalid trail length for claim by ${player.name}. Trail length: ${trail.length}, BaseClaim: ${!!baseClaim}`);
         socket.emit('claimRejected', { reason: 'Invalid trail length.' });
         return;
     }
 
+    // Rate limit claims to prevent spamming
     if (player.lastClaimAttempt && (Date.now() - player.lastClaimAttempt.timestamp < 3000)) { 
         console.warn(`[Claim] Player ${player.name} attempting claims too fast.`);
         socket.emit('claimRejected', { reason: 'Please wait a moment before claiming again.' });
@@ -874,8 +877,8 @@ io.on('connection', (socket) => {
         
         // Fetch updated territory data for all affected owners for batch update
         // We need to fetch from both territories and clan_territories tables
-        const soloOwnersToUpdate = ownerIdsToUpdate.filter(id => id.startsWith('google-oauth')).map(String); // googleIds are strings
-        const clanOwnersToUpdate = ownerIdsToUpdate.filter(id => !id.startsWith('google-oauth')).map(Number); // Clan IDs are numbers
+        const soloOwnersToUpdate = ownerIdsToUpdate.filter(id => id.includes('google-oauth')).map(String); // googleIds are strings
+        const clanOwnersToUpdate = ownerIdsToUpdate.filter(id => !id.includes('google-oauth')).map(Number); // Clan IDs are numbers
 
         let batchUpdateData = [];
         if (soloOwnersToUpdate.length > 0) {
@@ -937,7 +940,7 @@ io.on('connection', (socket) => {
             delete players[socket.id]; // Finally remove player if timer expires
         }, DISCONNECT_TRAIL_PERSIST_SECONDS * 1000);
       } else {
-        delete players[socket.id];
+        delete players[socket.id]; // Immediately remove if not drawing
         io.emit('playerLeft', { id: socket.id });
       }
     }

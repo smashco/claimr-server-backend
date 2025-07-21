@@ -56,9 +56,9 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) { /
         const existingArea = existingUserAreaRes.rows.length > 0 ? existingUserAreaRes.rows[0].area : null;
 
         // If no existing area AND it's not an initial base claim, then this is an invalid expansion attempt
-        if (!existingArea) {
+        if (!existingArea || turf.area(JSON.parse(JSON.stringify(existingArea))) === 0) { // Also check if existing area is empty geometry
             console.warn(`[SoloClaim] Player ${userId} attempting expansion claim but has no existing territory.`);
-            socket.emit('claimRejected', { reason: 'You must claim an initial base first.' });
+            socket.emit('claimRejected', { reason: 'You must claim an initial base first or connect to existing territory.' });
             return null;
         }
 
@@ -91,8 +91,10 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) { /
         const victimOriginalBasePointWKT = row.original_base_point_wkt;
 
         // Calculate the intersection area
-        const intersectionCheck = await client.query(`SELECT ST_Area(ST_Transform(ST_Intersection(ST_GeomFromGeoJSON($1), $2), 28355)) AS intersected_sqm;`, [JSON.stringify(newAreaPolygon.geometry), victimCurrentArea]);
-        const intersectedSqM = intersectionCheck.rows[0].intersected_sqm || 0;
+        // Use ST_Intersection to get the actual geometry of the overlap
+        const intersectionGeomResult = await client.query(`SELECT ST_AsGeoJSON(ST_Intersection(ST_GeomFromGeoJSON($1), $2)) AS intersected_geom;`, [JSON.stringify(newAreaPolygon.geometry), victimCurrentArea]);
+        const intersectedGeomGeoJSON = intersectionGeomResult.rows[0].intersected_geom;
+        const intersectedSqM = intersectedGeomGeoJSON ? turf.area(JSON.parse(intersectedGeomGeoJSON)) : 0;
 
         if (intersectedSqM > 0) {
             console.log(`[SoloClaim] ${player.name} intersects ${victimUsername}'s territory. Intersected area: ${intersectedSqM} sqm`);
@@ -100,7 +102,8 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) { /
             // Shield logic: If victim has shield, and the intersection includes their original base point
             let shieldActivated = false;
             if (victimHasShield && victimOriginalBasePointWKT) {
-                const basePointIntersectsClaim = await client.query(`SELECT ST_Intersects(ST_GeomFromText($1), ${newAreaWKT}) AS intersects_base_point;`, [victimOriginalBasePointWKT]);
+                // Check if the actual intersection geometry overlaps the original base point
+                const basePointIntersectsClaim = await client.query(`SELECT ST_Intersects(ST_GeomFromText($1), ST_GeomFromGeoJSON($2)) AS intersects_base_point;`, [victimOriginalBasePointWKT, intersectedGeomGeoJSON]);
                 if (basePointIntersectsClaim.rows[0].intersects_base_point) {
                     shieldActivated = true;
                     console.log(`[SoloClaim] Shield activated for ${victimUsername}'s base point! Claim Rejected.`);
@@ -155,8 +158,7 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) { /
     const existingUserAreaResult = await client.query('SELECT area FROM territories WHERE owner_id = $1', [userId]);
     const existingUserArea = existingUserAreaResult.rows.length > 0 ? existingUserAreaResult.rows[0].area : null;
 
-    if (existingUserArea && turf.area(JSON.parse(JSON.stringify(existingUserArea))) > 0) { // Check for non-empty existing area
-        // Union with existing area
+    if (existingUserArea && turf.area(JSON.parse(JSON.stringify(existingUserArea))) > 0) { 
         const unionResult = await client.query(`
             SELECT ST_AsGeoJSON(ST_Union($1, ${newAreaWKT})) AS united_area;
         `, [existingUserArea]);

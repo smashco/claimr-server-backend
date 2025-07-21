@@ -121,7 +121,7 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) { /
         SELECT owner_id, username, area, has_shield, ST_AsText(original_base_point) as original_base_point_wkt
         FROM territories
         WHERE ST_Intersects(area, ${newAreaWKT});
-    `; // Removed 'AND gameMode = 'solo'' as player.gameMode isn't directly in DB territories table. Intersection check should find any relevant territories.
+    `; 
     const intersectingSoloTerritoriesResult = await client.query(intersectingSoloTerritoriesQuery);
 
     for (const row of intersectingSoloTerritoriesResult.rows) {
@@ -139,15 +139,16 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) { /
         }
 
         // Calculate the intersection area
-        const intersectionCheck = await client.query(`SELECT ST_Area(ST_Transform(ST_Intersection(ST_GeomFromGeoJSON($1), $2), 28355)) AS intersected_sqm;`, [JSON.stringify(newAreaPolygon.geometry), victimCurrentArea]);
-        const intersectedSqM = intersectionCheck.rows[0].intersected_sqm || 0;
+        const intersectionGeomResult = await client.query(`SELECT ST_AsGeoJSON(ST_Intersection(ST_GeomFromGeoJSON($1), $2)) AS intersected_geom;`, [JSON.stringify(newAreaPolygon.geometry), victimCurrentArea]);
+        const intersectedGeomGeoJSON = intersectionGeomResult.rows[0].intersected_geom;
+        const intersectedSqM = intersectedGeomGeoJSON ? turf.area(JSON.parse(intersectedGeomGeoJSON)) : 0;
 
         if (intersectedSqM > 0) {
             console.log(`[ClanClaim] Clan ${player.name}'s claim intersects solo player ${victimUsername}'s territory.`);
 
             // Shield logic for solo victim
             if (victimHasShield && victimOriginalBasePointWKT) {
-                const basePointIntersectsClaim = await client.query(`SELECT ST_Intersects(ST_GeomFromText($1), ${newAreaWKT}) AS intersects_base_point;`, [victimOriginalBasePointWKT]);
+                const basePointIntersectsClaim = await client.query(`SELECT ST_Intersects(ST_GeomFromText($1), ST_GeomFromGeoJSON($2)) AS intersects_base_point;`, [victimOriginalBasePointWKT, intersectedGeomGeoJSON]);
                 if (basePointIntersectsClaim.rows[0].intersects_base_point) {
                     console.log(`[ClanClaim] Solo player ${victimUsername}'s shield activated! Clan cannot steal base point.`);
                     socket.emit('claimRejected', { reason: `Solo player ${victimUsername}'s shield activated! Cannot steal this area.` });
@@ -172,7 +173,7 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) { /
                 affectedOwnerIds.add(victimId);
                 const victimSocket = Object.values(io.sockets.sockets).find(s => s.player && s.player.googleId === victimId);
                 if (victimSocket) {
-                  victimSocket.emit('runTerminated', { reason: `Clan ${player.name}'s clan has stolen some of your territory!` });
+                  victimSocket.emit('runTerminated', { reason: `Clan ${player.name}'s clan has stolen some of your territory!` }); 
                 }
             } else {
                 await client.query(`
@@ -203,8 +204,9 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) { /
         const victimClanName = row.name;
         const victimClanHasShield = row.has_shield;
 
-        const intersectionCheck = await client.query(`SELECT ST_Area(ST_Transform(ST_Intersection(ST_GeomFromGeoJSON($1), $2), 28355)) AS intersected_sqm;`, [JSON.stringify(newAreaPolygon.geometry), victimClanCurrentArea]);
-        const intersectedSqM = intersectionCheck.rows[0].intersected_sqm || 0;
+        const intersectionGeomResult = await client.query(`SELECT ST_AsGeoJSON(ST_Intersection(ST_GeomFromGeoJSON($1), $2)) AS intersected_geom;`, [JSON.stringify(newAreaPolygon.geometry), victimClanCurrentArea]);
+        const intersectedGeomGeoJSON = intersectionGeomResult.rows[0].intersected_geom;
+        const intersectedSqM = intersectedGeomGeoJSON ? turf.area(JSON.parse(intersectedGeomGeoJSON)) : 0;
 
         if (intersectedSqM > 0) {
             console.log(`[ClanClaim] Clan ${player.name}'s clan intersects other clan ${victimClanName}'s territory.`);
