@@ -5,7 +5,6 @@ const turf = require('@turf/turf');
 async function handleSoloClaim(io, socket, player, trail, baseClaim, client) { 
     const userId = player.googleId;
     const isInitialBaseClaim = !!baseClaim;
-    const playerHasShield = player.hasShield; 
 
     let newAreaPolygon;
     let newAreaSqM;
@@ -70,7 +69,6 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
     const affectedOwnerIds = new Set(); 
     affectedOwnerIds.add(userId); 
 
-    // --- Area Steal Mechanism ---
     const intersectingTerritoriesQuery = `
         SELECT owner_id, username, area, has_shield, ST_AsText(original_base_point) as original_base_point_wkt
         FROM territories
@@ -141,7 +139,6 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
         }
     }
 
-    // --- Add / Union New Area to Player's Territory ---
     let finalAreaSqM;
     let finalAreaGeoJSON;
 
@@ -162,10 +159,29 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
         console.log(`[SoloClaim] Initial/reclaim area for ${userId}. Total: ${finalAreaSqM}`);
     }
 
-    await client.query(`
-        UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 ${isInitialBaseClaim ? ', original_base_point = ST_SetSRID(ST_Point($4, $5), 4326)' : ''}
-        WHERE owner_id = $3;
-    `, [finalAreaGeoJSON, finalAreaSqM, userId, isInitialBaseClaim ? baseClaim.lng : null, isInitialBaseClaim ? baseClaim.lat : null]);
+    // --- FIX FOR PARAMETER COUNT MISMATCH ---
+    let updateQuery;
+    let queryParams;
+    if (isInitialBaseClaim) {
+        updateQuery = `
+            UPDATE territories 
+            SET area = ST_GeomFromGeoJSON($1), 
+                area_sqm = $2, 
+                original_base_point = ST_SetSRID(ST_Point($4, $5), 4326)
+            WHERE owner_id = $3;
+        `;
+        queryParams = [finalAreaGeoJSON, finalAreaSqM, userId, baseClaim.lng, baseClaim.lat];
+    } else {
+        updateQuery = `
+            UPDATE territories 
+            SET area = ST_GeomFromGeoJSON($1), 
+                area_sqm = $2 
+            WHERE owner_id = $3;
+        `;
+        queryParams = [finalAreaGeoJSON, finalAreaSqM, userId];
+    }
+    await client.query(updateQuery, queryParams);
+    // --- END OF FIX ---
 
     return {
         finalTotalArea: finalAreaSqM,
