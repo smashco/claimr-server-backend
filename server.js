@@ -721,7 +721,8 @@ io.on('connection', (socket) => {
             const clanBaseRes = await client.query('SELECT base_location FROM clans WHERE id = $1', [player.clanId]);
             if (clanBaseRes.rows.length > 0 && clanBaseRes.rows[0].base_location) {
                 const baseLoc = clanBaseRes.rows[0].base_location;
-                const parsedBaseLoc = JSON.parse(await client.query(`SELECT ST_AsGeoJSON($1) as geojson`, [baseLoc])).geojson.coordinates;
+                const geojsonResult = await client.query(`SELECT ST_AsGeoJSON($1) as geojson`, [baseLoc]);
+                const parsedBaseLoc = JSON.parse(geojsonResult.rows[0].geojson).coordinates;
                 socket.emit('clanBaseActivated', { center: { lat: parsedBaseLoc[1], lng: parsedBaseLoc[0] } });
             }
         }
@@ -855,16 +856,13 @@ io.on('connection', (socket) => {
         
         socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
         
-        // FIX FOR INTEGER OUT OF RANGE ERROR (Revised Filtering)
         const soloOwnersToUpdate = [];
         const clanOwnersToUpdate = [];
 
         for (const id of ownerIdsToUpdate) {
-            // Google IDs are long strings. Clan IDs are simple integers (but can be stringified).
-            // A regex check for digits-only is the safest way to distinguish them.
             if (typeof id === 'string' && /^\d+$/.test(id) && id.length < 10) { 
-                clanOwnersToUpdate.push(parseInt(id, 10)); // Convert to integer
-            } else if (typeof id === 'string') { // Assume any other string is a Google ID
+                clanOwnersToUpdate.push(parseInt(id, 10));
+            } else if (typeof id === 'string') {
                 soloOwnersToUpdate.push(id);
             } else {
                 console.warn(`[Claim] Skipping unrecognized ownerId type/format in batch update: ${id}`);
