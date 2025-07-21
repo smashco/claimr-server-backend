@@ -7,7 +7,7 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
     const userId = player.googleId;
     const isLeader = player.role === 'leader';
 
-    // A baseClaim object is now required for ALL clan claims (both initial and expansion)
+    // A baseClaim object is now required for ALL clan claims
     if (!baseClaim) {
         socket.emit('claimRejected', { reason: 'Clan claims require base location data.' });
         return null;
@@ -18,8 +18,8 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
         socket.emit('claimRejected', { reason: 'Clan not found.' });
         return null;
     }
-    const clanHasShield = clanInfoResult.rows[0].has_shield;
     const baseLocation = clanInfoResult.rows[0].base_location;
+    const clanHasShield = clanInfoResult.rows[0].has_shield;
 
     let newAreaPolygon;
     let newAreaSqM;
@@ -30,7 +30,7 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
         console.log(`[ClanClaim] Leader ${userId} is establishing the initial base for clan ${clanId}.`);
         
         const center = [baseClaim.lng, baseClaim.lat];
-        const radius = 56.42; // CLAN_BASE_RADIUS_METERS
+        const radius = baseClaim.radius || 56.42; // CLAN_BASE_RADIUS_METERS
         try {
             newAreaPolygon = turf.circle(center, radius, { units: 'meters' });
         } catch (e) {
@@ -43,7 +43,7 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
         // Set the permanent base_location in the clans table
         await client.query(`UPDATE clans SET base_location = ST_SetSRID(ST_Point($1, $2), 4326) WHERE id = $3;`, [baseClaim.lng, baseClaim.lat, clanId]);
         
-        // This is the missing step: also create the initial territory in clan_territories
+        // This is the crucial step: Create the initial territory in clan_territories table
         const initialAreaGeoJSON = JSON.stringify(newAreaPolygon.geometry);
         await client.query(`
             INSERT INTO clan_territories (clan_id, area, area_sqm)
@@ -53,6 +53,15 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
         
         console.log(`[ClanClaim] Initial base for clan ${clanId} created with area ${newAreaSqM} sqm.`);
 
+        // Notify all clan members that the base is now active
+        const clanMembersRes = await client.query('SELECT user_id FROM clan_members WHERE clan_id = $1', [clanId]);
+        for (const memberRow of clanMembersRes.rows) {
+            const memberSocketId = Object.keys(io.sockets.sockets).find(sockId => players[sockId] && players[sockId].googleId === memberRow.user_id);
+            if (memberSocketId) {
+                io.to(memberSocketId).emit('clanBaseActivated', { center: { lat: baseClaim.lat, lng: baseClaim.lng } });
+            }
+        }
+        
         return {
             finalTotalArea: newAreaSqM,
             areaClaimed: newAreaSqM,
@@ -66,7 +75,7 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
             return null;
         }
         if (trail.length < 3) {
-            socket.emit('claimRejected', { reason: 'Expansion trail must have at least 3 points to form a polygon.' });
+            socket.emit('claimRejected', { reason: 'Expansion trail must have at least 3 points.' });
             return null;
         }
         
@@ -107,7 +116,6 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
 
         // Area Steal logic for clans can be added here in the future if needed
 
-        // Union the new area with the clan's existing territory
         const unionResult = await client.query(`
             SELECT ST_AsGeoJSON(ST_Union(ST_GeomFromGeoJSON($1), ${newAreaWKT})) AS united_area;
         `, [existingClanAreaGeoJSON]);
