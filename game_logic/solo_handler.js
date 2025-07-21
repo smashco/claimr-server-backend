@@ -10,6 +10,19 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
     let newAreaSqM;
 
     if (isInitialBaseClaim) {
+        // --- FIX FOR REBUILDING ON ENEMY TERRITORY ---
+        // Check if the proposed base point is inside any existing territory
+        const basePointWKT = `ST_SetSRID(ST_Point(${baseClaim.lng}, ${baseClaim.lat}), 4326)`;
+        const intersectionCheckQuery = `SELECT 1 FROM territories WHERE ST_Intersects(area, ${basePointWKT});`;
+        const intersectionResult = await client.query(intersectionCheckQuery);
+
+        if (intersectionResult.rowCount > 0) {
+            console.log(`[SoloClaim] Rejected initial base claim for ${userId} because it's inside existing territory.`);
+            socket.emit('claimRejected', { reason: 'Cannot claim a new base inside existing territory. Move to an unclaimed area.' });
+            return null;
+        }
+        // --- END OF FIX ---
+
         const center = [baseClaim.lng, baseClaim.lat];
         const radius = baseClaim.radius || 30; 
         try {
@@ -159,7 +172,6 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
         console.log(`[SoloClaim] Initial/reclaim area for ${userId}. Total: ${finalAreaSqM}`);
     }
 
-    // --- FIX FOR PARAMETER COUNT MISMATCH ---
     let updateQuery;
     let queryParams;
     if (isInitialBaseClaim) {
@@ -181,7 +193,6 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
         queryParams = [finalAreaGeoJSON, finalAreaSqM, userId];
     }
     await client.query(updateQuery, queryParams);
-    // --- END OF FIX ---
 
     return {
         finalTotalArea: finalAreaSqM,
