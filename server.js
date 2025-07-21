@@ -390,13 +390,13 @@ app.get('/clans/:id', authenticate, async (req, res) => {
 app.put('/clans/:id/photo', authenticate, async (req, res) => {
     const { id } = req.params;
     const { imageUrl } = req.body;
-    if (!imageUrl) return res.status(400).json({ error: 'imageUrl is required' });
+    if (!imageUrl) return res.status(400).json({ error: 'imageUrl is required.' });
     try {
         await pool.query('UPDATE clans SET clan_image_url = $1 WHERE id = $2', [imageUrl, id]);
         res.sendStatus(200);
     } catch (err) {
         console.error('[API] Error updating clan photo:', err);
-        res.status(500).json({ error: 'Failed to update clan photo' });
+        res.status(500).json({ error: 'Failed to update clan photo.' });
     }
 });
 
@@ -430,7 +430,7 @@ app.post('/clans/:id/set-base', authenticate, async (req, res) => {
     } catch (err) {
         await client.query('ROLLBACK');
         console.error('[API] Error setting clan base:', err);
-        res.status(500).json({ error: 'Failed to set clan base' });
+        res.status(500).json({ error: 'Failed to set clan base.' });
     } finally {
         client.release();
     }
@@ -745,7 +745,6 @@ io.on('connection', (socket) => {
         if (player.activeTrail.length >= 2) { 
             const lastPoint = player.activeTrail[player.activeTrail.length - 1];
             const secondLastPoint = player.activeTrail[player.activeTrail.length - 2];
-            // Ensure attackerSegmentWKT is always valid, even if points are identical (no movement)
             const attackerSegmentWKT = (secondLastPoint.lng === lastPoint.lng && secondLastPoint.lat === lastPoint.lat) 
                 ? `POINT(${lastPoint.lng} ${lastPoint.lat})` // Use POINT if no movement
                 : `LINESTRING(${secondLastPoint.lng} ${secondLastPoint.lat}, ${lastPoint.lng} ${lastPoint.lat})`;

@@ -2,7 +2,7 @@
 
 const turf = require('@turf/turf');
 
-async function handleSoloClaim(io, socket, player, trail, baseClaim, client) { 
+async function handleSoloClaim(io, socket, player, trail, baseClaim, client) { // Added 'io' parameter
     const userId = player.googleId;
     const isInitialBaseClaim = !!baseClaim;
     const playerHasShield = player.hasShield; 
@@ -48,8 +48,7 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
             return null;
         }
 
-        // Check if the new expansion claim connects to existing territory (must overlap)
-        const existingUserAreaRes = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1', [userId]); // Fetch as GeoJSON
+        const existingUserAreaRes = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1', [userId]); 
         const existingAreaGeoJSON = existingUserAreaRes.rows.length > 0 ? existingUserAreaRes.rows[0].geojson_area : null;
         const existingAreaTurf = existingAreaGeoJSON ? JSON.parse(existingAreaGeoJSON) : null;
 
@@ -59,7 +58,6 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
             return null;
         }
 
-        // Check if the new polygon intersects the existing GeoJSON area
         const intersectsExisting = await client.query(`SELECT ST_Intersects(ST_GeomFromGeoJSON($1), ST_GeomFromGeoJSON($2)) as intersects;`, [JSON.stringify(newAreaPolygon.geometry), existingAreaGeoJSON]);
         if (!intersectsExisting.rows[0].intersects) {
             console.log(`[SoloClaim] Expansion claim for ${userId} does not connect to existing territory.`);
@@ -147,14 +145,14 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
     let finalAreaSqM;
     let finalAreaGeoJSON;
 
-    const existingUserAreaResult = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1', [userId]); // Fetch as GeoJSON
+    const existingUserAreaResult = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1', [userId]); 
     const existingUserAreaGeoJSON = existingUserAreaResult.rows.length > 0 ? existingUserAreaResult.rows[0].geojson_area : null;
     const existingUserAreaTurf = existingUserAreaGeoJSON ? JSON.parse(existingUserAreaGeoJSON) : null;
 
     if (existingUserAreaTurf && turf.area(existingUserAreaTurf) > 0) { 
         const unionResult = await client.query(`
             SELECT ST_AsGeoJSON(ST_Union(ST_GeomFromGeoJSON($1), ${newAreaWKT})) AS united_area;
-        `, [existingUserAreaGeoJSON]); // Pass GeoJSON string
+        `, [existingUserAreaGeoJSON]); 
         finalAreaGeoJSON = unionResult.rows[0].united_area;
         finalAreaSqM = turf.area(JSON.parse(finalAreaGeoJSON));
         console.log(`[SoloClaim] Unioned new area for ${userId}. Total: ${finalAreaSqM}`);

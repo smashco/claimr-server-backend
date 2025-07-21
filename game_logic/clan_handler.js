@@ -70,7 +70,7 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
             return null;
         }
 
-        const existingClanAreaRes = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM clan_territories WHERE clan_id = $1', [clanId]); // Fetch as GeoJSON
+        const existingClanAreaRes = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM clan_territories WHERE clan_id = $1', [clanId]); 
         const existingClanAreaGeoJSON = existingClanAreaRes.rows.length > 0 ? existingClanAreaRes.rows[0].geojson_area : null;
         const existingClanAreaTurf = existingClanAreaGeoJSON ? JSON.parse(existingClanAreaGeoJSON) : null;
 
@@ -188,7 +188,7 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
         FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id
         WHERE ST_Intersects(ct.area, ${newAreaWKT}) AND ct.clan_id != $1;
     `;
-    const intersectingOtherClansResult = await client.query(intersectingOtherClansQuery, [clanId]);
+    const intersectingOtherClansResult = await client.query(intersectingOtherClansQuery);
 
     for (const row of intersectingOtherClansResult.rows) {
         const victimClanId = row.clan_id;
@@ -256,14 +256,14 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
     let finalClanAreaSqM;
     let finalClanAreaGeoJSON;
 
-    const existingClanAreaResult = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM clan_territories WHERE clan_id = $1', [clanId]); // Fetch as GeoJSON
+    const existingClanAreaResult = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM clan_territories WHERE clan_id = $1', [clanId]); 
     const existingClanAreaGeoJSON = existingClanAreaResult.rows.length > 0 ? existingClanAreaResult.rows[0].geojson_area : null;
     const existingClanAreaTurf = existingClanAreaGeoJSON ? JSON.parse(existingClanAreaGeoJSON) : null;
 
     if (existingClanAreaTurf && turf.area(existingClanAreaTurf) > 0) { 
         const unionResult = await client.query(`
             SELECT ST_AsGeoJSON(ST_Union(ST_GeomFromGeoJSON($1), ${newAreaWKT})) AS united_area;
-        `, [existingClanAreaGeoJSON]); // Pass GeoJSON string
+        `, [existingClanAreaGeoJSON]); 
         finalClanAreaGeoJSON = unionResult.rows[0].united_area;
         finalClanAreaSqM = turf.area(JSON.parse(finalClanAreaGeoJSON));
         console.log(`[ClanClaim] Unioned new area for clan ${clanId}. Total: ${finalClanAreaSqM}`);
