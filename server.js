@@ -294,8 +294,7 @@ app.get('/leaderboard/clans', async (req, res) => {
         `;
         const result = await pool.query(query);
         res.status(200).json(result.rows);
-    }
-    catch (err) {
+    } catch (err) {
         console.error('[API] Error fetching clan leaderboard:', err);
         res.status(500).json({ error: 'Failed to fetch clan leaderboard.' });
     }
@@ -610,10 +609,10 @@ app.get('/admin/reset-all-territories', checkAdminSecret, async (req, res) => {
 
         console.log('[ADMIN] All claimed territories deleted.');
         io.emit('allTerritoriesCleared');
-        res.status(200).send('SUCCESS: All claimed territories deleted.');
+        res.status(200).json({ success: true, message: 'SUCCESS: All claimed territories deleted.' }); // Changed to JSON response
     } catch (err) {
         console.error('ERROR clearing territories:', err);
-        res.status(500).json({ error: 'ERROR clearing territories.' }); // Corrected: send JSON response
+        res.status(500).json({ error: 'ERROR clearing territories.' }); 
     }
 });
 
@@ -710,7 +709,7 @@ io.on('connection', (socket) => {
 
         const activeTrails = [];
         for (const playerId in players) {
-          if (players[playerId].isDrawing && players[playerId].activeTrail.length > 0) { // Check if player is drawing
+          if (players[playerId].isDrawing && players[playerId].activeTrail.length > 0) { 
             activeTrails.push({ id: playerId, trail: players[playerId].activeTrail });
           }
         }
@@ -856,11 +855,22 @@ io.on('connection', (socket) => {
         
         socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
         
-        // FIX FOR INTEGER OUT OF RANGE ERROR:
-        // Filter ownerIdsToUpdate into strictly solo (string) and clan (number) IDs
-        const soloOwnersToUpdate = ownerIdsToUpdate.filter(id => typeof id === 'string' && id.includes('google-oauth'));
-        // Convert clan IDs from string (from clan_id::text) back to actual Numbers for the query to work with INT[]
-        const clanOwnersToUpdate = ownerIdsToUpdate.filter(id => typeof id === 'string' && !id.includes('google-oauth')).map(id => parseInt(id, 10));
+        // FIX FOR INTEGER OUT OF RANGE ERROR (Revised Filtering)
+        const soloOwnersToUpdate = [];
+        const clanOwnersToUpdate = [];
+
+        for (const id of ownerIdsToUpdate) {
+            // Google IDs always start with 'google-oauth|'
+            if (typeof id === 'string' && id.startsWith('google-oauth|')) { 
+                soloOwnersToUpdate.push(id);
+            } 
+            // Clan IDs are integer numbers (but can be stringified), so check if they are digits only
+            else if (typeof id === 'string' && /^\d+$/.test(id)) { 
+                clanOwnersToUpdate.push(parseInt(id, 10)); // Convert to integer
+            } else {
+                console.warn(`[Claim] Skipping unrecognized ownerId type/format in batch update: ${id}`);
+            }
+        }
 
         let batchUpdateData = [];
         if (soloOwnersToUpdate.length > 0) {
