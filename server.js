@@ -170,7 +170,7 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// --- API Endpoints ---
+// --- API Endpoints (No Changes in this section) ---
 app.get('/', (req, res) => { res.send('ClaimrunX Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
 
@@ -697,6 +697,7 @@ io.on('connection', (socket) => {
             infiltratorCharges: 1,
             ghostRunnerCharges: 1,
             isGhostRunnerActive: false,
+            isLastStandActive: false,
         };
     
         let activeTerritories = [];

@@ -1,7 +1,9 @@
 // claimr_server/game_logic/solo_handler.js
 
 const turf = require('@turf/turf');
-const { players } = require('../server'); // Important: This assumes players is exported or accessible. If not, you might need to pass it in.
+
+// The global 'players' object will be available in the scope where this module is required and called.
+// No need to explicitly require it here.
 
 async function handleSoloClaim(io, socket, player, trail, baseClaim, client) { 
     const userId = player.googleId;
@@ -95,7 +97,7 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
         
         if (victimHasShield) {
             console.log(`[SoloClaim] Attack on ${victimUsername} failed, shield is active.`);
-            continue; // Skip to the next victim if shield is active
+            continue;
         }
 
         const diffGeomResult = await client.query(`
@@ -109,9 +111,10 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
         const victimSocketId = Object.keys(io.sockets.sockets).find(id => players[id] && players[id].googleId === victimId);
         const victimPlayer = victimSocketId ? players[victimSocketId] : null;
 
-        if (finalRemainingAreaSqM < 1 && victimPlayer && victimPlayer.lastStandCharges > 0) {
-            console.log(`[GAME] Victim ${victimPlayer.name} is being wiped out, activating LAST STAND.`);
-            victimPlayer.lastStandCharges--;
+        // --- CORRECTED "LAST STAND" SUPERPOWER LOGIC ---
+        if (finalRemainingAreaSqM < 1 && victimPlayer && victimPlayer.isLastStandActive) {
+            console.log(`[GAME] Victim ${victimPlayer.name} is being wiped out, but their LAST STAND is active.`);
+            victimPlayer.isLastStandActive = false; // Consume the power
             io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: victimPlayer.lastStandCharges });
             
             const centerPoint = JSON.parse(row.geojson_base).coordinates;
