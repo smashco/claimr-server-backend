@@ -692,7 +692,11 @@ io.on('connection', (socket) => {
             isDrawing: false, 
             activeTrail: [],
             hasShield: hasShield, 
-            disconnectTimer: null 
+            disconnectTimer: null,
+            lastStandCharges: 1,
+            infiltratorCharges: 1,
+            ghostRunnerCharges: 1,
+            isGhostRunnerActive: false,
         };
     
         let activeTerritories = [];
@@ -766,7 +770,10 @@ io.on('connection', (socket) => {
 
     if (player.isDrawing) {
         player.activeTrail.push(data);
-        socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data }); 
+
+        if (!player.isGhostRunnerActive) {
+          socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data }); 
+        }
 
         if (player.activeTrail.length >= 2) { 
             const lastPoint = player.activeTrail[player.activeTrail.length - 1];
@@ -814,15 +821,15 @@ io.on('connection', (socket) => {
 
   socket.on('startDrawingTrail', () => {
     const player = players[socket.id];
-    if (!player || player.gameMode === 'spectator') return;
-    if (player.isDrawing) {
-      console.warn(`[Socket] Player ${player.name} sent startDrawingTrail but was already drawing.`);
-      return;
-    }
+    if (!player || player.gameMode === 'spectator' || player.isDrawing) return;
+    
     player.isDrawing = true;
     player.activeTrail = [];
-    console.log(`[Socket] Player ${player.name} (${socket.id}) started drawing trail.`);
-    socket.broadcast.emit('trailStarted', { id: socket.id, name: player.name }); 
+    console.log(`[Socket] Player ${player.name} (${socket.id}) started drawing trail. Ghost Runner: ${player.isGhostRunnerActive}`);
+    
+    if (!player.isGhostRunnerActive) {
+      socket.broadcast.emit('trailStarted', { id: socket.id, name: player.name });
+    }
   });
 
   socket.on('stopDrawingTrail', () => {
@@ -831,7 +838,27 @@ io.on('connection', (socket) => {
     console.log(`[Socket] Player ${player.name} (${socket.id}) stopped drawing trail.`);
     player.isDrawing = false;
     player.activeTrail = [];
+    player.isGhostRunnerActive = false; // Always reset on stop
     io.emit('trailCleared', { id: socket.id }); 
+  });
+  
+  socket.on('activateGhostRunner', () => {
+      const player = players[socket.id];
+      if (player && player.ghostRunnerCharges > 0) {
+          player.ghostRunnerCharges--;
+          player.isGhostRunnerActive = true;
+          console.log(`[GAME] ${player.name} activated GHOST RUNNER. Charges left: ${player.ghostRunnerCharges}`);
+          socket.emit('superpowerAcknowledged', { power: 'ghostRunner', chargesLeft: player.ghostRunnerCharges });
+      }
+  });
+
+  socket.on('activateInfiltrator', () => {
+      const player = players[socket.id];
+      if (player && player.infiltratorCharges > 0) {
+          player.infiltratorCharges--;
+          console.log(`[GAME] ${player.name} activated INFILTRATOR. Charges left: ${player.infiltratorCharges}`);
+          socket.emit('superpowerAcknowledged', { power: 'infiltrator', chargesLeft: player.infiltratorCharges });
+      }
   });
 
   socket.on('claimTerritory', async (req) => {
@@ -921,6 +948,7 @@ io.on('connection', (socket) => {
         
         player.isDrawing = false;
         player.activeTrail = [];
+        player.isGhostRunnerActive = false; 
         io.emit('trailCleared', { id: socket.id });
 
     } catch (err) {
