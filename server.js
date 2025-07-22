@@ -402,9 +402,6 @@ app.put('/clans/:id/photo', authenticate, async (req, res) => {
     }
 });
 
-// =======================================================================
-// ====== THIS IS THE CORRECTED /clans/:id/set-base ENDPOINT =============
-// =======================================================================
 app.post('/clans/:id/set-base', authenticate, async (req, res) => {
     const { id } = req.params;
     const { baseLocation } = req.body;
@@ -422,17 +419,14 @@ app.post('/clans/:id/set-base', authenticate, async (req, res) => {
             return res.status(403).json({ message: 'Only the clan leader can set the base.' });
         }
 
-        // Set the point location in the clans table
         const pointWKT = `POINT(${baseLocation.lng} ${baseLocation.lat})`;
         await client.query(`UPDATE clans SET base_location = ST_SetSRID(ST_GeomFromText($1), 4326) WHERE id = $2`, [pointWKT, id]);
         
-        // --- NEW LOGIC: Create the initial territory polygon ---
         const center = [baseLocation.lng, baseLocation.lat];
         const initialBasePolygon = turf.circle(center, CLAN_BASE_RADIUS_METERS, { units: 'meters' });
         const initialBaseArea = turf.area(initialBasePolygon);
         const initialAreaGeoJSON = JSON.stringify(initialBasePolygon.geometry);
 
-        // Insert or update the clan_territories table with this new base
         await client.query(`
             INSERT INTO clan_territories (clan_id, area, area_sqm)
             VALUES ($1, ST_GeomFromGeoJSON($2), $3)
@@ -440,7 +434,6 @@ app.post('/clans/:id/set-base', authenticate, async (req, res) => {
             SET area = ST_GeomFromGeoJSON($2), area_sqm = $3;
         `, [id, initialAreaGeoJSON, initialBaseArea]);
         console.log(`[API] Clan base for clan ${id} established. Initial territory created with area ${initialBaseArea} sqm.`);
-        // --- END NEW LOGIC ---
 
         const clanMembers = await client.query('SELECT user_id FROM clan_members WHERE clan_id = $1', [id]);
         for (const memberRow of clanMembers.rows) {
