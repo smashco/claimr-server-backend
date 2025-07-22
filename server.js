@@ -1,3 +1,5 @@
+// server.js
+
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -167,7 +169,7 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// --- API Endpoints ---
+// --- API Endpoints (no changes here) ---
 app.get('/', (req, res) => { res.send('ClaimrunX Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
 
@@ -287,7 +289,7 @@ app.get('/leaderboard/clans', async (req, res) => {
             FROM clans c
             LEFT JOIN clan_members cm ON c.id = cm.clan_id
             LEFT JOIN clan_territories ct ON c.id = ct.clan_id
-            LEFT JOIN territories t_leader ON c.leader_id = t.owner_id
+            LEFT JOIN territories t_leader ON c.leader_id = t_leader.owner_id
             GROUP BY c.id, ct.area_sqm, t_leader.username
             ORDER BY total_area_sqm DESC LIMIT 100;
         `;
@@ -555,7 +557,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     }
 });
 
-// --- ADMIN ENDPOINTS ---
+// --- ADMIN ENDPOINTS (no changes here) ---
 app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
     const client = await pool.connect();
     try {
@@ -647,22 +649,27 @@ io.on('connection', (socket) => {
       console.log(`[SERVER] Cleared disconnect timer for ${socket.id} on reconnect.`);
   }
 
+  // =======================================================================
+  // ====== THIS IS THE CORRECTED playerJoined EVENT HANDLER ================
+  // =======================================================================
   socket.on('playerJoined', async ({ googleId, name, gameMode }) => {
     if (!googleId || !gameMode) {
         console.error(`[Socket] Invalid playerJoined event from ${socket.id}`);
         return;
     }
     console.log(`[Socket] Player ${name} (${socket.id}) joining in [${gameMode}] mode.`);
-    const client = await pool.connect(); 
-    let player;
+    const client = await pool.connect();
+    
     try {
+        // Step 1: Always get the player's core info (clan, shield, etc.)
         const memberInfoRes = await client.query('SELECT clan_id, role FROM clan_members WHERE user_id = $1', [googleId]);
         const clanId = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].clan_id : null;
         const role = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].role : null;
-        const playerProfileRes = await client.query('SELECT has_shield FROM territories WHERE owner_id = $1', [googleId]);
+        const playerProfileRes = await client.query('SELECT has_shield, username IS NOT NULL as has_record FROM territories WHERE owner_id = $1', [googleId]);
         const hasShield = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_shield : false;
+        const playerHasRecord = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_record : false;
 
-        player = players[socket.id] = { 
+        players[socket.id] = { 
             id: socket.id, 
             name, 
             googleId, 
@@ -676,19 +683,37 @@ io.on('connection', (socket) => {
             disconnectTimer: null 
         };
     
-        let query;
+        let activeTerritories = [];
+
+        // Step 2: Explicitly query and send data based on the requested game mode.
         if (gameMode === 'clan') {
-            query = `
+            const query = `
                 SELECT 
                     ct.clan_id::text as "ownerId",
                     c.name as "ownerName",
                     c.clan_image_url as "profileImageUrl",
+                    '#CCCCCC' as identity_color, -- Clans can have a default color or this can be customized
                     ST_AsGeoJSON(ct.area) as geojson, 
                     ct.area_sqm as area
-                FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id;
+                FROM clan_territories ct 
+                JOIN clans c ON ct.clan_id = c.id
+                WHERE ct.area IS NOT NULL AND NOT ST_IsEmpty(ct.area);
             `;
-        } else { 
-             query = `
+            const territoryResult = await client.query(query);
+            activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
+
+            // Also check for an active clan base and send it if it exists
+            if (clanId) {
+                const clanBaseRes = await client.query('SELECT base_location FROM clans WHERE id = $1', [clanId]);
+                if (clanBaseRes.rows.length > 0 && clanBaseRes.rows[0].base_location) {
+                    const geojsonResult = await client.query(`SELECT ST_AsGeoJSON($1) as geojson`, [clanBaseRes.rows[0].base_location]);
+                    const parsedBaseLoc = JSON.parse(geojsonResult.rows[0].geojson).coordinates;
+                    socket.emit('clanBaseActivated', { center: { lat: parsedBaseLoc[1], lng: parsedBaseLoc[0] } });
+                }
+            }
+        } 
+        else if (gameMode === 'solo') { 
+            const query = `
                 SELECT 
                     owner_id as "ownerId", 
                     username as "ownerName", 
@@ -698,33 +723,23 @@ io.on('connection', (socket) => {
                     area_sqm as area
                 FROM territories
                 WHERE area IS NOT NULL AND NOT ST_IsEmpty(area);
-             `;
+            `;
+            const territoryResult = await client.query(query);
+            activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
         }
-        const territoryResult = await client.query(query);
-        const activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
-        const playerProfileResult = await client.query('SELECT 1 FROM territories WHERE owner_id = $1 AND username IS NOT NULL', [googleId]);
-        const playerHasRecord = playerProfileResult.rowCount > 0;
-        console.log(`[Socket] Found ${activeTerritories.length} territories. Sending 'existingTerritories' to ${socket.id}.`);
+
+        console.log(`[Socket] Found ${activeTerritories.length} [${gameMode}] territories. Sending 'existingTerritories' to ${socket.id}.`);
         socket.emit('existingTerritories', { territories: activeTerritories, playerHasRecord: playerHasRecord });
 
+        // Step 3: Send existing live trails to the new player
         const activeTrails = [];
         for (const playerId in players) {
-          if (players[playerId].isDrawing && players[playerId].activeTrail.length > 0) { 
+          if (players[playerId].isDrawing && players[playerId].activeTrail.length > 0 && players[playerId].gameMode === gameMode) { 
             activeTrails.push({ id: playerId, trail: players[playerId].activeTrail });
           }
         }
         if (activeTrails.length > 0) {
           socket.emit('existingLiveTrails', activeTrails);
-        }
-
-        if (player.gameMode === 'clan' && player.clanId) {
-            const clanBaseRes = await client.query('SELECT base_location FROM clans WHERE id = $1', [player.clanId]);
-            if (clanBaseRes.rows.length > 0 && clanBaseRes.rows[0].base_location) {
-                const baseLoc = clanBaseRes.rows[0].base_location;
-                const geojsonResult = await client.query(`SELECT ST_AsGeoJSON($1) as geojson`, [baseLoc]);
-                const parsedBaseLoc = JSON.parse(geojsonResult.rows[0].geojson).coordinates;
-                socket.emit('clanBaseActivated', { center: { lat: parsedBaseLoc[1], lng: parsedBaseLoc[0] } });
-            }
         }
 
     } catch (err) { 
