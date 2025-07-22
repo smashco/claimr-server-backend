@@ -53,6 +53,7 @@ try {
 const PORT = process.env.PORT || 10000;
 const SERVER_TICK_RATE_MS = 500; 
 const DISCONNECT_TRAIL_PERSIST_SECONDS = 60; 
+const CLAN_BASE_RADIUS_METERS = 56.42;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -169,7 +170,7 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// --- API Endpoints (no changes here) ---
+// --- API Endpoints ---
 app.get('/', (req, res) => { res.send('ClaimrunX Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
 
@@ -401,11 +402,16 @@ app.put('/clans/:id/photo', authenticate, async (req, res) => {
     }
 });
 
+// =======================================================================
+// ====== THIS IS THE CORRECTED /clans/:id/set-base ENDPOINT =============
+// =======================================================================
 app.post('/clans/:id/set-base', authenticate, async (req, res) => {
     const { id } = req.params;
     const { baseLocation } = req.body;
     const leaderId = req.user.googleId; 
-    if (!baseLocation || !baseLocation.lat || !baseLocation.lng) return res.status(400).json({ error: 'baseLocation is required.' });
+    if (!baseLocation || typeof baseLocation.lat !== 'number' || typeof baseLocation.lng !== 'number') {
+        return res.status(400).json({ error: 'baseLocation with lat and lng is required.' });
+    }
     
     const client = await pool.connect();
     try {
@@ -416,9 +422,26 @@ app.post('/clans/:id/set-base', authenticate, async (req, res) => {
             return res.status(403).json({ message: 'Only the clan leader can set the base.' });
         }
 
+        // Set the point location in the clans table
         const pointWKT = `POINT(${baseLocation.lng} ${baseLocation.lat})`;
         await client.query(`UPDATE clans SET base_location = ST_SetSRID(ST_GeomFromText($1), 4326) WHERE id = $2`, [pointWKT, id]);
         
+        // --- NEW LOGIC: Create the initial territory polygon ---
+        const center = [baseLocation.lng, baseLocation.lat];
+        const initialBasePolygon = turf.circle(center, CLAN_BASE_RADIUS_METERS, { units: 'meters' });
+        const initialBaseArea = turf.area(initialBasePolygon);
+        const initialAreaGeoJSON = JSON.stringify(initialBasePolygon.geometry);
+
+        // Insert or update the clan_territories table with this new base
+        await client.query(`
+            INSERT INTO clan_territories (clan_id, area, area_sqm)
+            VALUES ($1, ST_GeomFromGeoJSON($2), $3)
+            ON CONFLICT (clan_id) DO UPDATE 
+            SET area = ST_GeomFromGeoJSON($2), area_sqm = $3;
+        `, [id, initialAreaGeoJSON, initialBaseArea]);
+        console.log(`[API] Clan base for clan ${id} established. Initial territory created with area ${initialBaseArea} sqm.`);
+        // --- END NEW LOGIC ---
+
         const clanMembers = await client.query('SELECT user_id FROM clan_members WHERE clan_id = $1', [id]);
         for (const memberRow of clanMembers.rows) {
             const memberSocketId = Object.keys(players).find(sockId => players[sockId].googleId === memberRow.user_id);
@@ -557,7 +580,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     }
 });
 
-// --- ADMIN ENDPOINTS (no changes here) ---
+// --- ADMIN ENDPOINTS ---
 app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
     const client = await pool.connect();
     try {
@@ -649,9 +672,6 @@ io.on('connection', (socket) => {
       console.log(`[SERVER] Cleared disconnect timer for ${socket.id} on reconnect.`);
   }
 
-  // =======================================================================
-  // ====== THIS IS THE CORRECTED playerJoined EVENT HANDLER ================
-  // =======================================================================
   socket.on('playerJoined', async ({ googleId, name, gameMode }) => {
     if (!googleId || !gameMode) {
         console.error(`[Socket] Invalid playerJoined event from ${socket.id}`);
@@ -661,7 +681,6 @@ io.on('connection', (socket) => {
     const client = await pool.connect();
     
     try {
-        // Step 1: Always get the player's core info (clan, shield, etc.)
         const memberInfoRes = await client.query('SELECT clan_id, role FROM clan_members WHERE user_id = $1', [googleId]);
         const clanId = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].clan_id : null;
         const role = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].role : null;
@@ -685,14 +704,13 @@ io.on('connection', (socket) => {
     
         let activeTerritories = [];
 
-        // Step 2: Explicitly query and send data based on the requested game mode.
         if (gameMode === 'clan') {
             const query = `
                 SELECT 
                     ct.clan_id::text as "ownerId",
                     c.name as "ownerName",
                     c.clan_image_url as "profileImageUrl",
-                    '#CCCCCC' as identity_color, -- Clans can have a default color or this can be customized
+                    '#CCCCCC' as identity_color,
                     ST_AsGeoJSON(ct.area) as geojson, 
                     ct.area_sqm as area
                 FROM clan_territories ct 
@@ -702,7 +720,6 @@ io.on('connection', (socket) => {
             const territoryResult = await client.query(query);
             activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
 
-            // Also check for an active clan base and send it if it exists
             if (clanId) {
                 const clanBaseRes = await client.query('SELECT base_location FROM clans WHERE id = $1', [clanId]);
                 if (clanBaseRes.rows.length > 0 && clanBaseRes.rows[0].base_location) {
@@ -731,7 +748,6 @@ io.on('connection', (socket) => {
         console.log(`[Socket] Found ${activeTerritories.length} [${gameMode}] territories. Sending 'existingTerritories' to ${socket.id}.`);
         socket.emit('existingTerritories', { territories: activeTerritories, playerHasRecord: playerHasRecord });
 
-        // Step 3: Send existing live trails to the new player
         const activeTrails = [];
         for (const playerId in players) {
           if (players[playerId].isDrawing && players[playerId].activeTrail.length > 0 && players[playerId].gameMode === gameMode) { 
