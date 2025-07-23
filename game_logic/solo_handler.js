@@ -79,7 +79,7 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
     `;
     const intersectingTerritoriesResult = await client.query(intersectingTerritoriesQuery, [userId]);
     
-    let attackerFinalClaimWKT = newAreaWKT;
+    let attackerFinalClaimWKT = newAreaWKT; // Start with the full proposed claim
 
     for (const row of intersectingTerritoriesResult.rows) {
         const victimId = row.owner_id;
@@ -98,13 +98,20 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
                 SELECT ST_AsGeoJSON(ST_Difference(${attackerFinalClaimWKT}, $1)) as final_geom;
             `, [victimCurrentArea]);
             
-            attackerFinalClaimWKT = `ST_GeomFromGeoJSON('${protectedAreaResult.rows[0].final_geom}')`;
+            const finalGeom = protectedAreaResult.rows[0].final_geom;
+            if(finalGeom) {
+                attackerFinalClaimWKT = `ST_GeomFromGeoJSON('${finalGeom}')`;
+            } else {
+                 attackerFinalClaimWKT = `ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')`;
+            }
             
             affectedOwnerIds.add(victimId);
             continue; 
         }
         
-        const diffGeomResult = await client.query(`SELECT ST_AsGeoJSON(ST_Difference($1, ${attackerFinalClaimWKT})) AS remaining_area;`, [victimCurrentArea]);
+        // --- THIS IS THE FIX ---
+        // Always subtract the ORIGINAL attacker shape from the unshielded victim
+        const diffGeomResult = await client.query(`SELECT ST_AsGeoJSON(ST_Difference($1, ${newAreaWKT})) AS remaining_area;`, [victimCurrentArea]);
         const remainingAreaGeoJSON = diffGeomResult.rows[0].remaining_area;
         const remainingAreaSqM = remainingAreaGeoJSON ? turf.area(JSON.parse(remainingAreaGeoJSON)) : 0;
         
@@ -129,11 +136,17 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
             SELECT ST_AsGeoJSON(ST_Union(ST_GeomFromGeoJSON($1), ${attackerFinalClaimWKT})) AS united_area;
         `, [existingUserAreaGeoJSON]); 
         finalAreaGeoJSON = unionResult.rows[0].united_area;
-        finalAreaSqM = turf.area(JSON.parse(finalAreaGeoJSON));
+        finalAreaSqM = finalAreaGeoJSON ? turf.area(JSON.parse(finalAreaGeoJSON)) : 0;
     } else {
         const finalClaimResult = await client.query(`SELECT ST_AsGeoJSON(${attackerFinalClaimWKT}) as geojson`);
         finalAreaGeoJSON = finalClaimResult.rows[0].geojson;
-        finalAreaSqM = turf.area(JSON.parse(finalAreaGeoJSON));
+        finalAreaSqM = finalAreaGeoJSON ? turf.area(JSON.parse(finalAreaGeoJSON)) : 0;
+    }
+
+    if (finalAreaSqM < 1) {
+        console.log(`[SoloClaim] Final claim area for ${userId} is too small after subtractions. Claim rejected.`);
+        socket.emit('claimRejected', { reason: 'Claimed area was nullified by protected territories.' });
+        return null;
     }
 
     let updateQuery;

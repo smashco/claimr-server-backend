@@ -171,7 +171,7 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// --- API Endpoints (No Changes in this section) ---
+// --- API Endpoints ---
 app.get('/', (req, res) => { res.send('ClaimrunX Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
 
@@ -901,9 +901,9 @@ io.on('connection', (socket) => {
         await client.query('BEGIN'); 
         let result;
         if (gameMode === 'solo') {
-            result = await handleSoloClaim(io, socket, player, trail, baseClaim, client); 
+            result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client); 
         } else if (gameMode === 'clan') {
-            result = await handleClanClaim(io, socket, player, trail, baseClaim, client); 
+            result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client); 
         } else {
             throw new Error('Invalid game mode specified.');
         }
