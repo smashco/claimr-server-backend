@@ -61,6 +61,7 @@ const pool = new Pool({
 });
 
 const players = {}; 
+// REMOVED: module.exports = { players }; // This was causing the circular dependency
 
 // --- Database Schema Setup ---
 const setupDatabase = async () => {

@@ -1,9 +1,11 @@
 // claimr_server/game_logic/solo_handler.js
 
 const turf = require('@turf/turf');
-const { players } = require('../server'); 
 
-async function handleSoloClaim(io, socket, player, trail, baseClaim, client) { 
+// The `require` for '../server' has been removed to break the circular dependency.
+// The `players` object is now passed in as a function argument.
+
+async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) { 
     const userId = player.googleId;
     const isInitialBaseClaim = !!baseClaim;
 
@@ -109,8 +111,6 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
             continue; 
         }
         
-        // --- THIS IS THE FIX ---
-        // Always subtract the ORIGINAL attacker shape from the unshielded victim
         const diffGeomResult = await client.query(`SELECT ST_AsGeoJSON(ST_Difference($1, ${newAreaWKT})) AS remaining_area;`, [victimCurrentArea]);
         const remainingAreaGeoJSON = diffGeomResult.rows[0].remaining_area;
         const remainingAreaSqM = remainingAreaGeoJSON ? turf.area(JSON.parse(remainingAreaGeoJSON)) : 0;
