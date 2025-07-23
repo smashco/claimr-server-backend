@@ -61,7 +61,6 @@ const pool = new Pool({
 });
 
 const players = {}; 
-module.exports = { players }; // Export for use in handlers
 
 // --- Database Schema Setup ---
 const setupDatabase = async () => {
