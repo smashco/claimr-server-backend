@@ -61,7 +61,6 @@ const pool = new Pool({
 });
 
 const players = {}; 
-// REMOVED: module.exports = { players }; // This was causing the circular dependency
 
 // --- Database Schema Setup ---
 const setupDatabase = async () => {
@@ -81,7 +80,8 @@ const setupDatabase = async () => {
         area GEOMETRY(GEOMETRY, 4326),
         area_sqm REAL,
         original_base_point GEOMETRY(POINT, 4326), 
-        has_shield BOOLEAN DEFAULT FALSE, 
+        has_shield BOOLEAN DEFAULT FALSE,
+        is_shield_active BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -834,14 +834,24 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('stopDrawingTrail', () => {
+  socket.on('stopDrawingTrail', async () => {
     const player = players[socket.id];
     if (!player) return;
     console.log(`[Socket] Player ${player.name} (${socket.id}) stopped drawing trail (run ended).`);
+    
     player.isDrawing = false;
     player.activeTrail = [];
     player.isGhostRunnerActive = false;
-    player.isLastStandActive = false; 
+    if (player.isLastStandActive) {
+        player.isLastStandActive = false; 
+        try {
+            await pool.query('UPDATE territories SET is_shield_active = false WHERE owner_id = $1', [player.googleId]);
+            console.log(`[GAME] Deactivated LAST STAND for ${player.name} at end of run.`);
+        } catch(e) {
+            console.error(`[DB] Error deactivating shield for ${player.googleId}`, e);
+        }
+    }
+    
     io.emit('trailCleared', { id: socket.id }); 
   });
   
@@ -864,13 +874,21 @@ io.on('connection', (socket) => {
       }
   });
   
-  socket.on('activateLastStand', () => {
+  socket.on('activateLastStand', async () => {
       const player = players[socket.id];
       if (player && player.lastStandCharges > 0) {
           player.lastStandCharges--;
           player.isLastStandActive = true;
-          console.log(`[GAME] ${player.name} activated LAST STAND. Charges left: ${player.lastStandCharges}`);
-          socket.emit('superpowerAcknowledged', { power: 'lastStand', chargesLeft: player.lastStandCharges });
+
+          try {
+              await pool.query('UPDATE territories SET is_shield_active = true WHERE owner_id = $1', [player.googleId]);
+              console.log(`[GAME] ${player.name} activated LAST STAND. Charges left: ${player.lastStandCharges}`);
+              socket.emit('superpowerAcknowledged', { power: 'lastStand', chargesLeft: player.lastStandCharges });
+          } catch(e) {
+              console.error(`[DB] Error activating shield for ${player.googleId}`, e);
+              player.lastStandCharges++;
+              player.isLastStandActive = false;
+          }
       }
   });
 
@@ -967,7 +985,7 @@ io.on('connection', (socket) => {
         await client.query('ROLLBACK');
         console.error('[DB] FATAL Error during territory claim:', err);
         let reason = 'Server error during claim.';
-        if (err && err.message && typeof err.message === 'string' && (err.message.startsWith('Area is too small') || err.message.startsWith('Invalid loop geometry') || err.message.includes('Shield activated') || err.message.includes('Clan base is not active') || err.message.includes('must start closer to the clan base'))) {
+        if (err && err.message && typeof err.message === 'string' && (err.message.startsWith('Area is too small') || err.message.startsWith('Invalid loop geometry') || err.message.includes('Shield activated') || err.message.includes('Clan base is not active'))) {
             reason = err.message;
         }
         socket.emit('claimRejected', { reason });
@@ -983,8 +1001,13 @@ io.on('connection', (socket) => {
       
       if (player.isDrawing) {
         console.log(`[SERVER] Player ${player.name}'s trail will persist for ${DISCONNECT_TRAIL_PERSIST_SECONDS} seconds.`);
-        player.disconnectTimer = setTimeout(() => {
-            console.log(`[SERVER] Disconnect timer expired for ${player.name}. Clearing trail.`);
+        player.disconnectTimer = setTimeout(async () => {
+            console.log(`[SERVER] Disconnect timer expired for ${player.name}. Clearing trail and deactivating shield.`);
+            if(player.isLastStandActive) {
+                try {
+                    await pool.query('UPDATE territories SET is_shield_active = false WHERE owner_id = $1', [player.googleId]);
+                } catch(e) { console.error(`[DB] Error deactivating shield on disconnect for ${player.googleId}`, e); }
+            }
             player.isDrawing = false; 
             player.activeTrail = []; 
             io.emit('trailCleared', { id: socket.id }); 

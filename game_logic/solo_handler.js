@@ -75,7 +75,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     affectedOwnerIds.add(userId); 
 
     const intersectingTerritoriesQuery = `
-        SELECT owner_id, username, area
+        SELECT owner_id, username, area, is_shield_active
         FROM territories
         WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
     `;
@@ -87,14 +87,17 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         const victimId = row.owner_id;
         const victimCurrentArea = row.area;
         
-        const victimSocketId = Object.keys(players).find(id => players[id] && players[id].googleId === victimId);
-        const victimPlayer = victimSocketId ? players[victimSocketId] : null;
-        
-        if (victimPlayer && victimPlayer.isLastStandActive) {
-            console.log(`[GAME] Attack on ${victimPlayer.name} blocked by LAST STAND. Creating island.`);
+        if (row.is_shield_active) {
+            console.log(`[GAME] Attack on ${row.username} blocked by LAST STAND. Creating island.`);
             
-            victimPlayer.isLastStandActive = false; 
-            io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: victimPlayer.lastStandCharges });
+            await client.query('UPDATE territories SET is_shield_active = false WHERE owner_id = $1', [victimId]);
+            
+            const victimSocketId = Object.keys(players).find(id => players[id] && players[id].googleId === victimId);
+            if (victimSocketId) {
+                const victimPlayer = players[victimSocketId];
+                victimPlayer.isLastStandActive = false; 
+                io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: victimPlayer.lastStandCharges });
+            }
             
             const protectedAreaResult = await client.query(`
                 SELECT ST_AsGeoJSON(ST_Difference(${attackerFinalClaimWKT}, $1)) as final_geom;
