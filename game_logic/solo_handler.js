@@ -1,9 +1,7 @@
 // claimr_server/game_logic/solo_handler.js
 
 const turf = require('@turf/turf');
-
-// The `require` for '../server' has been removed to break the circular dependency.
-// The `players` object is now passed in as a function argument.
+const { players } = require('../server'); 
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) { 
     const userId = player.googleId;
@@ -81,7 +79,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     `;
     const intersectingTerritoriesResult = await client.query(intersectingTerritoriesQuery, [userId]);
     
-    let attackerFinalClaimWKT = newAreaWKT; // Start with the full proposed claim
+    let attackerFinalClaimWKT = newAreaWKT;
 
     for (const row of intersectingTerritoriesResult.rows) {
         const victimId = row.owner_id;
