@@ -96,10 +96,14 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
         
         if (victimPlayer && victimPlayer.isLastStandActive) {
             console.log(`[GAME] Attack on ${victimPlayer.name} nullified by LAST STAND.`);
+            
             victimPlayer.isLastStandActive = false; // Consume the power
+            
             io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: victimPlayer.lastStandCharges });
-            affectedOwnerIds.add(victimId); // Add them to the update list so their shield status refreshes
-            continue; // Skip this victim entirely, their land is safe
+            
+            affectedOwnerIds.add(victimId); 
+            
+            continue; 
         }
         
         const diffGeomResult = await client.query(`

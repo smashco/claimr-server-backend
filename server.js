@@ -171,7 +171,7 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// --- API Endpoints (No Changes in this section) ---
+// --- API Endpoints ---
 app.get('/', (req, res) => { res.send('ClaimrunX Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
 
@@ -837,10 +837,11 @@ io.on('connection', (socket) => {
   socket.on('stopDrawingTrail', () => {
     const player = players[socket.id];
     if (!player) return;
-    console.log(`[Socket] Player ${player.name} (${socket.id}) stopped drawing trail.`);
+    console.log(`[Socket] Player ${player.name} (${socket.id}) stopped drawing trail (run ended).`);
     player.isDrawing = false;
     player.activeTrail = [];
-    player.isGhostRunnerActive = false; // Always reset on stop
+    player.isGhostRunnerActive = false;
+    player.isLastStandActive = false; 
     io.emit('trailCleared', { id: socket.id }); 
   });
   
@@ -860,6 +861,16 @@ io.on('connection', (socket) => {
           player.infiltratorCharges--;
           console.log(`[GAME] ${player.name} activated INFILTRATOR. Charges left: ${player.infiltratorCharges}`);
           socket.emit('superpowerAcknowledged', { power: 'infiltrator', chargesLeft: player.infiltratorCharges });
+      }
+  });
+
+  socket.on('activateLastStand', () => {
+      const player = players[socket.id];
+      if (player && player.lastStandCharges > 0) {
+          player.lastStandCharges--;
+          player.isLastStandActive = true;
+          console.log(`[GAME] ${player.name} activated LAST STAND. Charges left: ${player.lastStandCharges}`);
+          socket.emit('superpowerAcknowledged', { power: 'lastStand', chargesLeft: player.lastStandCharges });
       }
   });
 
@@ -950,8 +961,6 @@ io.on('connection', (socket) => {
         
         player.isDrawing = false;
         player.activeTrail = [];
-        player.isGhostRunnerActive = false;
-        player.isLastStandActive = false; 
         io.emit('trailCleared', { id: socket.id });
 
     } catch (err) {
