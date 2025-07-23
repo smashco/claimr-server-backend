@@ -61,6 +61,7 @@ const pool = new Pool({
 });
 
 const players = {}; 
+module.exports = { players }; // Export for use in handlers
 
 // --- Database Schema Setup ---
 const setupDatabase = async () => {
@@ -86,11 +87,8 @@ const setupDatabase = async () => {
     `);
     console.log('[DB] "territories" table is ready.');
 
-    // --- THIS IS THE FIX ---
-    // This command ensures the column exists on already-created tables.
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_shield_active BOOLEAN DEFAULT FALSE;');
     console.log('[DB] "is_shield_active" column ensured in territories table.');
-    // --- END OF FIX ---
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
@@ -1029,8 +1027,8 @@ io.on('connection', (socket) => {
 // --- Server Start ---
 setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
 const main = async () => {
-  server.listen(PORT, () => {
-    console.log(`[SERVER] Listening on *:${PORT}`);
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`[SERVER] Listening on 0.0.0.0:${PORT}`);
     setupDatabase().catch(err => {
         console.error("[SERVER] Failed to setup database after server start:", err);
         process.exit(1); 
