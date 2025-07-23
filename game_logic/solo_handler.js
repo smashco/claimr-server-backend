@@ -1,9 +1,7 @@
 // claimr_server/game_logic/solo_handler.js
 
 const turf = require('@turf/turf');
-
-// The global 'players' object will be available in the scope where this module is required and called.
-// No need to explicitly require it here.
+const { players } = require('../server'); 
 
 async function handleSoloClaim(io, socket, player, trail, baseClaim, client) { 
     const userId = player.googleId;
@@ -83,7 +81,7 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
     affectedOwnerIds.add(userId); 
 
     const intersectingTerritoriesQuery = `
-        SELECT owner_id, username, area, has_shield, ST_AsGeoJSON(original_base_point) as geojson_base
+        SELECT owner_id, username, area
         FROM territories
         WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
     `;
@@ -92,43 +90,30 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
     for (const row of intersectingTerritoriesResult.rows) {
         const victimId = row.owner_id;
         const victimCurrentArea = row.area;
-        const victimUsername = row.username;
-        const victimHasShield = row.has_shield;
         
-        if (victimHasShield) {
-            console.log(`[SoloClaim] Attack on ${victimUsername} failed, shield is active.`);
-            continue;
+        const victimSocketId = Object.keys(players).find(id => players[id] && players[id].googleId === victimId);
+        const victimPlayer = victimSocketId ? players[victimSocketId] : null;
+        
+        if (victimPlayer && victimPlayer.isLastStandActive) {
+            console.log(`[GAME] Attack on ${victimPlayer.name} nullified by LAST STAND.`);
+            victimPlayer.isLastStandActive = false; // Consume the power
+            io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: victimPlayer.lastStandCharges });
+            affectedOwnerIds.add(victimId); // Add them to the update list so their shield status refreshes
+            continue; // Skip this victim entirely, their land is safe
         }
-
+        
         const diffGeomResult = await client.query(`
             SELECT ST_AsGeoJSON(ST_Difference($1, ${newAreaWKT})) AS remaining_area;
         `, [victimCurrentArea]);
         
         const remainingAreaGeoJSON = diffGeomResult.rows[0].remaining_area;
-        let finalRemainingAreaGeoJSON = remainingAreaGeoJSON;
-        let finalRemainingAreaSqM = remainingAreaGeoJSON ? turf.area(JSON.parse(remainingAreaGeoJSON)) : 0;
+        const remainingAreaSqM = remainingAreaGeoJSON ? turf.area(JSON.parse(remainingAreaGeoJSON)) : 0;
         
-        const victimSocketId = Object.keys(io.sockets.sockets).find(id => players[id] && players[id].googleId === victimId);
-        const victimPlayer = victimSocketId ? players[victimSocketId] : null;
-
-        // --- CORRECTED "LAST STAND" SUPERPOWER LOGIC ---
-        if (finalRemainingAreaSqM < 1 && victimPlayer && victimPlayer.isLastStandActive) {
-            console.log(`[GAME] Victim ${victimPlayer.name} is being wiped out, but their LAST STAND is active.`);
-            victimPlayer.isLastStandActive = false; // Consume the power
-            io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: victimPlayer.lastStandCharges });
-            
-            const centerPoint = JSON.parse(row.geojson_base).coordinates;
-            const baseCircle = turf.circle(centerPoint, 30.0, { units: 'meters' });
-            finalRemainingAreaGeoJSON = JSON.stringify(baseCircle.geometry);
-            finalRemainingAreaSqM = turf.area(baseCircle);
-            console.log(`[GAME] Restored ${victimPlayer.name}'s base. New area: ${finalRemainingAreaSqM} sqm.`);
-        }
-        
-        if (finalRemainingAreaSqM > 1) {
+        if (remainingAreaSqM > 1) {
             await client.query(`
                 UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2
                 WHERE owner_id = $3;
-            `, [finalRemainingAreaGeoJSON, finalRemainingAreaSqM, victimId]);
+            `, [remainingAreaGeoJSON, remainingAreaSqM, victimId]);
         } else {
             await client.query(`
                 UPDATE territories 

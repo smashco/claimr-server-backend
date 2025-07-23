@@ -61,6 +61,7 @@ const pool = new Pool({
 });
 
 const players = {}; 
+module.exports = { players }; // Export for use in handlers
 
 // --- Database Schema Setup ---
 const setupDatabase = async () => {
@@ -949,7 +950,8 @@ io.on('connection', (socket) => {
         
         player.isDrawing = false;
         player.activeTrail = [];
-        player.isGhostRunnerActive = false; 
+        player.isGhostRunnerActive = false;
+        player.isLastStandActive = false; 
         io.emit('trailCleared', { id: socket.id });
 
     } catch (err) {
