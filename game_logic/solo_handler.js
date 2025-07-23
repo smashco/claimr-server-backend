@@ -1,5 +1,3 @@
-// claimr_server/game_logic/solo_handler.js
-
 const turf = require('@turf/turf');
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) { 
@@ -113,7 +111,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             continue; 
         }
         
-        // --- THIS IS THE FIX ---
         const diffGeomResult = await client.query(`
             SELECT ST_AsGeoJSON(
                 ST_CollectionExtract(
@@ -125,7 +122,9 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         const remainingAreaGeoJSON = diffGeomResult.rows[0].remaining_area;
         const remainingAreaSqM = remainingAreaGeoJSON ? turf.area(JSON.parse(remainingAreaGeoJSON)) : 0;
         
-        if (remainingAreaSqM > 10) { // Increased threshold to remove tiny slivers
+        // --- FIX APPLIED HERE ---
+        // Round the area to prevent floating-point errors from preserving tiny slivers.
+        if (Math.round(remainingAreaSqM) > 10) { 
             await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingAreaGeoJSON, remainingAreaSqM, victimId]);
         } else {
             await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victimId]);
