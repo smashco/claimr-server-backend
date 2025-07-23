@@ -171,7 +171,7 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// --- API Endpoints ---
+// --- API Endpoints (No Changes in this section) ---
 app.get('/', (req, res) => { res.send('ClaimrunX Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
 
@@ -863,7 +863,7 @@ io.on('connection', (socket) => {
           socket.emit('superpowerAcknowledged', { power: 'infiltrator', chargesLeft: player.infiltratorCharges });
       }
   });
-
+  
   socket.on('activateLastStand', () => {
       const player = players[socket.id];
       if (player && player.lastStandCharges > 0) {
