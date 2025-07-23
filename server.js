@@ -845,15 +845,8 @@ io.on('connection', (socket) => {
     player.isDrawing = false;
     player.activeTrail = [];
     player.isGhostRunnerActive = false;
-    if (player.isLastStandActive) {
-        player.isLastStandActive = false; 
-        try {
-            await pool.query('UPDATE territories SET is_shield_active = false WHERE owner_id = $1', [player.googleId]);
-            console.log(`[GAME] Deactivated LAST STAND for ${player.name} at end of run because it was not used.`);
-        } catch(e) {
-            console.error(`[DB] Error deactivating shield for ${player.googleId}`, e);
-        }
-    }
+    // Removed the logic that incorrectly deactivated the shield here.
+    player.isLastStandActive = false; 
     
     io.emit('trailCleared', { id: socket.id }); 
   });
@@ -1005,12 +998,8 @@ io.on('connection', (socket) => {
       if (player.isDrawing) {
         console.log(`[SERVER] Player ${player.name}'s trail will persist for ${DISCONNECT_TRAIL_PERSIST_SECONDS} seconds.`);
         player.disconnectTimer = setTimeout(async () => {
-            console.log(`[SERVER] Disconnect timer expired for ${player.name}. Clearing trail and deactivating shield.`);
-            if(player.isLastStandActive) {
-                try {
-                    await pool.query('UPDATE territories SET is_shield_active = false WHERE owner_id = $1', [player.googleId]);
-                } catch(e) { console.error(`[DB] Error deactivating shield on disconnect for ${player.googleId}`, e); }
-            }
+            console.log(`[SERVER] Disconnect timer expired for ${player.name}. Clearing trail.`);
+            // No need to deactivate shield on disconnect anymore, it's persistent.
             player.isDrawing = false; 
             player.activeTrail = []; 
             io.emit('trailCleared', { id: socket.id }); 
