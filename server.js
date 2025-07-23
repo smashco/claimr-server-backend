@@ -61,7 +61,6 @@ const pool = new Pool({
 });
 
 const players = {}; 
-module.exports = { players }; // Export for use in handlers
 
 // --- Database Schema Setup ---
 const setupDatabase = async () => {
@@ -82,6 +81,7 @@ const setupDatabase = async () => {
         area_sqm REAL,
         original_base_point GEOMETRY(POINT, 4326), 
         has_shield BOOLEAN DEFAULT FALSE, 
+        is_shield_active BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -849,7 +849,7 @@ io.on('connection', (socket) => {
         player.isLastStandActive = false; 
         try {
             await pool.query('UPDATE territories SET is_shield_active = false WHERE owner_id = $1', [player.googleId]);
-            console.log(`[GAME] Deactivated LAST STAND for ${player.name} at end of run.`);
+            console.log(`[GAME] Deactivated LAST STAND for ${player.name} at end of run because it was not used.`);
         } catch(e) {
             console.error(`[DB] Error deactivating shield for ${player.googleId}`, e);
         }
