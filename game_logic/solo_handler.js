@@ -16,7 +16,7 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
         const intersectionResult = await client.query(intersectionCheckQuery);
 
         if (intersectionResult.rowCount > 0) {
-            socket.emit('claimRejected', { reason: 'Cannot claim a new base inside existing territory. Move to an unclaimed area.' });
+            socket.emit('claimRejected', { reason: 'Cannot claim a new base inside existing territory.' });
             return null;
         }
 
@@ -79,7 +79,7 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
     `;
     const intersectingTerritoriesResult = await client.query(intersectingTerritoriesQuery, [userId]);
     
-    let attackerFinalClaimWKT = newAreaWKT; // Start with the full proposed claim
+    let attackerFinalClaimWKT = newAreaWKT;
 
     for (const row of intersectingTerritoriesResult.rows) {
         const victimId = row.owner_id;
@@ -89,25 +89,22 @@ async function handleSoloClaim(io, socket, player, trail, baseClaim, client) {
         const victimPlayer = victimSocketId ? players[victimSocketId] : null;
         
         if (victimPlayer && victimPlayer.isLastStandActive) {
-            console.log(`[GAME] Attack on ${victimPlayer.name} blocked by LAST STAND.`);
+            console.log(`[GAME] Attack on ${victimPlayer.name} blocked by LAST STAND. Creating island.`);
             
-            // Consume the power
             victimPlayer.isLastStandActive = false; 
             io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: victimPlayer.lastStandCharges });
             
-            // Subtract the victim's area from the attacker's final claim
             const protectedAreaResult = await client.query(`
                 SELECT ST_AsGeoJSON(ST_Difference(${attackerFinalClaimWKT}, $1)) as final_geom;
             `, [victimCurrentArea]);
             
-            // Update the attacker's claim to have a hole in it
             attackerFinalClaimWKT = `ST_GeomFromGeoJSON('${protectedAreaResult.rows[0].final_geom}')`;
             
-            affectedOwnerIds.add(victimId); // Add victim to update list so their shield UI refreshes
-            continue; // Skip this victim, their land is safe
+            affectedOwnerIds.add(victimId);
+            continue; 
         }
         
-        const diffGeomResult = await client.query(`SELECT ST_AsGeoJSON(ST_Difference($1, ${newAreaWKT})) AS remaining_area;`, [victimCurrentArea]);
+        const diffGeomResult = await client.query(`SELECT ST_AsGeoJSON(ST_Difference($1, ${attackerFinalClaimWKT})) AS remaining_area;`, [victimCurrentArea]);
         const remainingAreaGeoJSON = diffGeomResult.rows[0].remaining_area;
         const remainingAreaSqM = remainingAreaGeoJSON ? turf.area(JSON.parse(remainingAreaGeoJSON)) : 0;
         
