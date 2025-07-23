@@ -1,7 +1,6 @@
 // claimr_server/game_logic/solo_handler.js
 
 const turf = require('@turf/turf');
-const { players } = require('../server'); 
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) { 
     const userId = player.googleId;
@@ -93,8 +92,10 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             const victimSocketId = Object.keys(players).find(id => players[id] && players[id].googleId === victimId);
             if (victimSocketId) {
                 const victimPlayer = players[victimSocketId];
-                victimPlayer.isLastStandActive = false; 
-                io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: victimPlayer.lastStandCharges });
+                if (victimPlayer) {
+                    victimPlayer.isLastStandActive = false; 
+                    io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: victimPlayer.lastStandCharges });
+                }
             }
             
             const protectedAreaResult = await client.query(`
@@ -112,11 +113,19 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             continue; 
         }
         
-        const diffGeomResult = await client.query(`SELECT ST_AsGeoJSON(ST_Difference($1, ${newAreaWKT})) AS remaining_area;`, [victimCurrentArea]);
+        // --- THIS IS THE FIX ---
+        const diffGeomResult = await client.query(`
+            SELECT ST_AsGeoJSON(
+                ST_CollectionExtract(
+                    ST_Difference($1, ${newAreaWKT}), 
+                3)
+            ) AS remaining_area;
+        `, [victimCurrentArea]);
+
         const remainingAreaGeoJSON = diffGeomResult.rows[0].remaining_area;
         const remainingAreaSqM = remainingAreaGeoJSON ? turf.area(JSON.parse(remainingAreaGeoJSON)) : 0;
         
-        if (remainingAreaSqM > 1) {
+        if (remainingAreaSqM > 10) { // Increased threshold to remove tiny slivers
             await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingAreaGeoJSON, remainingAreaSqM, victimId]);
         } else {
             await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victimId]);
