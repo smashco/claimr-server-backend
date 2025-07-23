@@ -80,12 +80,17 @@ const setupDatabase = async () => {
         area GEOMETRY(GEOMETRY, 4326),
         area_sqm REAL,
         original_base_point GEOMETRY(POINT, 4326), 
-        has_shield BOOLEAN DEFAULT FALSE,
-        is_shield_active BOOLEAN DEFAULT FALSE,
+        has_shield BOOLEAN DEFAULT FALSE, 
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
     console.log('[DB] "territories" table is ready.');
+
+    // --- THIS IS THE FIX ---
+    // This command ensures the column exists on already-created tables.
+    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_shield_active BOOLEAN DEFAULT FALSE;');
+    console.log('[DB] "is_shield_active" column ensured in territories table.');
+    // --- END OF FIX ---
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
@@ -615,7 +620,7 @@ app.get('/admin/factory-reset', checkAdminSecret, async (req, res) => {
 
 app.get('/admin/reset-all-territories', checkAdminSecret, async (req, res) => {
     try {
-        await pool.query("UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0, original_base_point = NULL;"); 
+        await pool.query("UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0, original_base_point = NULL, is_shield_active = false;"); 
         await pool.query("UPDATE clans SET base_location = NULL;"); 
         await pool.query("UPDATE clan_territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0;"); 
         
