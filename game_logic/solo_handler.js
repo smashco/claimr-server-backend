@@ -69,19 +69,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const affectedOwnerIds = new Set(); 
     affectedOwnerIds.add(userId); 
 
-    // --- FIX APPLIED HERE: Create the attacker's full area of influence ---
-    let attackerFullInfluenceWKT = newAreaWKT;
-    const attackerExistingAreaRes = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1', [userId]);
-    const attackerExistingAreaGeoJSON = attackerExistingAreaRes.rows.length > 0 ? attackerExistingAreaRes.rows[0].geojson_area : null;
-
-    if (attackerExistingAreaGeoJSON && turf.area(JSON.parse(attackerExistingAreaGeoJSON)) > 0) {
-        const influenceResult = await client.query(`SELECT ST_AsGeoJSON(ST_Union(ST_GeomFromGeoJSON($1), ${newAreaWKT})) AS full_influence`, [attackerExistingAreaGeoJSON]);
-        if (influenceResult.rows[0].full_influence) {
-             attackerFullInfluenceWKT = `ST_GeomFromGeoJSON('${influenceResult.rows[0].full_influence}')`;
-        }
-    }
-    // --- END OF FIX ---
-
     const intersectingTerritoriesQuery = `
         SELECT owner_id, username, area, is_shield_active
         FROM territories
@@ -124,11 +111,12 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             continue; 
         }
         
-        // --- FIX APPLIED HERE: Use the full influence for the damage calculation ---
+        // --- FINAL FIX APPLIED HERE: Simplified and corrected logic ---
+        // Damage is calculated *only* from the new claim polygon.
         const diffGeomResult = await client.query(`
             SELECT ST_AsGeoJSON(
                 ST_CollectionExtract(
-                    ST_Difference($1, ${attackerFullInfluenceWKT}), 
+                    ST_Difference($1, ${newAreaWKT}), 
                 3)
             ) AS remaining_area;
         `, [victimCurrentArea]);
@@ -137,17 +125,19 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         const remainingAreaSqM = remainingAreaGeoJSON ? turf.area(JSON.parse(remainingAreaGeoJSON)) : 0;
         
         if (Math.round(remainingAreaSqM) > 10) { 
+            // Partial hit: Update victim's territory to the remainder.
             await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingAreaGeoJSON, remainingAreaSqM, victimId]);
         } else {
+            // Wipeout: Absorb the victim's *entire original area* to fill any holes.
             const unionResult = await client.query(`
                 SELECT ST_AsGeoJSON(ST_Union(${attackerFinalClaimWKT}, $1)) as final_geom;
             `, [victimCurrentArea]);
             
-            const finalGeom = unionResult.rows[0].final_geom;
-            if (finalGeom) {
-                attackerFinalClaimWKT = `ST_GeomFromGeoJSON('${finalGeom}')`;
+            if (unionResult.rows[0].final_geom) {
+                attackerFinalClaimWKT = `ST_GeomFromGeoJSON('${unionResult.rows[0].final_geom}')`;
             }
 
+            // Then set the victim's territory to empty.
             await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victimId]);
             console.log(`[SoloClaim] Entire territory of ${victimId} absorbed by attacker.`);
         }
@@ -157,10 +147,13 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     let finalAreaSqM;
     let finalAreaGeoJSON;
 
-    if (attackerExistingAreaGeoJSON && turf.area(JSON.parse(attackerExistingAreaGeoJSON)) > 0) { 
+    const existingUserAreaResult = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1', [userId]); 
+    const existingUserAreaGeoJSON = existingUserAreaResult.rows.length > 0 ? existingUserAreaResult.rows[0].geojson_area : null;
+
+    if (existingUserAreaGeoJSON && turf.area(JSON.parse(existingUserAreaGeoJSON)) > 0) { 
         const unionResult = await client.query(`
             SELECT ST_AsGeoJSON(ST_Union(ST_GeomFromGeoJSON($1), ${attackerFinalClaimWKT})) AS united_area;
-        `, [attackerExistingAreaGeoJSON]); 
+        `, [existingUserAreaGeoJSON]); 
         finalAreaGeoJSON = unionResult.rows[0].united_area;
     } else {
         const finalClaimResult = await client.query(`SELECT ST_AsGeoJSON(${attackerFinalClaimWKT}) as geojson`);
