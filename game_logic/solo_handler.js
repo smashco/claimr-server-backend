@@ -7,7 +7,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     let newAreaPolygon;
     let newAreaSqM;
 
-    // --- Part 1: Validate the claim (This section is correct and unchanged) ---
+    // --- Part 1: Validate the claim ---
     if (isInitialBaseClaim) {
         const basePointWKT = `ST_SetSRID(ST_Point(${baseClaim.lng}, ${baseClaim.lat}), 4326)`;
         const intersectionCheckQuery = `SELECT 1 FROM territories WHERE ST_Intersects(area, ${basePointWKT});`;
@@ -31,7 +31,9 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             socket.emit('claimRejected', { reason: 'Expansion trail must have at least 3 points.' });
             return null;
         }
-        const pointsForPolygon = [...trail.map(p => [p.lng, p.lat]), trail[0] ? [p.lng, p.lat] : null].filter(Boolean);
+        // --- THIS IS THE FIX ---
+        // Correctly reference trail[0] to close the polygon loop.
+        const pointsForPolygon = [...trail.map(p => [p.lng, p.lat]), trail[0] ? [trail[0].lng, trail[0].lat] : null].filter(Boolean);
         try {
             newAreaPolygon = turf.polygon([pointsForPolygon]);
         } catch (e) {
