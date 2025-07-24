@@ -111,8 +111,8 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             continue; 
         }
         
-        // --- FINAL FIX APPLIED HERE: Simplified and corrected logic ---
-        // Damage is calculated *only* from the new claim polygon.
+        // --- THIS IS THE CORRECTED LOGIC ---
+        // Treat it as a NORMAL territory attack. The damage is the attacker's new loop.
         const diffGeomResult = await client.query(`
             SELECT ST_AsGeoJSON(
                 ST_CollectionExtract(
@@ -125,10 +125,10 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         const remainingAreaSqM = remainingAreaGeoJSON ? turf.area(JSON.parse(remainingAreaGeoJSON)) : 0;
         
         if (Math.round(remainingAreaSqM) > 10) { 
-            // Partial hit: Update victim's territory to the remainder.
+            // The victim survived with a smaller territory.
             await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingAreaGeoJSON, remainingAreaSqM, victimId]);
         } else {
-            // Wipeout: Absorb the victim's *entire original area* to fill any holes.
+            // The victim is wiped out. The attacker's claim should absorb the victim's *entire original area* to fill any holes.
             const unionResult = await client.query(`
                 SELECT ST_AsGeoJSON(ST_Union(${attackerFinalClaimWKT}, $1)) as final_geom;
             `, [victimCurrentArea]);
@@ -137,7 +137,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 attackerFinalClaimWKT = `ST_GeomFromGeoJSON('${unionResult.rows[0].final_geom}')`;
             }
 
-            // Then set the victim's territory to empty.
+            // Now, set the victim's territory to empty.
             await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victimId]);
             console.log(`[SoloClaim] Entire territory of ${victimId} absorbed by attacker.`);
         }
