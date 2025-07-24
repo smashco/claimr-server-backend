@@ -31,7 +31,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             socket.emit('claimRejected', { reason: 'Expansion trail must have at least 3 points.' });
             return null;
         }
-        const pointsForPolygon = [...trail.map(p => [p.lng, p.lat]), trail[0] ? [trail[0].lng, trail[0].lat] : null].filter(Boolean);
+        const pointsForPolygon = [...trail.map(p => [p.lng, p.lat]), trail[0] ? [p.lng, p.lat] : null].filter(Boolean);
         try {
             newAreaPolygon = turf.polygon([pointsForPolygon]);
         } catch (e) {
@@ -59,7 +59,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const newAreaWKT = `ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}')`;
     const affectedOwnerIds = new Set([userId]);
 
-    // --- Part 2: Determine Attacker's potential final area ---
+    // --- Part 2: Calculate the Attacker's intended final territory (always additive) ---
     let attackerFinalAreaGeom;
     const attackerExistingAreaRes = await client.query('SELECT area FROM territories WHERE owner_id = $1', [userId]);
     if (attackerExistingAreaRes.rowCount > 0 && attackerExistingAreaRes.rows[0].area) {
@@ -70,7 +70,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         attackerFinalAreaGeom = geomResult.rows[0].geom;
     }
 
-    // --- Part 3: Find and process victims touched by the NEW claim loop ---
+    // --- Part 3: Find victims and process combat logic ---
     const intersectingTerritoriesQuery = `SELECT owner_id, username, area, is_shield_active FROM territories WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;`;
     const intersectingTerritoriesResult = await client.query(intersectingTerritoriesQuery, [userId]);
 
@@ -83,15 +83,15 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             console.log(`[GAME] Attack on ${row.username} blocked by LAST STAND.`);
             await client.query('UPDATE territories SET is_shield_active = false WHERE owner_id = $1', [victimId]);
             const victimSocketId = Object.keys(players).find(id => players[id] && players[id].googleId === victimId);
-            if (victimSocketId) io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: 0 }); // Assuming 1 charge
+            if (victimSocketId) io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: 0 });
             
-            // POLISH: Cut the victim's land out of the attacker's final area.
+            // The attacker's final territory has the shielded victim's area "cut out" of it.
             const protectedResult = await client.query(`SELECT ST_Difference($1, $2) as final_geom;`, [attackerFinalAreaGeom, victimCurrentArea]);
             attackerFinalAreaGeom = protectedResult.rows[0].final_geom;
 
         } else {
             console.log(`[GAME] Attacking unshielded player: ${row.username}.`);
-            // Unshielded victim. Calculate their remaining area by subtracting the attacker's FULL influence.
+            // Calculate damage to the victim by subtracting the attacker's full intended area.
             const diffResult = await client.query(`SELECT ST_AsGeoJSON(ST_Difference($1, $2)) AS remaining_area;`, [victimCurrentArea, attackerFinalAreaGeom]);
             const remainingAreaGeoJSON = diffResult.rows[0].remaining_area;
             const remainingAreaSqM = remainingAreaGeoJSON ? turf.area(JSON.parse(remainingAreaGeoJSON)) : 0;
@@ -100,13 +100,13 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 // Victim survives with a smaller piece of land.
                 await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingAreaGeoJSON, remainingAreaSqM, victimId]);
             } else {
-                // Victim is wiped out.
+                // Victim is wiped out. Their territory becomes empty.
                 await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victimId]);
             }
         }
     }
 
-    // --- Part 4: Finalize and save the attacker's new territory ---
+    // --- Part 4: Finalize and save the attacker's territory ---
     const finalAreaResult = await client.query('SELECT ST_AsGeoJSON($1) as geojson, ST_Area($1::geography) as area_sqm', [attackerFinalAreaGeom]);
     const finalAreaGeoJSON = finalAreaResult.rows[0].geojson;
     const finalAreaSqM = finalAreaResult.rows[0].area_sqm || 0;
