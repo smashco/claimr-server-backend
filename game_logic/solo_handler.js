@@ -69,6 +69,19 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const affectedOwnerIds = new Set(); 
     affectedOwnerIds.add(userId); 
 
+    // --- FIX APPLIED HERE: Create the attacker's full area of influence ---
+    let attackerFullInfluenceWKT = newAreaWKT;
+    const attackerExistingAreaRes = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1', [userId]);
+    const attackerExistingAreaGeoJSON = attackerExistingAreaRes.rows.length > 0 ? attackerExistingAreaRes.rows[0].geojson_area : null;
+
+    if (attackerExistingAreaGeoJSON && turf.area(JSON.parse(attackerExistingAreaGeoJSON)) > 0) {
+        const influenceResult = await client.query(`SELECT ST_AsGeoJSON(ST_Union(ST_GeomFromGeoJSON($1), ${newAreaWKT})) AS full_influence`, [attackerExistingAreaGeoJSON]);
+        if (influenceResult.rows[0].full_influence) {
+             attackerFullInfluenceWKT = `ST_GeomFromGeoJSON('${influenceResult.rows[0].full_influence}')`;
+        }
+    }
+    // --- END OF FIX ---
+
     const intersectingTerritoriesQuery = `
         SELECT owner_id, username, area, is_shield_active
         FROM territories
@@ -111,10 +124,11 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             continue; 
         }
         
+        // --- FIX APPLIED HERE: Use the full influence for the damage calculation ---
         const diffGeomResult = await client.query(`
             SELECT ST_AsGeoJSON(
                 ST_CollectionExtract(
-                    ST_Difference($1, ${newAreaWKT}), 
+                    ST_Difference($1, ${attackerFullInfluenceWKT}), 
                 3)
             ) AS remaining_area;
         `, [victimCurrentArea]);
@@ -125,8 +139,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         if (Math.round(remainingAreaSqM) > 10) { 
             await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingAreaGeoJSON, remainingAreaSqM, victimId]);
         } else {
-            // --- FIX APPLIED HERE ---
-            // Victim is wiped out. Union their full territory into the attacker's claim to absorb it.
             const unionResult = await client.query(`
                 SELECT ST_AsGeoJSON(ST_Union(${attackerFinalClaimWKT}, $1)) as final_geom;
             `, [victimCurrentArea]);
@@ -136,7 +148,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 attackerFinalClaimWKT = `ST_GeomFromGeoJSON('${finalGeom}')`;
             }
 
-            // Now, set the victim's territory to empty.
             await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victimId]);
             console.log(`[SoloClaim] Entire territory of ${victimId} absorbed by attacker.`);
         }
@@ -146,14 +157,10 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     let finalAreaSqM;
     let finalAreaGeoJSON;
 
-    const existingUserAreaResult = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1', [userId]); 
-    const existingUserAreaGeoJSON = existingUserAreaResult.rows.length > 0 ? existingUserAreaResult.rows[0].geojson_area : null;
-    const existingUserAreaTurf = existingUserAreaGeoJSON ? JSON.parse(existingUserAreaGeoJSON) : null;
-
-    if (existingUserAreaTurf && turf.area(existingUserAreaTurf) > 0) { 
+    if (attackerExistingAreaGeoJSON && turf.area(JSON.parse(attackerExistingAreaGeoJSON)) > 0) { 
         const unionResult = await client.query(`
             SELECT ST_AsGeoJSON(ST_Union(ST_GeomFromGeoJSON($1), ${attackerFinalClaimWKT})) AS united_area;
-        `, [existingUserAreaGeoJSON]); 
+        `, [attackerExistingAreaGeoJSON]); 
         finalAreaGeoJSON = unionResult.rows[0].united_area;
     } else {
         const finalClaimResult = await client.query(`SELECT ST_AsGeoJSON(${attackerFinalClaimWKT}) as geojson`);
