@@ -1,6 +1,6 @@
 const turf = require('@turf/turf');
 
-async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) { 
+async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const userId = player.googleId;
     const isInitialBaseClaim = !!baseClaim;
 
@@ -18,7 +18,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
 
         const center = [baseClaim.lng, baseClaim.lat];
-        const radius = baseClaim.radius || 30; 
+        const radius = baseClaim.radius || 30;
         try {
             newAreaPolygon = turf.circle(center, radius, { units: 'meters' });
         } catch (e) {
@@ -46,14 +46,14 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             return null;
         }
         newAreaSqM = turf.area(newAreaPolygon);
-        if (newAreaSqM < 100) { 
+        if (newAreaSqM < 100) {
             socket.emit('claimRejected', { reason: 'Area is too small to claim (min 100sqm).' });
             return null;
         }
 
-        const existingUserAreaRes = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1', [userId]); 
+        const existingUserAreaRes = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1', [userId]);
         const existingAreaGeoJSON = existingUserAreaRes.rows.length > 0 ? existingUserAreaRes.rows[0].geojson_area : null;
-        if (!existingAreaGeoJSON || turf.area(JSON.parse(existingAreaGeoJSON)) === 0) { 
+        if (!existingAreaGeoJSON || turf.area(JSON.parse(existingAreaGeoJSON)) === 0) {
             socket.emit('claimRejected', { reason: 'You must claim an initial base first.' });
             return null;
         }
@@ -66,8 +66,8 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     }
 
     const newAreaWKT = `ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}')`;
-    const affectedOwnerIds = new Set(); 
-    affectedOwnerIds.add(userId); 
+    const affectedOwnerIds = new Set();
+    affectedOwnerIds.add(userId);
 
     const intersectingTerritoriesQuery = `
         SELECT owner_id, username, area, is_shield_active
@@ -77,6 +77,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const intersectingTerritoriesResult = await client.query(intersectingTerritoriesQuery, [userId]);
     
     let attackerFinalClaimWKT = newAreaWKT;
+    const absorbedTerritories = []; // --- FIX: Array to store geometries of wiped-out players
 
     for (const row of intersectingTerritoriesResult.rows) {
         const victimId = row.owner_id;
@@ -122,13 +123,13 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         const remainingAreaGeoJSON = diffGeomResult.rows[0].remaining_area;
         const remainingAreaSqM = remainingAreaGeoJSON ? turf.area(JSON.parse(remainingAreaGeoJSON)) : 0;
         
-        // --- FIX APPLIED HERE ---
-        // Round the area to prevent floating-point errors from preserving tiny slivers.
         if (Math.round(remainingAreaSqM) > 10) { 
             await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingAreaGeoJSON, remainingAreaSqM, victimId]);
         } else {
+            // --- FIX: Player is wiped out, so we save their territory to be absorbed by the attacker ---
+            absorbedTerritories.push(victimCurrentArea);
             await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victimId]);
-            console.log(`[SoloClaim] Entire territory stolen from ${victimId}.`);
+            console.log(`[SoloClaim] Entire territory stolen from ${victimId}. It will be absorbed.`);
         }
         affectedOwnerIds.add(victimId);
     }
@@ -145,12 +146,25 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             SELECT ST_AsGeoJSON(ST_Union(ST_GeomFromGeoJSON($1), ${attackerFinalClaimWKT})) AS united_area;
         `, [existingUserAreaGeoJSON]); 
         finalAreaGeoJSON = unionResult.rows[0].united_area;
-        finalAreaSqM = finalAreaGeoJSON ? turf.area(JSON.parse(finalAreaGeoJSON)) : 0;
     } else {
         const finalClaimResult = await client.query(`SELECT ST_AsGeoJSON(${attackerFinalClaimWKT}) as geojson`);
         finalAreaGeoJSON = finalClaimResult.rows[0].geojson;
-        finalAreaSqM = finalAreaGeoJSON ? turf.area(JSON.parse(finalAreaGeoJSON)) : 0;
     }
+
+    // --- FIX: Loop through absorbed territories and union them to fill any holes ---
+    if (absorbedTerritories.length > 0) {
+        console.log(`[SoloClaim] Absorbing ${absorbedTerritories.length} wiped-out territories to fill holes.`);
+        let areaToCombine = finalAreaGeoJSON;
+        for (const absorbedArea of absorbedTerritories) {
+            const unionResult = await client.query(`
+                SELECT ST_AsGeoJSON(ST_Union(ST_GeomFromGeoJSON($1), $2)) as geojson;
+            `, [areaToCombine, absorbedArea]);
+            areaToCombine = unionResult.rows[0].geojson;
+        }
+        finalAreaGeoJSON = areaToCombine;
+    }
+
+    finalAreaSqM = finalAreaGeoJSON ? turf.area(JSON.parse(finalAreaGeoJSON)) : 0;
 
     if (finalAreaSqM < 1) {
         console.log(`[SoloClaim] Final claim area for ${userId} is too small after subtractions. Claim rejected.`);
