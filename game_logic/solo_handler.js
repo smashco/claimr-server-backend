@@ -7,8 +7,8 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     let newAreaPolygon;
     let newAreaSqM;
 
+    // --- Part 1: Validate the claim (This section is correct and unchanged) ---
     if (isInitialBaseClaim) {
-        // --- FIX: Check for Infiltrator before checking for intersections ---
         if (!player.isInfiltratorActive) {
             const basePointWKT = `ST_SetSRID(ST_Point(${baseClaim.lng}, ${baseClaim.lat}), 4326)`;
             const intersectionCheckQuery = `SELECT 1 FROM territories WHERE ST_Intersects(area, ${basePointWKT});`;
@@ -30,10 +30,12 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
         newAreaSqM = turf.area(newAreaPolygon);
 
-        const existingBaseCheck = await client.query('SELECT original_base_point FROM territories WHERE owner_id = $1', [userId]);
-        if (existingBaseCheck.rows.length > 0 && existingBaseCheck.rows[0].original_base_point && !player.isInfiltratorActive) {
-            socket.emit('claimRejected', { reason: 'You already have an initial base.' });
-            return null;
+        if (!player.isInfiltratorActive) {
+            const existingBaseCheck = await client.query('SELECT original_base_point FROM territories WHERE owner_id = $1', [userId]);
+            if (existingBaseCheck.rows.length > 0 && existingBaseCheck.rows[0].original_base_point) {
+                socket.emit('claimRejected', { reason: 'You already have an initial base.' });
+                return null;
+            }
         }
     } else {
         if (trail.length < 3) {
@@ -116,19 +118,23 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         return null;
     }
     
-    if (player.isInfiltratorActive) {
+    if (player.isInfiltratorActive && isInitialBaseClaim) {
         console.log(`[GAME] Consuming INFILTRATOR power for ${player.name}.`);
         player.isInfiltratorActive = false;
-        // Infiltrator allows overriding existing territory, so we use INSERT...ON CONFLICT...
+        
+        // --- FIX: Fetch the profile URL separately to avoid the subquery ---
+        const profileRes = await client.query('SELECT profile_image_url FROM territories WHERE owner_id=$1', [userId]);
+        const profileImageUrl = profileRes.rowCount > 0 ? profileRes.rows[0].profile_image_url : null;
+
         const query = `
             INSERT INTO territories (owner_id, owner_name, username, profile_image_url, area, area_sqm, original_base_point)
-            VALUES ($1, $2, $3, (SELECT profile_image_url FROM territories WHERE owner_id=$1), ST_GeomFromGeoJSON($4), $5, ST_SetSRID(ST_Point($6, $7), 4326))
+            VALUES ($1, $2, $3, $4, ST_GeomFromGeoJSON($5), $6, ST_SetSRID(ST_Point($7, $8), 4326))
             ON CONFLICT (owner_id) DO UPDATE SET
-            area = ST_GeomFromGeoJSON($4),
-            area_sqm = $5,
-            original_base_point = ST_SetSRID(ST_Point($6, $7), 4326);
+            area = ST_GeomFromGeoJSON($5),
+            area_sqm = $6,
+            original_base_point = ST_SetSRID(ST_Point($7, $8), 4326);
         `;
-        await client.query(query, [userId, player.name, player.name, finalAreaGeoJSON, finalAreaSqM, baseClaim.lng, baseClaim.lat]);
+        await client.query(query, [userId, player.name, player.name, profileImageUrl, finalAreaGeoJSON, finalAreaSqM, baseClaim.lng, baseClaim.lat]);
     } else {
          const query = `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`;
          await client.query(query, [finalAreaGeoJSON, finalAreaSqM, userId]);
