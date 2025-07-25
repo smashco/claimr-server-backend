@@ -1,5 +1,3 @@
-// server.js
-
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -652,7 +650,14 @@ async function broadcastAllPlayers() {
         }, {});
         const allPlayersData = Object.values(players).map(p => {
             const profile = profiles[p.googleId] || {};
-            return { id: p.id, name: profile.username || p.name, imageUrl: profile.imageUrl, identityColor: profile.identityColor, lastKnownPosition: p.lastKnownPosition };
+            return { 
+                id: p.id,
+                ownerId: p.googleId,
+                name: profile.username || p.name,
+                imageUrl: profile.imageUrl,
+                identityColor: profile.identityColor,
+                lastKnownPosition: p.lastKnownPosition
+            };
         });
         io.emit('allPlayersUpdate', allPlayersData);
     } catch(e) {
@@ -702,6 +707,7 @@ io.on('connection', (socket) => {
             ghostRunnerCharges: 1,
             isGhostRunnerActive: false,
             isLastStandActive: false,
+            isInfiltratorActive: false, // <-- FIX: Added this line
         };
     
         let activeTerritories = [];
@@ -845,7 +851,6 @@ io.on('connection', (socket) => {
     player.isDrawing = false;
     player.activeTrail = [];
     player.isGhostRunnerActive = false;
-    // Removed the logic that incorrectly deactivated the shield here.
     player.isLastStandActive = false; 
     
     io.emit('trailCleared', { id: socket.id }); 
@@ -865,6 +870,7 @@ io.on('connection', (socket) => {
       const player = players[socket.id];
       if (player && player.infiltratorCharges > 0) {
           player.infiltratorCharges--;
+          player.isInfiltratorActive = true; // <-- FIX: Added this line
           console.log(`[GAME] ${player.name} activated INFILTRATOR. Charges left: ${player.infiltratorCharges}`);
           socket.emit('superpowerAcknowledged', { power: 'infiltrator', chargesLeft: player.infiltratorCharges });
       }
@@ -999,7 +1005,6 @@ io.on('connection', (socket) => {
         console.log(`[SERVER] Player ${player.name}'s trail will persist for ${DISCONNECT_TRAIL_PERSIST_SECONDS} seconds.`);
         player.disconnectTimer = setTimeout(async () => {
             console.log(`[SERVER] Disconnect timer expired for ${player.name}. Clearing trail.`);
-            // No need to deactivate shield on disconnect anymore, it's persistent.
             player.isDrawing = false; 
             player.activeTrail = []; 
             io.emit('trailCleared', { id: socket.id }); 
