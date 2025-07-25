@@ -64,7 +64,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const geomResult = await client.query(`SELECT ${newAreaWKT} as geom`);
     attackerNetGainGeom = geomResult.rows[0].geom;
 
-    // Find victims intersected by the new loop to determine interactions.
     const intersectingTerritoriesQuery = `SELECT owner_id, username, area, is_shield_active FROM territories WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;`;
     const intersectingTerritoriesResult = await client.query(intersectingTerritoriesQuery, [userId]);
 
@@ -74,33 +73,31 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         affectedOwnerIds.add(victimId);
         
         if (row.is_shield_active) {
-            // SHIELDED: The attacker's net gain is reduced by the victim's shape.
             console.log(`[GAME] Shield blocked attack from ${player.name}. Creating island.`);
             await client.query('UPDATE territories SET is_shield_active = false WHERE owner_id = $1', [victimId]);
             const victimSocketId = Object.keys(players).find(id => players[id] && players[id].googleId === victimId);
             if (victimSocketId) io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: 0 });
 
-            const protectedResult = await client.query(`SELECT ST_Difference($1, $2) as final_geom;`, [attackerNetGainGeom, victimCurrentArea]);
+            // --- FIX APPLIED: Explicitly cast parameters to ::geometry ---
+            const protectedResult = await client.query(`SELECT ST_Difference($1::geometry, $2::geometry) as final_geom;`, [attackerNetGainGeom, victimCurrentArea]);
             attackerNetGainGeom = protectedResult.rows[0].final_geom;
 
         } else {
-            // UNSHIELDED: The victim is wiped out, and the attacker's gain absorbs their territory.
-            // This is the key to filling the hole from Attempt 2.
             console.log(`[GAME] Wiping out unshielded player: ${row.username}.`);
-            const absorptionResult = await client.query(`SELECT ST_Union($1, $2) as final_geom;`, [attackerNetGainGeom, victimCurrentArea]);
+            // --- FIX APPLIED: Explicitly cast parameters to ::geometry ---
+            const absorptionResult = await client.query(`SELECT ST_Union($1::geometry, $2::geometry) as final_geom;`, [attackerNetGainGeom, victimCurrentArea]);
             attackerNetGainGeom = absorptionResult.rows[0].final_geom;
             
-            // Wipe out the victim.
             await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victimId]);
         }
     }
 
     // --- Part 3: Calculate the attacker's final territory ---
-    // Final area is their old land UNIONed with the calculated net gain.
     let attackerFinalAreaGeom;
     const attackerExistingAreaRes = await client.query('SELECT area FROM territories WHERE owner_id = $1', [userId]);
     if (attackerExistingAreaRes.rowCount > 0 && attackerExistingAreaRes.rows[0].area) {
-        const unionResult = await client.query(`SELECT ST_Union($1, $2) AS final_area`, [attackerExistingAreaRes.rows[0].area, attackerNetGainGeom]);
+        // --- FIX APPLIED: Explicitly cast parameters to ::geometry ---
+        const unionResult = await client.query(`SELECT ST_Union($1::geometry, $2::geometry) AS final_area`, [attackerExistingAreaRes.rows[0].area, attackerNetGainGeom]);
         attackerFinalAreaGeom = unionResult.rows[0].final_area;
     } else {
         attackerFinalAreaGeom = attackerNetGainGeom;
