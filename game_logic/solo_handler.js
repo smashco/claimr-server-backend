@@ -86,21 +86,25 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingAreaGeoJSON, remainingAreaSqM, victimId]);
 
         } else {
-            // RULE C & D: NORMAL UNSHIELDED ATTACK
-            // Use ST_Covers for a robust wipeout check.
-            const wipeoutCheckResult = await client.query(`SELECT ST_Covers($1::geometry, $2::geometry) as is_covered;`, [attackerTotalInfluenceGeom, victimCurrentArea]);
-            const isWipeout = wipeoutCheckResult.rows[0].is_covered;
+            // --- CORRECTED LOGIC FOR RULE C & D: NORMAL UNSHIELDED ATTACK ---
+            // Directly calculate what's left of the victim's territory after subtracting the attacker's total influence.
+            // This is more robust than using ST_Covers for complex scenarios like island encirclement.
+            const remainingVictimAreaResult = await client.query(
+                `SELECT ST_AsGeoJSON(ST_CollectionExtract(ST_Difference($1::geometry, $2::geometry), 3)) as remaining_area;`,
+                [victimCurrentArea, attackerTotalInfluenceGeom] // Note: victim's area first, then attacker's total influence
+            );
 
-            if (isWipeout) {
-                // FULL WIPEOUT
+            const remainingAreaGeoJSON = remainingVictimAreaResult.rows[0].remaining_area;
+            const remainingAreaSqM = remainingAreaGeoJSON ? (turf.area(JSON.parse(remainingAreaGeoJSON)) || 0) : 0;
+
+            // Use a small threshold (e.g., 1 sqm) to account for tiny geometric artifacts from calculations.
+            if (remainingAreaSqM < 1) {
+                // FULL WIPEOUT: The victim's territory is completely consumed.
                 console.log(`[GAME] Wiping out unshielded player: ${row.username}.`);
                 await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victimId]);
             } else {
-                // PARTIAL HIT
+                // PARTIAL HIT: The victim survives with the new, smaller territory.
                 console.log(`[GAME] Partially claiming territory from ${row.username}.`);
-                const partialHitResult = await client.query(`SELECT ST_AsGeoJSON(ST_CollectionExtract(ST_Difference($1::geometry, ${newAreaWKT}), 3)) as remaining_area;`, [victimCurrentArea]);
-                const remainingAreaGeoJSON = partialHitResult.rows[0].remaining_area;
-                const remainingAreaSqM = remainingAreaGeoJSON ? (turf.area(JSON.parse(remainingAreaGeoJSON)) || 0) : 0;
                 await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingAreaGeoJSON, remainingAreaSqM, victimId]);
             }
         }
