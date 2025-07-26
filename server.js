@@ -8,7 +8,7 @@ const turf = require('@turf/turf');
 
 // --- Require the Game Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
-const handleClanClaim = require('./game_logic/clan_handler'); // Assuming this file exists for clan logic
+const handleClanClaim = require('./game_logic/clan_handler');
 
 // --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -944,7 +944,6 @@ io.on('connection', (socket) => {
         const clanOwnersToUpdate = [];
 
         for (const id of ownerIdsToUpdate) {
-            // Simple check to differentiate clan IDs (numeric) from user IDs (longer strings)
             if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id) && id.length < 10)) { 
                 clanOwnersToUpdate.push(parseInt(id, 10));
             } else if (typeof id === 'string') {
