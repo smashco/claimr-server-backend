@@ -8,7 +8,7 @@ const turf = require('@turf/turf');
 
 // --- Require the Game Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
-const handleClanClaim = require('./game_logic/clan_handler');
+const handleClanClaim = require('./game_logic/clan_handler'); // Assuming this file exists for clan logic
 
 // --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -707,7 +707,7 @@ io.on('connection', (socket) => {
             ghostRunnerCharges: 1,
             isGhostRunnerActive: false,
             isLastStandActive: false,
-            isInfiltratorActive: false, // <-- FIX: Added this line
+            isInfiltratorActive: false,
         };
     
         let activeTerritories = [];
@@ -870,7 +870,7 @@ io.on('connection', (socket) => {
       const player = players[socket.id];
       if (player && player.infiltratorCharges > 0) {
           player.infiltratorCharges--;
-          player.isInfiltratorActive = true; // <-- FIX: Added this line
+          player.isInfiltratorActive = true;
           console.log(`[GAME] ${player.name} activated INFILTRATOR. Charges left: ${player.infiltratorCharges}`);
           socket.emit('superpowerAcknowledged', { power: 'infiltrator', chargesLeft: player.infiltratorCharges });
       }
@@ -903,7 +903,7 @@ io.on('connection', (socket) => {
 
     const { gameMode, trail, baseClaim } = req; 
     
-    if (trail.length < 1 || (!baseClaim && trail.length < 3)) { 
+    if (trail.length < 1 && !baseClaim) { 
         console.warn(`[Claim] Invalid trail length for claim by ${player.name}. Trail length: ${trail.length}, BaseClaim: ${!!baseClaim}`);
         socket.emit('claimRejected', { reason: 'Invalid trail length.' });
         return;
@@ -936,7 +936,7 @@ io.on('connection', (socket) => {
         const { finalTotalArea, areaClaimed, ownerIdsToUpdate } = result;
         await client.query('COMMIT'); 
 
-        console.log(`[Claim] Player ${player.name} claimed ${areaClaimed} sqm. Total: ${finalTotalArea}. Owners updated: ${ownerIdsToUpdate}`);
+        console.log(`[Claim] Player ${player.name} claimed ${areaClaimed.toFixed(2)} sqm. Total: ${finalTotalArea.toFixed(2)}. Owners updated: ${[...ownerIdsToUpdate]}`);
         
         socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
         
@@ -944,12 +944,11 @@ io.on('connection', (socket) => {
         const clanOwnersToUpdate = [];
 
         for (const id of ownerIdsToUpdate) {
-            if (typeof id === 'string' && /^\d+$/.test(id) && id.length < 10) { 
+            // Simple check to differentiate clan IDs (numeric) from user IDs (longer strings)
+            if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id) && id.length < 10)) { 
                 clanOwnersToUpdate.push(parseInt(id, 10));
             } else if (typeof id === 'string') {
                 soloOwnersToUpdate.push(id);
-            } else {
-                console.warn(`[Claim] Skipping unrecognized ownerId type/format in batch update: ${id}`);
             }
         }
 
@@ -958,19 +957,18 @@ io.on('connection', (socket) => {
             const soloQueryResult = await client.query(`
                 SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", identity_color, ST_AsGeoJSON(area) as geojson, area_sqm as area 
                 FROM territories WHERE owner_id = ANY($1::varchar[]);`, [soloOwnersToUpdate]);
-            batchUpdateData = batchUpdateData.concat(soloQueryResult.rows.filter(r => r.geojson).map(r => ({ 
-                ownerId: r.ownerId, ownerName: r.ownerName, profileImageUrl: r.profileImageUrl, 
-                identityColor: r.identity_color, geojson: JSON.parse(r.geojson), area: r.area 
+            batchUpdateData = batchUpdateData.concat(soloQueryResult.rows.map(r => ({ 
+                ...r,
+                geojson: r.geojson ? JSON.parse(r.geojson) : null
             })));
         }
         if (clanOwnersToUpdate.length > 0) {
             const clanQueryResult = await client.query(`
-                SELECT ct.clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", ST_AsGeoJSON(ct.area) as geojson, ct.area_sqm as area
+                SELECT ct.clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", '#CCCCCC' as identity_color, ST_AsGeoJSON(ct.area) as geojson, ct.area_sqm as area
                 FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[]);`, [clanOwnersToUpdate]);
-            batchUpdateData = batchUpdateData.concat(clanQueryResult.rows.filter(r => r.geojson).map(r => ({ 
-                ownerId: r.ownerId, ownerName: r.ownerName, profileImageUrl: r.profileImageUrl, 
-                identityColor: null, 
-                geojson: JSON.parse(r.geojson), area: r.area 
+            batchUpdateData = batchUpdateData.concat(clanQueryResult.rows.map(r => ({
+                ...r,
+                geojson: r.geojson ? JSON.parse(r.geojson) : null
             })));
         }
 
@@ -986,11 +984,7 @@ io.on('connection', (socket) => {
     } catch (err) {
         await client.query('ROLLBACK');
         console.error('[DB] FATAL Error during territory claim:', err);
-        let reason = 'Server error during claim.';
-        if (err && err.message && typeof err.message === 'string' && (err.message.startsWith('Area is too small') || err.message.startsWith('Invalid loop geometry') || err.message.includes('Shield activated') || err.message.includes('Clan base is not active'))) {
-            reason = err.message;
-        }
-        socket.emit('claimRejected', { reason });
+        socket.emit('claimRejected', { reason: err.message || 'Server error during claim.' });
     } finally {
         client.release();
     }
@@ -1005,10 +999,12 @@ io.on('connection', (socket) => {
         console.log(`[SERVER] Player ${player.name}'s trail will persist for ${DISCONNECT_TRAIL_PERSIST_SECONDS} seconds.`);
         player.disconnectTimer = setTimeout(async () => {
             console.log(`[SERVER] Disconnect timer expired for ${player.name}. Clearing trail.`);
-            player.isDrawing = false; 
-            player.activeTrail = []; 
+            if(players[socket.id]) { // Check if player reconnected in time
+                players[socket.id].isDrawing = false; 
+                players[socket.id].activeTrail = []; 
+                delete players[socket.id]; 
+            }
             io.emit('trailCleared', { id: socket.id }); 
-            delete players[socket.id]; 
         }, DISCONNECT_TRAIL_PERSIST_SECONDS * 1000);
       } else {
         delete players[socket.id]; 
