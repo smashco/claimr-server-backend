@@ -50,24 +50,18 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const newAreaWKT = `ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}')`;
     const affectedOwnerIds = new Set([userId]);
     
-    // Step 2.1: Calculate the attacker's total intended area of influence for this claim.
-    let attackerTotalInfluenceGeom;
     const attackerExistingAreaRes = await client.query('SELECT area FROM territories WHERE owner_id = $1', [userId]);
-    if (attackerExistingAreaRes.rowCount > 0 && attackerExistingAreaRes.rows[0].area) {
-        const influenceResult = await client.query(`SELECT ST_Union($1::geometry, ${newAreaWKT}) AS full_influence`, [attackerExistingAreaRes.rows[0].area]);
-        attackerTotalInfluenceGeom = influenceResult.rows[0].full_influence;
-    } else {
-        const geomResult = await client.query(`SELECT ${newAreaWKT} as geom`);
-        attackerTotalInfluenceGeom = geomResult.rows[0].geom;
-    }
-
-    // This variable will hold the attacker's final shape, which starts as their total influence and may be reduced by shields.
+    const attackerExistingArea = attackerExistingAreaRes.rowCount > 0 ? attackerExistingAreaRes.rows[0].area : null;
+    
+    const influenceResult = await client.query(`SELECT ST_Union($1::geometry, ${newAreaWKT}) AS full_influence`, [attackerExistingArea || `ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')`]);
+    const attackerTotalInfluenceGeom = influenceResult.rows[0].full_influence;
+    
     let attackerFinalAreaGeom = attackerTotalInfluenceGeom;
-
-    // --- SECTION 3: PROCESS COMBAT INTERACTIONS ---
+    
     const intersectingTerritoriesQuery = `SELECT owner_id, username, area, is_shield_active FROM territories WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;`;
     const intersectingTerritoriesResult = await client.query(intersectingTerritoriesQuery, [userId]);
 
+    // --- SECTION 3: PROCESS COMBAT INTERACTIONS ---
     for (const row of intersectingTerritoriesResult.rows) {
         const victimId = row.owner_id;
         const victimCurrentArea = row.area;
@@ -75,30 +69,39 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         
         if (row.is_shield_active) {
             // RULE A: SHIELDED VICTIM
-            console.log(`[GAME] Shield blocked attack. Creating island in attacker's new territory.`);
+            console.log(`[GAME] Shield blocked attack. Creating island.`);
             await client.query('UPDATE territories SET is_shield_active = false WHERE owner_id = $1', [victimId]);
             const victimSocketId = Object.keys(players).find(id => players[id] && players[id].googleId === victimId);
             if (victimSocketId) io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: 0 });
 
-            // The attacker's final area has the victim's territory "cut out" of it. Use ST_CollectionExtract to prevent fragments.
             const protectedResult = await client.query(`SELECT ST_CollectionExtract(ST_Difference($1::geometry, $2::geometry), 3) as final_geom;`, [attackerFinalAreaGeom, victimCurrentArea]);
             attackerFinalAreaGeom = protectedResult.rows[0].final_geom;
 
-        } else {
-            // RULE B: ALL UNSHIELDED ATTACKS (including Infiltrator expansions and post-shield wipeouts)
-            // The victim's territory is reduced by the attacker's TOTAL INFLUENCE.
-            const diffResult = await client.query(`SELECT ST_AsGeoJSON(ST_CollectionExtract(ST_Difference($1::geometry, $2::geometry), 3)) AS remaining_area;`, [victimCurrentArea, attackerTotalInfluenceGeom]);
-            const remainingAreaGeoJSON = diffResult.rows[0].remaining_area;
+        } else if (player.isInfiltratorActive && isInitialBaseClaim) {
+            // RULE B: INFILTRATOR BASE CLAIM
+            console.log(`[GAME] Infiltrator is carving a new base from ${row.username}.`);
+            const carveResult = await client.query(`SELECT ST_AsGeoJSON(ST_CollectionExtract(ST_Difference($1::geometry, ${newAreaWKT}), 3)) as remaining_area;`, [victimCurrentArea]);
+            const remainingAreaGeoJSON = carveResult.rows[0].remaining_area;
             const remainingAreaSqM = remainingAreaGeoJSON ? (turf.area(JSON.parse(remainingAreaGeoJSON)) || 0) : 0;
+            await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingAreaGeoJSON, remainingAreaSqM, victimId]);
 
-            if (Math.round(remainingAreaSqM) > 10) {
-                // PARTIAL HIT: Victim survives with a smaller, clean-cut territory.
-                console.log(`[GAME] Partially claiming territory from ${row.username}.`);
-                await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingAreaGeoJSON, remainingAreaSqM, victimId]);
-            } else {
-                // FULL WIPEOUT: Victim is eliminated.
+        } else {
+            // RULE C & D: NORMAL UNSHIELDED ATTACK
+            // Use ST_Covers for a robust wipeout check.
+            const wipeoutCheckResult = await client.query(`SELECT ST_Covers($1::geometry, $2::geometry) as is_covered;`, [attackerTotalInfluenceGeom, victimCurrentArea]);
+            const isWipeout = wipeoutCheckResult.rows[0].is_covered;
+
+            if (isWipeout) {
+                // FULL WIPEOUT
                 console.log(`[GAME] Wiping out unshielded player: ${row.username}.`);
                 await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victimId]);
+            } else {
+                // PARTIAL HIT
+                console.log(`[GAME] Partially claiming territory from ${row.username}.`);
+                const partialHitResult = await client.query(`SELECT ST_AsGeoJSON(ST_CollectionExtract(ST_Difference($1::geometry, ${newAreaWKT}), 3)) as remaining_area;`, [victimCurrentArea]);
+                const remainingAreaGeoJSON = partialHitResult.rows[0].remaining_area;
+                const remainingAreaSqM = remainingAreaGeoJSON ? (turf.area(JSON.parse(remainingAreaGeoJSON)) || 0) : 0;
+                await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingAreaGeoJSON, remainingAreaSqM, victimId]);
             }
         }
     }
