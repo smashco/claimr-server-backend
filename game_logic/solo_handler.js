@@ -1,9 +1,7 @@
 const turf = require('@turf/turf');
 
 // Helper function to save the attacker's final territory state.
-// IMPORTANT: This function now expects a GEOMETRY OBJECT, not an SQL command string.
 async function saveAttackerTerritory(client, userId, playerName, finalGeom, isInitialBaseClaim, baseClaim) {
-    // This query now works because `finalGeom` is a valid geometry object.
     const finalResult = await client.query('SELECT ST_AsGeoJSON($1) as geojson, ST_Area($1::geography) as area_sqm', [finalGeom]);
     const finalAreaGeoJSON = finalResult.rows[0].geojson;
     const finalAreaSqM = finalResult.rows[0].area_sqm || 0;
@@ -26,7 +24,7 @@ async function saveAttackerTerritory(client, userId, playerName, finalGeom, isIn
 }
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
-    console.log(`\n\n[DEBUG] =================== NEW CLAIM PROCESS (v6 Corrected) ===================`);
+    console.log(`\n\n[DEBUG] =================== NEW CLAIM PROCESS (v7 Typo-Fix) ===================`);
     console.log(`[DEBUG] Attacker: ${player.name} (${player.id})`);
 
     const userId = player.googleId;
@@ -45,8 +43,12 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         newAreaPolygon = turf.circle([baseClaim.lng, baseClaim.lat], baseClaim.radius || 30, { units: 'meters' });
     } else {
         if (trail.length < 3) { socket.emit('claimRejected', { reason: 'Trail is too short.' }); return null; }
-        const pointsForPolygon = [...trail.map(p => [p.lng, p.lat]), trail[0] ? [p[0].lng, p[0].lat] : null].filter(Boolean);
-        try { newAreaPolygon = turf.polygon(pointsForPolygon); } catch (e) { socket.emit('claimRejected', { reason: 'Invalid loop geometry.' }); return null; }
+        
+        // ** THE FIX IS HERE **
+        // The variable 'p' was incorrectly used outside of the .map() scope. It should be 'trail'.
+        const pointsForPolygon = [...trail.map(p => [p.lng, p.lat]), trail[0] ? [trail[0].lng, trail[0].lat] : null].filter(Boolean);
+        
+        try { newAreaPolygon = turf.polygon([pointsForPolygon]); } catch (e) { socket.emit('claimRejected', { reason: 'Invalid loop geometry.' }); return null; }
         newAreaSqM = turf.area(newAreaPolygon);
         if (newAreaSqM < 100) { socket.emit('claimRejected', { reason: 'Area is too small (min 100sqm).' }); return null; }
     }
@@ -70,7 +72,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     if (isInitialBaseClaim) {
         // CASE A: INITIAL BASE CLAIM (In empty space)
         console.log(`[DEBUG] SECTION 2: INITIAL BASE claim.`);
-        // ** THE FIX **: We build the full query with the command string and execute it directly.
         const saveQuery = `
             INSERT INTO territories (owner_id, owner_name, username, area, area_sqm, original_base_point)
             VALUES ($1, $2, $2, ${newAreaWKT}, $3, ST_SetSRID(ST_Point($4, $5), 4326))
