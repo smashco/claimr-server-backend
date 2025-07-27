@@ -1,6 +1,11 @@
 const turf = require('@turf/turf');
+const { handleShieldInteraction, handleUnshieldedInteraction } = require('./interactions');
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
+    console.log(`\n\n[DEBUG] =======================================================`);
+    console.log(`[DEBUG] Claim Process Started for ${player.name} (${player.id})`);
+    console.log(`[DEBUG] =======================================================`);
+    
     const userId = player.googleId;
     const isInitialBaseClaim = !!baseClaim;
 
@@ -8,154 +13,105 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     let newAreaSqM;
 
     // --- SECTION 1: VALIDATE THE CLAIM AND CREATE THE NEW POLYGON ---
+    console.log(`[DEBUG] Section 1: Validating Claim...`);
     if (isInitialBaseClaim) {
         const center = [baseClaim.lng, baseClaim.lat];
         const radius = baseClaim.radius || 30;
         newAreaPolygon = turf.circle(center, radius, { units: 'meters' });
         newAreaSqM = turf.area(newAreaPolygon);
-        
-        if (!player.isInfiltratorActive) {
-            const basePointWKT = `ST_SetSRID(ST_Point(${baseClaim.lng}, ${baseClaim.lat}), 4326)`;
-            const intersectionCheck = await client.query(`SELECT 1 FROM territories WHERE ST_Intersects(area, ${basePointWKT});`);
-            if (intersectionCheck.rowCount > 0) {
-                socket.emit('claimRejected', { reason: 'Cannot claim a new base inside existing territory.' });
-                return null;
-            }
-        }
+        console.log(`[DEBUG]   Type: Initial Base Claim. Area: ${newAreaSqM.toFixed(2)} sqm.`);
     } else {
         if (trail.length < 3) {
-            socket.emit('claimRejected', { reason: 'Expansion trail must have at least 3 points.' });
-            return null;
+            socket.emit('claimRejected', { reason: 'Expansion trail must have at least 3 points.' }); return null;
         }
         const pointsForPolygon = [...trail.map(p => [p.lng, p.lat]), trail[0] ? [trail[0].lng, trail[0].lat] : null].filter(Boolean);
-        try {
-            newAreaPolygon = turf.polygon([pointsForPolygon]);
-        } catch (e) {
-            socket.emit('claimRejected', { reason: 'Invalid loop geometry.' });
-            return null;
+        try { newAreaPolygon = turf.polygon([pointsForPolygon]); } catch (e) {
+            socket.emit('claimRejected', { reason: 'Invalid loop geometry.' }); return null;
         }
         newAreaSqM = turf.area(newAreaPolygon);
-        if (newAreaSqM < 100) { 
-            socket.emit('claimRejected', { reason: 'Area is too small to claim (min 100sqm).' });
-            return null;
-        }
+        console.log(`[DEBUG]   Type: Expansion Claim. Area: ${newAreaSqM.toFixed(2)} sqm.`);
         
-        const existingUserAreaRes = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1', [userId]); 
+        const existingUserAreaRes = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1', [userId]);
         const existingAreaGeoJSON = existingUserAreaRes.rows.length > 0 ? existingUserAreaRes.rows[0].geojson_area : null;
-        if (!existingAreaGeoJSON || turf.area(JSON.parse(existingAreaGeoJSON)) === 0) { 
-            socket.emit('claimRejected', { reason: 'You must have an established base to expand.' });
-            return null;
+        if (!existingAreaGeoJSON || turf.area(JSON.parse(existingAreaGeoJSON)) === 0) {
+            socket.emit('claimRejected', { reason: 'You must have a base to expand.' }); return null;
         }
         const intersectsExisting = await client.query(`SELECT ST_Intersects(ST_GeomFromGeoJSON($1), ST_GeomFromGeoJSON($2)) as intersects;`, [JSON.stringify(newAreaPolygon.geometry), existingAreaGeoJSON]);
         if (!intersectsExisting.rows[0].intersects) {
-            socket.emit('claimRejected', { reason: 'Expansion must connect to your existing territory.' });
-            return null;
+            socket.emit('claimRejected', { reason: 'Expansion must connect to your existing territory.' }); return null;
         }
     }
+    console.log(`[DEBUG]   Claim validation PASSED.`);
 
-    // --- SECTION 2: CALCULATE ATTACKER'S TOTAL INFLUENCE & FIND VICTIMS ---
+    // --- SECTION 2: CALCULATE ATTACKER'S TOTAL INFLUENCE & FIND ALL POTENTIAL VICTIMS ---
+    console.log(`[DEBUG] Section 2: Calculating Geometries and Finding Victims...`);
     const newAreaWKT = `ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}')`;
     const affectedOwnerIds = new Set([userId]);
 
     const attackerExistingAreaRes = await client.query('SELECT area FROM territories WHERE owner_id = $1', [userId]);
     const attackerExistingArea = attackerExistingAreaRes.rowCount > 0 && attackerExistingAreaRes.rows[0].area ? attackerExistingAreaRes.rows[0].area : `ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')`;
-    
+
+    // THE MOST IMPORTANT STEP: Calculate the attacker's total potential territory (their "ambition").
     const influenceResult = await client.query(`SELECT ST_Union($1::geometry, ${newAreaWKT}) AS full_influence`, [attackerExistingArea]);
     const attackerTotalInfluenceGeom = influenceResult.rows[0].full_influence;
+    console.log(`[DEBUG]   Calculated attacker's Total Potential Influence geometry.`);
     
-    let attackerFinalAreaGeom = attackerTotalInfluenceGeom;
-    
-    const intersectingTerritoriesResult = await client.query(
-        `SELECT owner_id, username, area, is_shield_active FROM territories WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;`,
-        [userId]
+    // Find ALL players whose land intersects with the attacker's TOTAL INFLUENCE.
+    // This correctly finds players who are directly touched AND those who are now encircled.
+    const potentialVictimsResult = await client.query(
+        `SELECT owner_id, username, area, is_shield_active FROM territories WHERE owner_id != $1 AND NOT ST_IsEmpty(area) AND ST_Intersects(area, $2::geometry);`,
+        [userId, attackerTotalInfluenceGeom]
     );
+    console.log(`[DEBUG]   Found ${potentialVictimsResult.rowCount} potentially affected players.`);
 
-    // --- SECTION 3: RESOLVE DIRECT COMBAT ---
-    for (const victim of intersectingTerritoriesResult.rows) {
+    // --- SECTION 3: RESOLVE COMBAT BY DELEGATING TO INTERACTION HANDLERS ---
+    console.log(`[DEBUG] Section 3: Resolving Combat...`);
+    let attackerFinalAreaGeom = attackerTotalInfluenceGeom; // Start with the full ambition.
+
+    for (const victim of potentialVictimsResult.rows) {
+        console.log(`[DEBUG]   Processing victim: ${victim.username} (ID: ${victim.owner_id})`);
         affectedOwnerIds.add(victim.owner_id);
 
         if (victim.is_shield_active) {
-            console.log(`[GAME] Shield from ${victim.username} blocked the attack.`);
-            
-            const protectedResult = await client.query(`SELECT ST_Difference($1::geometry, $2::geometry) as final_geom;`, [attackerFinalAreaGeom, victim.area]);
-            attackerFinalAreaGeom = protectedResult.rows[0].final_geom;
-            
-            await client.query('UPDATE territories SET is_shield_active = false WHERE owner_id = $1', [victim.owner_id]);
-            const victimSocketId = Object.keys(players).find(id => players[id] && players[id].googleId === victim.owner_id);
-            if (victimSocketId) io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: 0 });
-
+            // DELEGATE to the shield handler. It returns the modified attacker geometry.
+            attackerFinalAreaGeom = await handleShieldInteraction(client, attackerFinalAreaGeom, victim, io, players);
         } else {
-            const remainingVictimAreaResult = await client.query(
-                `SELECT ST_AsGeoJSON(ST_Difference($1::geometry, $2::geometry)) as remaining_geojson;`,
-                [victim.area, attackerTotalInfluenceGeom]
-            );
-            
-            const remainingGeoJSON = remainingVictimAreaResult.rows[0].remaining_geojson;
-            const remainingSqM = remainingGeoJSON ? (turf.area(JSON.parse(remainingGeoJSON)) || 0) : 0;
-
-            if (remainingSqM < 1) {
-                console.log(`[GAME] Direct combat wipeout: ${victim.username}.`);
-                await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victim.owner_id]);
-            } else {
-                console.log(`[GAME] Partially claiming territory from ${victim.username}.`);
-                await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingGeoJSON, remainingSqM, victim.owner_id]);
-            }
+            // DELEGATE to the unshielded handler. It handles the victim's update internally.
+            await handleUnshieldedInteraction(client, victim, attackerTotalInfluenceGeom);
         }
     }
+    console.log(`[DEBUG]   All combat interactions resolved.`);
 
-    // --- REPAIRED LOGIC ---
-    // --- SECTION 3.5: CLEANUP TRAPPED, UNSHIELDED TERRITORIES ---
-    // After direct combat, check if any unshielded players are now fully encircled by the attacker's final territory.
-    // ST_Covers is more robust than ST_Within for this, as it correctly handles shared boundaries.
-    const trappedVictimsQuery = `
-        SELECT owner_id, username FROM territories
-        WHERE 
-            owner_id != $1 AND                                -- Not the attacker
-            is_shield_active = false AND                      -- Must be unshielded
-            NOT ST_IsEmpty(area) AND                          -- Must have an area to be trapped
-            ST_Covers($2::geometry, area);                    -- THE KEY FIX: Does the attacker's final geometry COVER the victim's area?
-    `;
-    const trappedVictimsResult = await client.query(trappedVictimsQuery, [userId, attackerFinalAreaGeom]);
-
-    if (trappedVictimsResult.rowCount > 0) {
-        for (const trappedVictim of trappedVictimsResult.rows) {
-            const victimId = trappedVictim.owner_id;
-            console.log(`[GAME] Encirclement wipeout: Deleting trapped territory for ${trappedVictim.username} (${victimId})`);
-            
-            // Wipe out the trapped victim's territory.
-            await client.query(
-                `UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`,
-                [victimId]
-            );
-            affectedOwnerIds.add(victimId);
-        }
-    }
-    // --- END REPAIRED LOGIC ---
 
     // --- SECTION 4: FINALIZE AND SAVE ATTACKER'S TERRITORY ---
+    console.log(`[DEBUG] Section 4: Finalizing and Saving...`);
     const finalAreaResult = await client.query('SELECT ST_AsGeoJSON($1) as geojson, ST_Area($1::geography) as area_sqm', [attackerFinalAreaGeom]);
     const finalAreaGeoJSON = finalAreaResult.rows[0].geojson;
     const finalAreaSqM = finalAreaResult.rows[0].area_sqm || 0;
 
     if (!finalAreaGeoJSON || finalAreaSqM < 1) {
+        console.log(`[DEBUG]   Claim resulted in null/empty area. Rejecting.`);
         socket.emit('claimRejected', { reason: 'Claimed area was nullified by protected territories.' });
         return null;
     }
-    
+    console.log(`[DEBUG]   Attacker's final area is ${finalAreaSqM.toFixed(2)} sqm.`);
+
+    // Save the attacker's new territory.
     if (isInitialBaseClaim) {
         const query = `
             INSERT INTO territories (owner_id, owner_name, username, area, area_sqm, original_base_point)
             VALUES ($1, $2, $2, ST_GeomFromGeoJSON($3), $4, ST_SetSRID(ST_Point($5, $6), 4326))
             ON CONFLICT (owner_id) DO UPDATE SET 
-                area = ST_GeomFromGeoJSON($3), 
-                area_sqm = $4,
-                original_base_point = ST_SetSRID(ST_Point($5, $6), 4326);
-        `;
+                area = ST_GeomFromGeoJSON($3), area_sqm = $4, original_base_point = ST_SetSRID(ST_Point($5, $6), 4326);`;
         await client.query(query, [userId, player.name, finalAreaGeoJSON, finalAreaSqM, baseClaim.lng, baseClaim.lat]);
     } else {
         const query = `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`;
         await client.query(query, [finalAreaGeoJSON, finalAreaSqM, userId]);
     }
+    console.log(`[DEBUG]   Attacker's territory successfully saved to the database.`);
+    
+    console.log(`[DEBUG] Claim Process Finished. Affected players: ${Array.from(affectedOwnerIds).join(', ')}`);
+    console.log(`[DEBUG] =======================================================\n`);
     
     return {
         finalTotalArea: finalAreaSqM,
