@@ -1,6 +1,6 @@
 const turf = require('@turf/turf');
 
-async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) { 
+async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const userId = player.googleId;
     const isInitialBaseClaim = !!baseClaim;
 
@@ -9,13 +9,11 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
     // --- SECTION 1: VALIDATE THE CLAIM AND CREATE THE NEW POLYGON ---
     if (isInitialBaseClaim) {
-        // This is a new base claim (circle)
         const center = [baseClaim.lng, baseClaim.lat];
         const radius = baseClaim.radius || 30;
         newAreaPolygon = turf.circle(center, radius, { units: 'meters' });
         newAreaSqM = turf.area(newAreaPolygon);
         
-        // Non-infiltrators cannot claim a base inside existing territory.
         if (!player.isInfiltratorActive) {
             const basePointWKT = `ST_SetSRID(ST_Point(${baseClaim.lng}, ${baseClaim.lat}), 4326)`;
             const intersectionCheck = await client.query(`SELECT 1 FROM territories WHERE ST_Intersects(area, ${basePointWKT});`);
@@ -25,7 +23,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             }
         }
     } else {
-        // This is an expansion claim (loop)
         if (trail.length < 3) {
             socket.emit('claimRejected', { reason: 'Expansion trail must have at least 3 points.' });
             return null;
@@ -43,7 +40,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             return null;
         }
         
-        // Expansion must connect to the player's own land.
         const existingUserAreaRes = await client.query('SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1', [userId]); 
         const existingAreaGeoJSON = existingUserAreaRes.rows.length > 0 ? existingUserAreaRes.rows[0].geojson_area : null;
         if (!existingAreaGeoJSON || turf.area(JSON.parse(existingAreaGeoJSON)) === 0) { 
@@ -61,24 +57,20 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const newAreaWKT = `ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}')`;
     const affectedOwnerIds = new Set([userId]);
 
-    // Get the attacker's current territory
     const attackerExistingAreaRes = await client.query('SELECT area FROM territories WHERE owner_id = $1', [userId]);
     const attackerExistingArea = attackerExistingAreaRes.rowCount > 0 && attackerExistingAreaRes.rows[0].area ? attackerExistingAreaRes.rows[0].area : `ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')`;
     
-    // 1. THIS IS THE KEY: Calculate the attacker's total potential territory (their "ambition").
     const influenceResult = await client.query(`SELECT ST_Union($1::geometry, ${newAreaWKT}) AS full_influence`, [attackerExistingArea]);
     const attackerTotalInfluenceGeom = influenceResult.rows[0].full_influence;
     
-    // This variable will hold the final shape of the attacker's land after combat.
     let attackerFinalAreaGeom = attackerTotalInfluenceGeom;
     
-    // Find all players whose land intersects with the new claim.
     const intersectingTerritoriesResult = await client.query(
         `SELECT owner_id, username, area, is_shield_active FROM territories WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;`,
         [userId]
     );
 
-    // --- SECTION 3: RESOLVE COMBAT ---
+    // --- SECTION 3: RESOLVE DIRECT COMBAT ---
     for (const victim of intersectingTerritoriesResult.rows) {
         affectedOwnerIds.add(victim.owner_id);
 
@@ -95,7 +87,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
         } else {
             // UNSHIELDED VICTIM: Calculate their new area by subtracting the attacker's total influence.
-            // 2. THIS IS THE OTHER KEY: This calculation correctly handles wipeouts.
             const remainingVictimAreaResult = await client.query(
                 `SELECT ST_AsGeoJSON(ST_Difference($1::geometry, $2::geometry)) as remaining_geojson;`,
                 [victim.area, attackerTotalInfluenceGeom] // Victim's Area MINUS Attacker's TOTAL Influence
@@ -105,16 +96,44 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             const remainingSqM = remainingGeoJSON ? (turf.area(JSON.parse(remainingGeoJSON)) || 0) : 0;
 
             if (remainingSqM < 1) {
-                // FULL WIPEOUT: Victim is eliminated.
                 console.log(`[GAME] Wiping out unshielded player: ${victim.username}.`);
                 await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victim.owner_id]);
             } else {
-                // PARTIAL HIT: Victim survives with a smaller area.
                 console.log(`[GAME] Partially claiming territory from ${victim.username}.`);
                 await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingGeoJSON, remainingSqM, victim.owner_id]);
             }
         }
     }
+
+    // --- NEW LOGIC ---
+    // --- SECTION 3.5: CLEANUP TRAPPED, UNSHIELDED TERRITORIES ---
+    // After direct combat, check if any unshielded players are now fully encircled by the attacker's new territory.
+    const trappedVictimsQuery = `
+        SELECT owner_id FROM territories
+        WHERE 
+            owner_id != $1 AND                          -- Not the attacker
+            is_shield_active = false AND                -- Must be unshielded
+            NOT ST_IsEmpty(area) AND                    -- Must have an area to be trapped
+            ST_Within(area, $2::geometry);              -- The key check: is their area COMPLETELY WITHIN the attacker's final geometry?
+    `;
+    const trappedVictimsResult = await client.query(trappedVictimsQuery, [userId, attackerFinalAreaGeom]);
+
+    if (trappedVictimsResult.rowCount > 0) {
+        for (const trappedVictim of trappedVictimsResult.rows) {
+            const victimId = trappedVictim.owner_id;
+            console.log(`[GAME] Found and deleting trapped, unshielded territory for player ID: ${victimId}`);
+            
+            // Wipe out the trapped victim's territory.
+            await client.query(
+                `UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`,
+                [victimId]
+            );
+
+            // Ensure their ID is in the list for a client-side update.
+            affectedOwnerIds.add(victimId);
+        }
+    }
+    // --- END NEW LOGIC ---
 
     // --- SECTION 4: FINALIZE AND SAVE ATTACKER'S TERRITORY ---
     const finalAreaResult = await client.query('SELECT ST_AsGeoJSON($1) as geojson, ST_Area($1::geography) as area_sqm', [attackerFinalAreaGeom]);
@@ -126,7 +145,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         return null;
     }
     
-    // Save the attacker's new territory using the correct query for the situation.
     if (isInitialBaseClaim) {
         const query = `
             INSERT INTO territories (owner_id, owner_name, username, area, area_sqm, original_base_point)
