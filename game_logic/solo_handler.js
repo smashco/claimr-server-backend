@@ -1,14 +1,17 @@
 const turf = require('@turf/turf');
 
-// Helper function to save the attacker's final territory state
-async function saveAttackerTerritory(client, userId, playerName, finalGeomWKT, isInitialBaseClaim, baseClaim) {
-    const finalResult = await client.query('SELECT ST_AsGeoJSON($1) as geojson, ST_Area($1::geography) as area_sqm', [finalGeomWKT]);
+// Helper function to save the attacker's final territory state.
+// IMPORTANT: This function now expects a GEOMETRY OBJECT, not an SQL command string.
+async function saveAttackerTerritory(client, userId, playerName, finalGeom, isInitialBaseClaim, baseClaim) {
+    // This query now works because `finalGeom` is a valid geometry object.
+    const finalResult = await client.query('SELECT ST_AsGeoJSON($1) as geojson, ST_Area($1::geography) as area_sqm', [finalGeom]);
     const finalAreaGeoJSON = finalResult.rows[0].geojson;
     const finalAreaSqM = finalResult.rows[0].area_sqm || 0;
 
     if (!finalAreaGeoJSON || finalAreaSqM < 1) {
         console.log(`[DEBUG] Final attacker area is null or empty. No DB update needed.`);
-        return; // Avoids saving empty geometries
+        await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [userId]);
+        return;
     }
 
     const saveQuery = `
@@ -22,9 +25,8 @@ async function saveAttackerTerritory(client, userId, playerName, finalGeomWKT, i
     await client.query(saveQuery, [userId, playerName, finalAreaGeoJSON, finalAreaSqM, baseClaim?.lng, baseClaim?.lat]);
 }
 
-
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
-    console.log(`\n\n[DEBUG] =================== NEW CLAIM PROCESS (v5 Attack/Expand) ===================`);
+    console.log(`\n\n[DEBUG] =================== NEW CLAIM PROCESS (v6 Corrected) ===================`);
     console.log(`[DEBUG] Attacker: ${player.name} (${player.id})`);
 
     const userId = player.googleId;
@@ -43,8 +45,8 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         newAreaPolygon = turf.circle([baseClaim.lng, baseClaim.lat], baseClaim.radius || 30, { units: 'meters' });
     } else {
         if (trail.length < 3) { socket.emit('claimRejected', { reason: 'Trail is too short.' }); return null; }
-        const pointsForPolygon = [...trail.map(p => [p.lng, p.lat]), trail[0] ? [trail[0].lng, trail[0].lat] : null].filter(Boolean);
-        try { newAreaPolygon = turf.polygon([pointsForPolygon]); } catch (e) { socket.emit('claimRejected', { reason: 'Invalid loop geometry.' }); return null; }
+        const pointsForPolygon = [...trail.map(p => [p.lng, p.lat]), trail[0] ? [p[0].lng, p[0].lat] : null].filter(Boolean);
+        try { newAreaPolygon = turf.polygon(pointsForPolygon); } catch (e) { socket.emit('claimRejected', { reason: 'Invalid loop geometry.' }); return null; }
         newAreaSqM = turf.area(newAreaPolygon);
         if (newAreaSqM < 100) { socket.emit('claimRejected', { reason: 'Area is too small (min 100sqm).' }); return null; }
     }
@@ -68,7 +70,16 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     if (isInitialBaseClaim) {
         // CASE A: INITIAL BASE CLAIM (In empty space)
         console.log(`[DEBUG] SECTION 2: INITIAL BASE claim.`);
-        await saveAttackerTerritory(client, userId, player.name, newAreaWKT, true, baseClaim);
+        // ** THE FIX **: We build the full query with the command string and execute it directly.
+        const saveQuery = `
+            INSERT INTO territories (owner_id, owner_name, username, area, area_sqm, original_base_point)
+            VALUES ($1, $2, $2, ${newAreaWKT}, $3, ST_SetSRID(ST_Point($4, $5), 4326))
+            ON CONFLICT (owner_id) DO UPDATE 
+            SET area = ${newAreaWKT}, 
+                area_sqm = $3,
+                original_base_point = ST_SetSRID(ST_Point($4, $5), 4326);
+        `;
+        await client.query(saveQuery, [userId, player.name, newAreaSqM, baseClaim.lng, baseClaim.lat]);
     } 
     else if (intersectsOwnTerritory) {
         // CASE B: EXPANSION (Loop connects to attacker's own territory)
