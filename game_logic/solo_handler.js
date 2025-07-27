@@ -46,12 +46,10 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const attackerTotalInfluenceGeom = influenceResult.rows[0].full_influence;
     console.log(`[DEBUG]   => Attacker's Total Potential Influence calculated.`);
     
-    // This variable will hold the final shape of the attacker's land after all combat.
     let attackerFinalAreaGeom = attackerTotalInfluenceGeom;
     
     // --- SECTION 3 (PHASE 1): DIRECT COMBAT ---
     console.log(`[DEBUG] SECTION 3: Resolving DIRECT Combat (Phase 1)...`);
-    // Find victims DIRECTLY TOUCHED by the new claim loop.
     const directHitVictimsResult = await client.query(
         `SELECT owner_id, username, area, is_shield_active FROM territories WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;`,
         [userId]
