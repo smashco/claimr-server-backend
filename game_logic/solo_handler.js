@@ -1,104 +1,170 @@
 const turf = require('@turf/turf');
-const db = require('../db');
 
-async function handleSoloClaim(socket, data, players, io) {
-    const player = players[socket.id];
-    const userId = player?.userId || 'unknown';
+async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
+    const userId = player.googleId;
+    const playerName = player.name;
 
-    const {
-        latitude,
-        longitude,
-        radius,
-        initialClaim,
-        powerUsed
-    } = data;
+    // Log activePower status at the very start
+    console.log(`[DEBUG] [CHECK] Player: ${playerName}, activePower BEFORE claim: ${player.activePower}`);
 
-    const infiltratorActive = powerUsed === 'INFILTRATOR';
+    const isInitialClaim = !!baseClaim;
+    const activePower = player.activePower;
+    const isInfiltrator = activePower === 'INFILTRATOR';
+    const isShieldBreaker = activePower === 'SHIELD_BREAKER';
 
-    console.log(`[DEBUG] [START] Player: ${player.username}, UserID: ${userId}, Infiltrator: ${infiltratorActive}, InitialClaim: ${initialClaim}`);
+    console.log(`[DEBUG] [START] Player: ${playerName}, UserID: ${userId}, Power: ${activePower}, InitialClaim: ${isInitialClaim}`);
 
-    const point = turf.point([longitude, latitude]);
-    const circle = turf.circle(point, radius / 1000, { steps: 64, units: 'kilometers' });
-    const newPolygon = turf.polygon(circle.geometry.coordinates);
-    const area = turf.area(newPolygon);
+    let newPolygon;
 
-    console.log(`[DEBUG] Generated circle area: ${area.toFixed(2)} sqm`);
+    if (isInitialClaim) {
+        const center = [baseClaim.lng, baseClaim.lat];
+        const radius = baseClaim.radius || 30;
 
-    const client = await db.connect();
-    try {
-        // Check for overlapping enemy territories
+        newPolygon = turf.circle(center, radius, { steps: 32, units: 'meters' });
+        const area = turf.area(newPolygon);
+
+        console.log(`[DEBUG] Generated circle area: ${area.toFixed(2)} sqm`);
+
+        // Check if the player already owns territory
+        const ownTerritory = await client.query(`SELECT id FROM territories WHERE owner_id = $1`, [userId]);
+        const hasOwnTerritory = ownTerritory.rows.length > 0;
+
+        // Check for enemy overlaps
         const enemies = await client.query(`
-            SELECT id, owner_id, area, is_shield_active
+            SELECT id, owner_id, area, shield_active
             FROM territories
             WHERE owner_id != $1 AND ST_Intersects(area, ST_GeomFromGeoJSON($2))`,
             [userId, JSON.stringify(newPolygon.geometry)]
         );
 
-        if (enemies.rows.length > 0) {
-            console.log(`[DEBUG] Found ${enemies.rows.length} intersecting enemy territories`);
+        console.log(`[DEBUG] Found ${enemies.rowCount} intersecting enemy territories`);
 
-            for (const target of enemies.rows) {
-                const shielded = target.is_shield_active;
+        if (enemies.rowCount > 0) {
+            const target = enemies.rows[0];
+            const shielded = target.shield_active;
 
-                if (initialClaim || (!infiltratorActive && shielded)) {
-                    console.log(`[REJECTED] Cannot claim inside enemy territory without Infiltrator or shield still active.`);
-                    return socket.emit('claimRejected', { reason: 'Cannot claim inside enemy territory.' });
+            if (!isInfiltrator && !isShieldBreaker) {
+                console.log(`[REJECTED] Cannot claim inside enemy territory without power.`);
+                socket.emit('claimRejected', { reason: 'Use Infiltrator or Shield Breaker to invade enemy territory.' });
+                return;
+            }
+
+            // INFILTRATOR requires no territory
+            if (isInfiltrator && hasOwnTerritory) {
+                console.log(`[REJECTED] Infiltrator only works when you have no territory.`);
+                socket.emit('claimRejected', { reason: 'Infiltrator can only be used when you have zero territory.' });
+                return;
+            }
+
+            if (shielded) {
+                console.log(`[SHIELD DETECTED] Player has power: ${activePower}`);
+
+                if (isShieldBreaker) {
+                    // Remove shield but deny the claim
+                    await client.query(`UPDATE territories SET shield_active = false WHERE id = $1`, [target.id]);
+                    player.activePower = null;
+                    console.log(`[SHIELD BREAKER] Shield removed. Power consumed.`);
+                    socket.emit('claimRejected', { reason: 'Enemy shield was broken by Shield Breaker. Try again now.' });
+                    return;
                 }
 
-                const existingArea = turf.area(target.area);
-                const intersection = turf.intersect(newPolygon, target.area);
-
-                if (!intersection) {
-                    console.log(`[DEBUG] Intersection null — skipping.`);
-                    continue;
-                }
-
-                const intersectionArea = turf.area(intersection);
-
-                const fullyInside = intersectionArea >= existingArea * 0.98;
-
-                if (fullyInside) {
-                    console.log(`[DEBUG] Fully inside enemy territory. Deleting territory ${target.id} and absorbing.`);
-                    await client.query(`DELETE FROM territories WHERE id = $1`, [target.id]);
-                } else {
-                    console.log(`[DEBUG] Partial intersection. Subtracting overlapping part.`);
-                    await client.query(`
-                        UPDATE territories
-                        SET area = ST_Difference(area, ST_GeomFromGeoJSON($1))
-                        WHERE id = $2
-                    `, [JSON.stringify(newPolygon.geometry), target.id]);
-                }
-
-                // Deactivate shield
-                if (shielded) {
-                    console.log(`[DEBUG] Deactivating shield for territory ${target.id}`);
-                    await client.query(`UPDATE territories SET is_shield_active = false WHERE id = $1`, [target.id]);
+                if (isInfiltrator) {
+                    // Shield absorbs the Infiltrator
+                    await client.query(`UPDATE territories SET shield_active = false WHERE id = $1`, [target.id]);
+                    player.activePower = null;
+                    console.log(`[INFILTRATOR BLOCKED] Enemy shield absorbed the attack. Power consumed.`);
+                    socket.emit('claimRejected', { reason: 'Enemy shield absorbed your Infiltrator. Try again.' });
+                    return;
                 }
             }
-        } else {
-            console.log(`[DEBUG] No enemy territories intersected.`);
+
+            // No shield and has appropriate power
+            console.log(`[INFILTRATION SUCCESS] Claim carving success using ${activePower}`);
+
+            await client.query(`
+                UPDATE territories SET area = ST_Difference(area, ST_GeomFromGeoJSON($1)) WHERE id = $2`,
+                [JSON.stringify(newPolygon.geometry), target.id]);
+
+            await client.query(`
+                INSERT INTO territories (owner_id, area, mode, shield_active)
+                VALUES ($1, ST_GeomFromGeoJSON($2), $3, false)`,
+                [userId, JSON.stringify(newPolygon.geometry), 'solo']);
+
+            player.activePower = null;
+            socket.emit('claimAccepted', { message: `${activePower} claim successful!` });
+            console.log(`[SUCCESS] New base carved using ${activePower}. Player: ${playerName}`);
+            return;
         }
 
-        // Claim the new territory
-        await client.query(`
-            INSERT INTO territories (owner_id, area, is_shield_active, created_at)
-            VALUES ($1, ST_GeomFromGeoJSON($2), true, NOW())`,
-            [userId, JSON.stringify(newPolygon.geometry)]
-        );
+        if (isInfiltrator) {
+            console.log(`[REJECTED] Infiltrator failed: Not inside enemy territory.`);
+            socket.emit('claimRejected', { reason: 'You must infiltrate enemy territory. Power consumed.' });
+            player.activePower = null;
+            return;
+        }
 
-        console.log(`[SUCCESS] Territory claimed successfully by ${player.username}`);
-        io.emit('territoryClaimed', {
-            ownerId: userId,
-            area: newPolygon.geometry,
-            is_shield_active: true,
-            username: player.username
-        });
-    } catch (err) {
-        console.error(`[DB] FATAL Error during territory claim:`, err);
-        socket.emit('claimRejected', { reason: 'Internal server error.' });
-    } finally {
-        client.release();
+        if (isShieldBreaker) {
+            console.log(`[REJECTED] Shield Breaker failed: No enemy found.`);
+            socket.emit('claimRejected', { reason: 'No enemy to break. Power consumed.' });
+            player.activePower = null;
+            return;
+        }
+
+        // Normal base claim (no powers used)
+        await client.query(`
+            INSERT INTO territories (owner_id, area, mode, shield_active)
+            VALUES ($1, ST_GeomFromGeoJSON($2), $3, false)`,
+            [userId, JSON.stringify(newPolygon.geometry), 'solo']);
+
+        socket.emit('claimAccepted', { message: 'Base claimed successfully!' });
+        console.log(`[SUCCESS] Base claim successful.`);
+        return;
     }
+
+    // Expansion claim
+    if (!trail || trail.length < 3) {
+        console.log(`[REJECTED] Trail too short.`);
+        socket.emit('claimRejected', { reason: 'Loop must have at least 3 points.' });
+        return;
+    }
+
+    const trailCoords = [...trail.map(p => [p.lng, p.lat]), [trail[0].lng, trail[0].lat]];
+    newPolygon = turf.polygon([trailCoords]);
+    const expansionArea = turf.area(newPolygon);
+    console.log(`[DEBUG] Expansion area: ${expansionArea.toFixed(2)} sqm`);
+
+    if (expansionArea < 100) {
+        console.log(`[REJECTED] Area too small.`);
+        socket.emit('claimRejected', { reason: 'Claim area too small.' });
+        return;
+    }
+
+    const result = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
+    if (result.rows.length === 0) {
+        socket.emit('claimRejected', { reason: 'You must have a base to expand from.' });
+        return;
+    }
+
+    const playerArea = result.rows[0].area;
+    const connected = await client.query(`
+        SELECT ST_Intersects(ST_GeomFromGeoJSON($1), ST_GeomFromGeoJSON($2)) as intersect`,
+        [JSON.stringify(newPolygon.geometry), playerArea]
+    );
+
+    if (!connected.rows[0].intersect) {
+        console.log(`[REJECTED] Expansion not connected to base.`);
+        socket.emit('claimRejected', { reason: 'Expansion must connect to your territory.' });
+        return;
+    }
+
+    await client.query(`
+        UPDATE territories
+        SET area = ST_Union(area, ST_GeomFromGeoJSON($1))
+        WHERE owner_id = $2`,
+        [JSON.stringify(newPolygon.geometry), userId]);
+
+    socket.emit('claimAccepted', { message: 'Expansion successful!' });
+    console.log(`[SUCCESS] Expansion merged successfully.`);
 }
 
 module.exports = handleSoloClaim;
