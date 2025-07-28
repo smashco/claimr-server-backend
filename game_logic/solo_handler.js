@@ -1,7 +1,7 @@
 const turf = require('@turf/turf');
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
-    console.log(`\n\n[DEBUG] =================== NEW CLAIM (v20 Full Fix) ===================`);
+    console.log(`\n\n[DEBUG] =================== NEW CLAIM (v21 Sliver Deletion Fix) ===================`);
     console.log(`[DEBUG] [STEP 1] INITIATION`);
     console.log(`[DEBUG]   - Attacker: ${player.name} (${player.id})`);
 
@@ -9,7 +9,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const isInitialBaseClaim = !!baseClaim;
     let newAreaPolygon, newAreaSqM;
 
-    // --- SECTION 1: VALIDATE & CREATE GEOMETRY ---
+    // --- SECTION 1: CREATE NEW AREA ---
     try {
         if (isInitialBaseClaim) {
             newAreaPolygon = turf.circle([baseClaim.lng, baseClaim.lat], baseClaim.radius || 30, { units: 'meters' });
@@ -18,9 +18,10 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 socket.emit('claimRejected', { reason: 'Trail is too short.' });
                 return null;
             }
-            const pointsForPolygon = [...trail.map(p => [p.lng, p.lat]), trail[0] ? [trail[0].lng, trail[0].lat] : null].filter(Boolean);
+            const pointsForPolygon = [...trail.map(p => [p.lng, p.lat]), [trail[0].lng, trail[0].lat]];
             newAreaPolygon = turf.polygon([pointsForPolygon]);
         }
+
         newAreaSqM = turf.area(newAreaPolygon);
         if (newAreaSqM < 100 && !isInitialBaseClaim) {
             socket.emit('claimRejected', { reason: 'Area is too small (min 100sqm).' });
@@ -36,7 +37,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
     const affectedOwnerIds = new Set([userId]);
 
-    // --- SECTION 2: CALCULATE TOTAL INFLUENCE & GET "BEFORE" STATE ---
+    // --- SECTION 2: CALCULATE INFLUENCE ZONE ---
     console.log(`[DEBUG] [STEP 2] CALCULATING INFLUENCE & INITIAL STATE`);
     const attackerExistingAreaRes = await client.query('SELECT area FROM territories WHERE owner_id = $1', [userId]);
     const attackerExistingArea = attackerExistingAreaRes.rows.length > 0 ? attackerExistingAreaRes.rows[0].area : `ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')`;
@@ -52,7 +53,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
     const allInvolvedIds = new Set([userId, ...victimsResult.rows.map(v => v.owner_id)]);
     const beforeStateRes = await client.query('SELECT username, area_sqm FROM territories WHERE owner_id = ANY($1::varchar[])', [Array.from(allInvolvedIds)]);
-
     console.log(`[DEBUG]   --- TRANSACTION STATE: BEFORE ---`);
     for (const row of beforeStateRes.rows) {
         console.log(`[DEBUG]     - Player: ${row.username}, Area: ${(row.area_sqm || 0).toFixed(2)} sqm`);
@@ -79,14 +79,14 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             `, [attackerFinalGeom, victim.area]);
 
             attackerFinalGeom = protectedResult.rows[0].final_geom;
-
             await client.query('UPDATE territories SET is_shield_active = false WHERE owner_id = $1', [victim.owner_id]);
 
             const victimSocketId = Object.keys(players).find(id => players[id] && players[id].googleId === victim.owner_id);
             if (victimSocketId) io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: 0 });
+
         } else {
             console.log(`[DEBUG]   - ACTION: Processing UNSHIELDED victim ${victim.username}.`);
-            const encirclementCheck = await client.query("SELECT ST_Within($1::geometry, $2::geometry) as is_encircled", [victim.area, attackerFinalGeom]);
+            const encirclementCheck = await client.query(`SELECT ST_Within($1::geometry, $2::geometry) as is_encircled`, [victim.area, attackerFinalGeom]);
 
             if (encirclementCheck.rows[0].is_encircled) {
                 console.log(`[DEBUG]     -> DECISION: Victim is ENCIRCLED. Result: WIPEOUT.`);
@@ -102,14 +102,18 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                                 ), 0
                             )
                         )
-                    ) as remaining_geojson;
+                    ) as remaining_geojson
                 `, [victim.area, attackerFinalGeom]);
 
                 const remainingGeoJSON = remainingResult.rows[0].remaining_geojson;
                 const remainingSqM = remainingGeoJSON ? (turf.area(JSON.parse(remainingGeoJSON)) || 0) : 0;
 
-                if (remainingSqM < 1) {
-                    console.log(`[DEBUG]     -> DECISION: Remaining area < 1sqm. Result: WIPEOUT.`);
+                const originalSqM = victim.area_sqm || 0;
+                const wipeThreshold = 1000;
+                const percentThreshold = 0.10;
+
+                if (remainingSqM < wipeThreshold || remainingSqM < (originalSqM * percentThreshold)) {
+                    console.log(`[DEBUG]     -> DECISION: Remaining area too small (${remainingSqM.toFixed(2)} sqm). Result: WIPEOUT.`);
                     await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1`, [victim.owner_id]);
                 } else {
                     console.log(`[DEBUG]     -> DECISION: Partial hit. Victim's new area: ${remainingSqM.toFixed(2)} sqm.`);
@@ -119,7 +123,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
 
-    // --- SECTION 4: SAVE ATTACKER'S FINAL STATE & CLEANUP ---
+    // --- SECTION 4: SAVE FINAL ATTACKER STATE ---
     console.log(`[DEBUG] [STEP 4] SAVING ATTACKER STATE & CLEANUP`);
 
     const finalResult = await client.query(`
@@ -157,7 +161,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     `;
     await client.query(saveQuery, [userId, player.name, finalAreaGeoJSON, finalAreaSqM, baseClaim?.lng, baseClaim?.lat]);
 
-    // --- POST-CLAIM CLEANUP (ENCIRCLEMENT RE-CHECK) ---
+    // --- POST-CLAIM CLEANUP: ENCIRCLEMENT RE-CHECK ---
     if (finalAreaGeoJSON) {
         const encircledVictims = await client.query(`
             SELECT owner_id, username FROM territories 
@@ -175,7 +179,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
 
-    // --- "AFTER" STATE LOGGING ---
+    // --- STATE AFTER LOG ---
     const afterStateRes = await client.query('SELECT username, area_sqm FROM territories WHERE owner_id = ANY($1::varchar[])', [Array.from(affectedOwnerIds)]);
     console.log(`[DEBUG]   --- TRANSACTION STATE: AFTER ---`);
     for (const row of afterStateRes.rows) {
@@ -183,7 +187,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     }
     console.log(`[DEBUG]   -----------------------------------`);
 
-    // --- SECTION 5: COMPLETE ---
+    // --- SECTION 5: DONE ---
     console.log(`[DEBUG] [STEP 5] CLAIM COMPLETE`);
     return {
         finalTotalArea: finalAreaSqM,
