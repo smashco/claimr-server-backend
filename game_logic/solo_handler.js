@@ -1,4 +1,4 @@
-// solo_handler.js (ESM-compatible full code)
+// solo_handler.js (ESM-compatible full script with corrected function name)
 
 import turfDifference from '@turf/difference';
 import turfUnion from '@turf/union';
@@ -13,7 +13,7 @@ import turfBooleanIntersects from '@turf/boolean-intersects';
  * @param {Object} victim - { id, territory: GeoJSON, shield: boolean, socket }
  * @returns {Object} outcome
  */
-export async function handleSoloAttack(attacker, victim) {
+export async function handleSoloClaim(attacker, victim) {
   const { trail } = attacker;
   const { territory, shield } = victim;
 
@@ -77,4 +77,4 @@ export async function handleSoloAttack(attacker, victim) {
   };
 }
 
-export default handleSoloAttack;
+export default handleSoloClaim;
