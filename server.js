@@ -5,7 +5,6 @@ const { Server } = require("socket.io");
 const { Pool } = require('pg');
 const admin = require('firebase-admin');
 const turf = require('@turf/turf'); 
-import handleSoloClaim from './game_logic/solo_handler.js';
 
 
 // --- Require the Game Logic Handlers ---
