@@ -1,102 +1,118 @@
-import turf from '@turf/turf';
-import { client } from './db'; // PostgreSQL client
-import { broadcastToAll } from './socketUtils'; // Your broadcast function
+for (const row of intersectingTerritoriesResult.rows) {
+    const victimId = row.owner_id;
+    const victimCurrentArea = row.area;
+    affectedOwnerIds.add(victimId);
 
-export async function handleSoloClaim(attackerId, newClaimGeoJSON) {
-    console.log(`[DEBUG] ==== SOLO CLAIM STARTED ====`);
+    // 1. Shielded Victim → Carve Island and skip
+    if (row.is_shield_active) {
+        console.log(`[GAME] ${row.username}'s SHIELD ACTIVATED. Carving hole...`);
 
-    const attacker = await client.query(`SELECT * FROM players WHERE id = $1`, [attackerId]);
-    if (!attacker.rows.length) return console.error(`Attacker ${attackerId} not found.`);
+        // Subtract victim area from attack trail
+        const punchHole = await client.query(`
+            SELECT ST_Difference($1::geometry, $2::geometry) AS holed
+        `, [attackerNetGainGeom, victimCurrentArea]);
 
-    const claimArea = turf.area(newClaimGeoJSON);
-    console.log(`[DEBUG] Claim area: ${claimArea.toFixed(2)} sqm`);
+        attackerNetGainGeom = punchHole.rows[0].holed;
 
-    // STEP 1: Find overlapping victims
-    const result = await client.query(`
-        SELECT id, owner_id, area, area_sqm FROM territories
-        WHERE ST_Intersects(area, ST_SetSRID(ST_GeomFromGeoJSON($1), 4326))
-        AND owner_id != $2
-    `, [JSON.stringify(newClaimGeoJSON), attackerId]);
+        // Deactivate shield
+        await client.query(`
+            UPDATE territories SET is_shield_active = false WHERE owner_id = $1
+        `, [victimId]);
 
-    const victimRows = result.rows;
-    const victimsToBroadcast = new Set();
-
-    for (const victim of victimRows) {
-        const player = await client.query(`SELECT shield_active, name FROM players WHERE id = $1`, [victim.owner_id]);
-        const isShielded = player.rows[0]?.shield_active;
-
-        if (isShielded) {
-            console.log(`[DEBUG] SKIPPED: ${player.rows[0].name} is shielded.`);
-            continue;
+        // Notify victim
+        const victimSocketId = Object.keys(players).find(id => players[id]?.googleId === victimId);
+        if (victimSocketId) {
+            io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: 0 });
         }
 
-        const intersection = await client.query(`
-            SELECT ST_AsGeoJSON(ST_Intersection(area, ST_SetSRID(ST_GeomFromGeoJSON($1), 4326))) AS intersect
-            FROM territories
-            WHERE id = $2
-        `, [JSON.stringify(newClaimGeoJSON), victim.id]);
-
-        const intersectJSON = intersection.rows[0].intersect;
-        if (!intersectJSON) continue;
-
-        const difference = await client.query(`
-            SELECT ST_AsGeoJSON(ST_Difference(area, ST_SetSRID(ST_GeomFromGeoJSON($1), 4326))) AS diff
-            FROM territories
-            WHERE id = $2
-        `, [JSON.stringify(newClaimGeoJSON), victim.id]);
-
-        const diffJSON = difference.rows[0].diff;
-        const remainingArea = diffJSON ? turf.area(JSON.parse(diffJSON)) : 0;
-
-        const wipeThreshold = 1000; // sqm
-        const percentThreshold = 0.10; // 10%
-
-        if (remainingArea < wipeThreshold || remainingArea < victim.area_sqm * percentThreshold) {
-            console.log(`[DEBUG] -> ${player.rows[0].name} wiped out. Remaining: ${remainingArea.toFixed(2)} sqm`);
-            await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE id = $1`, [victim.id]);
-        } else {
-            console.log(`[DEBUG] -> ${player.rows[0].name} partially hit. Remaining: ${remainingArea.toFixed(2)} sqm`);
-            await client.query(`
-                UPDATE territories SET area = ST_SetSRID(ST_GeomFromGeoJSON($1), 4326), area_sqm = $2 WHERE id = $3
-            `, [diffJSON, remainingArea, victim.id]);
-        }
-
-        victimsToBroadcast.add(victim.owner_id);
+        continue;
     }
 
-    // STEP 2: Add new claim for attacker
-    const attackerTerritory = await client.query(`SELECT id FROM territories WHERE owner_id = $1`, [attackerId]);
-    if (attackerTerritory.rows.length) {
-        const prevId = attackerTerritory.rows[0].id;
-        const prevAreaResult = await client.query(`SELECT ST_AsGeoJSON(area) as geo FROM territories WHERE id = $1`, [prevId]);
+    // 2. Check for containment and overlap status
+    const containmentCheck = await client.query(`
+        SELECT 
+            ST_Contains($1::geometry, $2::geometry) AS fully_inside,
+            ST_Intersects($1::geometry, $2::geometry) AS is_intersecting
+    `, [attackerNetGainGeom, victimCurrentArea]);
 
-        const merged = await client.query(`
-            SELECT ST_AsGeoJSON(ST_Union(
-                ST_SetSRID(ST_GeomFromGeoJSON($1), 4326),
-                ST_SetSRID(ST_GeomFromGeoJSON($2), 4326)
-            )) AS merged
-        `, [prevAreaResult.rows[0].geo, JSON.stringify(newClaimGeoJSON)]);
+    const isFullyInside = containmentCheck.rows[0].fully_inside;
+    const isIntersecting = containmentCheck.rows[0].is_intersecting;
 
-        const mergedJSON = merged.rows[0].merged;
-        const mergedArea = turf.area(JSON.parse(mergedJSON));
+    // 3. Special Case: Fully Surrounded (not intersected) → Wipeout
+    if (!isIntersecting && isFullyInside) {
+        console.log(`[GAME] ${row.username} was SURROUNDED and WIPED OUT.`);
+
+        const absorb = await client.query(`
+            SELECT ST_Union($1::geometry, $2::geometry) AS result
+        `, [attackerNetGainGeom, victimCurrentArea]);
+
+        attackerNetGainGeom = absorb.rows[0].result;
 
         await client.query(`
-            UPDATE territories SET area = ST_SetSRID(ST_GeomFromGeoJSON($1), 4326), area_sqm = $2 WHERE id = $3
-        `, [mergedJSON, mergedArea, prevId]);
-    } else {
-        const areaSize = turf.area(newClaimGeoJSON);
-        await client.query(`
-            INSERT INTO territories (owner_id, area, area_sqm) VALUES ($1, ST_SetSRID(ST_GeomFromGeoJSON($2), 4326), $3)
-        `, [attackerId, JSON.stringify(newClaimGeoJSON), areaSize]);
+            UPDATE territories 
+            SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 
+            WHERE owner_id = $1
+        `, [victimId]);
+
+        continue;
     }
 
-    victimsToBroadcast.add(attackerId);
+    // 4. Standard Full Wipeout (intersect + fully inside)
+    if (isIntersecting && isFullyInside) {
+        console.log(`[GAME] ${row.username} was INTERSECTED AND CONTAINED → WIPED OUT.`);
 
-    // STEP 3: Broadcast
-    broadcastToAll('territoryUpdate', {
-        players: Array.from(victimsToBroadcast),
-        mode: 'solo'
-    });
+        const absorb = await client.query(`
+            SELECT ST_Union($1::geometry, $2::geometry) AS result
+        `, [attackerNetGainGeom, victimCurrentArea]);
 
-    console.log(`[DEBUG] ==== SOLO CLAIM COMPLETE ====`);
+        attackerNetGainGeom = absorb.rows[0].result;
+
+        await client.query(`
+            UPDATE territories 
+            SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 
+            WHERE owner_id = $1
+        `, [victimId]);
+
+        continue;
+    }
+
+    // 5. Partial Damage
+    if (isIntersecting && !isFullyInside) {
+        console.log(`[GAME] ${row.username} was PARTIALLY DAMAGED.`);
+
+        const overlap = await client.query(`
+            SELECT 
+                ST_Intersection($1::geometry, $2::geometry) AS overlap_geom,
+                ST_Difference($2::geometry, $1::geometry) AS remaining_geom
+        `, [attackerNetGainGeom, victimCurrentArea]);
+
+        const overlapGeom = overlap.rows[0].overlap_geom;
+        const remainingGeom = overlap.rows[0].remaining_geom;
+
+        // Update victim territory with remaining part
+        const newVictimAreaResult = await client.query(`
+            SELECT ST_AsGeoJSON($1) AS geojson, ST_Area($1::geography) AS area_sqm
+        `, [remainingGeom]);
+
+        const newVictimGeoJSON = newVictimAreaResult.rows[0].geojson;
+        const newVictimSqM = newVictimAreaResult.rows[0].area_sqm;
+
+        await client.query(`
+            UPDATE territories 
+            SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 
+            WHERE owner_id = $3
+        `, [newVictimGeoJSON, newVictimSqM, victimId]);
+
+        // Add intersecting chunk to attacker
+        const updatedAttacker = await client.query(`
+            SELECT ST_Union($1::geometry, $2::geometry) AS result
+        `, [attackerNetGainGeom, overlapGeom]);
+
+        attackerNetGainGeom = updatedAttacker.rows[0].result;
+
+        continue;
+    }
+
+    // 6. No Action (not intersecting, not contained)
+    console.log(`[GAME] ${row.username} was NOT AFFECTED.`);
 }
