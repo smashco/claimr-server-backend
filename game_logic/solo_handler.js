@@ -38,7 +38,7 @@ export async function handleSoloClaim(attacker, victim) {
     };
   }
 
-  // Case 2: Entire victim inside attacker base (after shield gone) → Wipeout
+  // Case 2: Entire victim inside attacker base (after shield down) → Wipeout
   if (fullyInside && !overlaps) {
     return {
       result: 'Wipeout by Surrounding (No Contact)',
