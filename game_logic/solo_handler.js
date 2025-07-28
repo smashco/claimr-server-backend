@@ -1,7 +1,7 @@
 const turf = require('@turf/turf');
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
-    console.log(`\n\n[DEBUG] =================== NEW CLAIM (v13 Final Logic) ===================`);
+    console.log(`\n\n[DEBUG] =================== NEW CLAIM (v14 Final Encirclement Fix) ===================`);
     console.log(`[DEBUG] Attacker: ${player.name} (${player.id})`);
 
     const userId = player.googleId;
@@ -61,12 +61,11 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             affectedOwnerIds.add(victim.owner_id);
             console.log(`[DEBUG]   [PASS 2] Processing unshielded victim: ${victim.username}.`);
             
-            // ** THE FIX: Use ST_Relate for a robust encirclement check. **
-            // The pattern 'T*F**F***' checks if a geometry is truly *within* another without touching boundaries.
-            const encirclementCheck = await client.query("SELECT ST_Relate($1::geometry, $2::geometry, 'T*F**F***') as is_encircled", [victim.area, attackerFinalAreaGeom]);
+            // ** THE DEFINITIVE FIX: Use ST_Within for a robust encirclement check. **
+            const encirclementCheck = await client.query("SELECT ST_Within($1::geometry, $2::geometry) as is_encircled", [victim.area, attackerFinalAreaGeom]);
 
             if (encirclementCheck.rows[0].is_encircled) {
-                console.log(`[DEBUG]     [DECISION] ST_Relate confirmed victim is encircled -> WIPEOUT.`);
+                console.log(`[DEBUG]     [DECISION] ST_Within confirmed victim is encircled -> WIPEOUT.`);
                 await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victim.owner_id]);
             } else {
                 console.log(`[DEBUG]     [DECISION] Victim is not encircled, processing as partial hit.`);
