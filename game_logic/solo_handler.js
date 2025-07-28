@@ -1,4 +1,4 @@
-// solo_handler.js (ESM-compatible full script with corrected function name)
+// solo_handler.js
 
 import turfDifference from '@turf/difference';
 import turfUnion from '@turf/union';
@@ -8,73 +8,89 @@ import turfBooleanContains from '@turf/boolean-contains';
 import turfBooleanIntersects from '@turf/boolean-intersects';
 
 /**
- * Handles a solo territory attack between attacker and victim
- * @param {Object} attacker - { id, trail: GeoJSON, socket }
- * @param {Object} victim - { id, territory: GeoJSON, shield: boolean, socket }
- * @returns {Object} outcome
+ * Handles a solo territory attack between attacker and victim.
+ * Rules implemented:
+ * - Wipeout if victim’s remaining area < 30%
+ * - No wipeout if an unshielded player is fully inside the attacker
+ * - Full wipeout if fully surrounded and overlaps
+ * - Partial wipeout if partially inside
+ * - Shield: if active, attacker just carves a hole
  */
-export async function handleSoloClaim(attacker, victim) {
+export default async function handleSoloClaim(attacker, victim) {
   const { trail } = attacker;
   const { territory, shield } = victim;
 
   const fullyInside = turfBooleanContains(trail, territory);
   const overlaps = turfBooleanIntersects(trail, territory);
 
-  // Case 1: Victim has shield → punch hole/island
+  const victimArea = turfArea(territory);
+
+  // 🛡️ 1. Shield: Punch hole, but do not wipeout
   if (shield) {
     const holed = turfDifference(territory, trail);
-    if (!holed) {
-      // Hole completely destroyed territory
+    if (!holed || turfArea(holed) < victimArea * 0.1) {
+      // territory too damaged
       return {
-        result: 'Shield blocked wipeout, but territory lost',
+        result: 'Shield blocked wipeout, but territory mostly lost',
         victimShieldBroken: true,
-        updatedTerritory: null
+        updatedTerritory: null,
+        victimEliminated: true
       };
     }
     return {
       result: 'Shield absorbed attack by making hole',
       victimShieldBroken: true,
-      updatedTerritory: holed
+      updatedTerritory: holed,
+      victimEliminated: false
     };
   }
 
-  // Case 2: Entire victim inside attacker base (after shield down) → Wipeout
+  // 🌀 2. Full Inside but no overlap: surround wipeout
   if (fullyInside && !overlaps) {
     return {
-      result: 'Wipeout by Surrounding (No Contact)',
+      result: 'Wipeout: Surrounded with no contact',
       victimEliminated: true,
       absorbedArea: territory
     };
   }
 
-  // Case 3: Fully intersected → Wipeout
+  // 🔥 3. Full Inside + Overlap: full wipeout
   if (fullyInside && overlaps) {
     const absorbed = turfUnion(trail, territory);
     return {
-      result: 'Full Wipeout by Contact',
+      result: 'Full Wipeout: Complete overlap',
       victimEliminated: true,
       absorbedArea: absorbed
     };
   }
 
-  // Case 4: Partial damage
+  // ⚠️ 4. Partial overlap: calculate area-based partial wipeout
   if (overlaps) {
     const overlapArea = turfIntersect(trail, territory);
     const damaged = turfDifference(territory, trail);
 
+    const remainingArea = damaged ? turfArea(damaged) : 0;
+    const remainingPercent = remainingArea / victimArea;
+
+    if (remainingPercent < 0.3) {
+      return {
+        result: 'Wipeout: Remaining territory < 30%',
+        victimEliminated: true,
+        updatedTerritory: null
+      };
+    }
+
     return {
-      result: 'Partial Damage',
+      result: 'Partial Damage: > 30% remains',
       victimEliminated: false,
       updatedTerritory: damaged,
       damagedArea: overlapArea
     };
   }
 
-  // Case 5: No interaction
+  // 🧊 5. No interaction
   return {
-    result: 'No Effect',
+    result: 'No Effect: No overlap or containment',
     victimEliminated: false
   };
 }
-
-export default handleSoloClaim;
