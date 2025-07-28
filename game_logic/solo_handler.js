@@ -1,18 +1,7 @@
 const turf = require('@turf/turf');
 
-// Helper to get GeoJSON for logging
-async function getGeoJSON(client, geom) {
-    if (!geom) return 'null';
-    try {
-        const result = await client.query('SELECT ST_AsGeoJSON($1) as geojson', [geom]);
-        return result.rows[0].geojson;
-    } catch (e) {
-        return `Error getting GeoJSON: ${e.message}`;
-    }
-}
-
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
-    console.log(`\n\n[DEBUG] =================== NEW CLAIM (v12 Encirclement Fix) ===================`);
+    console.log(`\n\n[DEBUG] =================== NEW CLAIM (v13 Final Logic) ===================`);
     console.log(`[DEBUG] Attacker: ${player.name} (${player.id})`);
 
     const userId = player.googleId;
@@ -72,32 +61,22 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             affectedOwnerIds.add(victim.owner_id);
             console.log(`[DEBUG]   [PASS 2] Processing unshielded victim: ${victim.username}.`);
             
-            // ** THE FIX: Use ST_Difference and check if the result is empty. This robustly handles encirclement. **
-            const remainingResultQuery = `
-                SELECT 
-                    ST_AsGeoJSON(
-                        ST_CollectionExtract(
-                            ST_MakeValid(ST_Difference($1::geometry, $2::geometry)), 3
-                        )
-                    ) as remaining_geojson,
-                    ST_IsEmpty(
-                        ST_MakeValid(ST_Difference($1::geometry, $2::geometry))
-                    ) as is_wiped_out
-            `;
-            const remainingResult = await client.query(remainingResultQuery, [victim.area, attackerFinalAreaGeom]);
-            
-            if (remainingResult.rows[0].is_wiped_out) {
-                console.log(`[DEBUG]     [DECISION] Difference resulted in empty geometry -> WIPEOUT.`);
+            // ** THE FIX: Use ST_Relate for a robust encirclement check. **
+            // The pattern 'T*F**F***' checks if a geometry is truly *within* another without touching boundaries.
+            const encirclementCheck = await client.query("SELECT ST_Relate($1::geometry, $2::geometry, 'T*F**F***') as is_encircled", [victim.area, attackerFinalAreaGeom]);
+
+            if (encirclementCheck.rows[0].is_encircled) {
+                console.log(`[DEBUG]     [DECISION] ST_Relate confirmed victim is encircled -> WIPEOUT.`);
                 await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victim.owner_id]);
             } else {
+                console.log(`[DEBUG]     [DECISION] Victim is not encircled, processing as partial hit.`);
+                const remainingResult = await client.query(`SELECT ST_AsGeoJSON(ST_CollectionExtract(ST_MakeValid(ST_Difference($1::geometry, $2::geometry)), 3)) as remaining_geojson;`, [victim.area, attackerFinalAreaGeom]);
                 const remainingGeoJSON = remainingResult.rows[0].remaining_geojson;
                 const remainingSqM = remainingGeoJSON ? (turf.area(JSON.parse(remainingGeoJSON)) || 0) : 0;
                 
                 if (remainingSqM < 1) {
-                    console.log(`[DEBUG]     [DECISION] Remaining area is < 1sqm -> WIPEOUT.`);
                     await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victim.owner_id]);
                 } else {
-                    console.log(`[DEBUG]     [DECISION] Partial hit. Remaining area: ${remainingSqM.toFixed(2)} sqm`);
                     await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingGeoJSON, remainingSqM, victim.owner_id]);
                 }
             }
