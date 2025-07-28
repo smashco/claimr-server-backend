@@ -10,7 +10,7 @@ async function getArea(client, geom) {
 }
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
-    console.log(`\n\n[DEBUG] =================== NEW CLAIM (v18 Final Cleanup) ===================`);
+    console.log(`\n\n[DEBUG] =================== NEW CLAIM (v19 Ambiguity Fix) ===================`);
     console.log(`[DEBUG] [STEP 1] INITIATION`);
     console.log(`[DEBUG]   - Attacker: ${player.name} (${player.id})`);
 
@@ -88,19 +88,20 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const finalAreaGeoJSON = finalResult.rows[0].geojson;
     const finalAreaSqM = finalResult.rows[0].area_sqm || 0;
     
-    // Use a single, robust query to save the attacker's state
+    // ** THE FIX IS HERE **
+    // Explicitly reference `territories.original_base_point` to resolve ambiguity.
     const saveQuery = `
         INSERT INTO territories (owner_id, owner_name, username, area, area_sqm, original_base_point)
         VALUES ($1, $2, $2, ST_GeomFromGeoJSON($3), $4, CASE WHEN ${isInitialBaseClaim} THEN ST_SetSRID(ST_Point($5, $6), 4326) ELSE NULL END)
         ON CONFLICT (owner_id) DO UPDATE 
         SET area = ST_GeomFromGeoJSON($3), 
             area_sqm = $4,
-            original_base_point = CASE WHEN ${isInitialBaseClaim} THEN territories.original_base_point ELSE original_base_point END;
+            original_base_point = CASE WHEN ${isInitialBaseClaim} THEN ST_SetSRID(ST_Point($5, $6), 4326) ELSE territories.original_base_point END;
     `;
     await client.query(saveQuery, [userId, player.name, finalAreaGeoJSON, finalAreaSqM, baseClaim?.lng, baseClaim?.lat]);
     console.log(`[DEBUG]   - Attacker state saved. Final Area: ${finalAreaSqM.toFixed(2)} sqm`);
 
-    // --- NEW SECTION 4.5: POST-CLAIM ENCIRCLEMENT CLEANUP ---
+    // --- SECTION 4.5: POST-CLAIM ENCIRCLEMENT CLEANUP ---
     console.log(`[DEBUG] [STEP 4.5] POST-CLAIM ENCIRCLEMENT CLEANUP`);
     const encircledVictims = await client.query(`
         SELECT owner_id, username FROM territories 
