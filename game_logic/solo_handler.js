@@ -1,5 +1,7 @@
 const turf = require('@turf/turf');
-const { handleShieldInteraction, handleVictimWipeout } = require('./shieldUtils'); // Import the new functions
+// Import the specific interaction handlers
+const { handleShieldHit } = require('./interactions/shield_interaction');
+const { handleWipeout } = require('./interactions/unshielded_interaction');
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     console.log(`\n\n[DEBUG] =================== NEW CLAIM ===================`);
@@ -10,6 +12,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
     let newAreaPolygon, newAreaSqM;
 
+    // ... (rest of the initial base claim and expansion logic remains the same)
     if (isInitialBaseClaim) {
         console.log(`[DEBUG] Processing Initial Base Claim`);
         const center = [baseClaim.lng, baseClaim.lat];
@@ -76,6 +79,8 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
 
+
+    // === INTERACTION LOGIC ===
     console.log(`[DEBUG] Calculating geometry overlaps and adjustments...`);
     const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
     const affectedOwnerIds = new Set([userId]);
@@ -94,12 +99,13 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         affectedOwnerIds.add(victim.owner_id);
 
         if (victim.is_shield_active) {
-            attackerNetGainGeom = await handleShieldInteraction(victim, attackerNetGainGeom, client, io, players);
+            attackerNetGainGeom = await handleShieldHit(victim, attackerNetGainGeom, client, io, players);
         } else {
-            attackerNetGainGeom = await handleVictimWipeout(victim, attackerNetGainGeom, client);
+            attackerNetGainGeom = await handleWipeout(victim, attackerNetGainGeom, client);
         }
     }
 
+    // ... (rest of the final merge and database update logic remains the same)
     const userExisting = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
     let finalArea = attackerNetGainGeom;
 
@@ -144,4 +150,4 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     };
 }
 
-module.exports = handleSoloClaim;
+module.exports = { handleSoloClaim }; // Assuming this is how you export
