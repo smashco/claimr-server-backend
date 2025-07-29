@@ -10,6 +10,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     console.log(`[DEBUG] Infiltrator Active: ${isInfiltrator}`);
 
     let newAreaPolygon, newAreaSqM;
+    let infiltratorInitialBasePolygon = player.infiltratorInitialBasePolygon || null;
 
     if (isInitialBaseClaim) {
         console.log(`[DEBUG] Processing Initial Base Claim`);
@@ -61,7 +62,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
             console.log(`[DEBUG] Carving out base hole from ${victim.username}'s land`);
 
-            // 1. Cut a hole in the enemy territory
+            // Cut a hole in enemy
             await client.query(
                 `UPDATE territories
                  SET area = ST_MakeValid(ST_Difference(area, ST_MakeValid(ST_GeomFromGeoJSON($1))))
@@ -69,7 +70,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 [finalInfiltratorShapeGeoJSON, victim.owner_id]
             );
 
-            // 2. Add this shape to infiltrator's area
+            // Add to infiltrator's territory
             await client.query(
                 `INSERT INTO territories (owner_id, owner_name, username, area, area_sqm, original_base_point)
                  VALUES ($1, $2, $2, ST_MakeValid(ST_GeomFromGeoJSON($3)), $4, ST_SetSRID(ST_Point($5, $6), 4326))
@@ -80,9 +81,10 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 [userId, player.name, finalInfiltratorShapeGeoJSON, newAreaSqM, baseClaim.lng, baseClaim.lat]
             );
 
-            console.log(`[SUCCESS] Infiltrator base placed successfully`);
-            player.isInfiltratorActive = false;
+            // Store infiltrator base temporarily
+            player.infiltratorInitialBasePolygon = newAreaPolygon;
 
+            console.log(`[SUCCESS] Infiltrator base placed, waiting for expansion`);
             return {
                 finalTotalArea: newAreaSqM,
                 areaClaimed: newAreaSqM,
@@ -120,6 +122,14 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         if (newAreaSqM < 100) {
             socket.emit('claimRejected', { reason: 'Area too small.' });
             return null;
+        }
+
+        // Injected Logic: If infiltrator base exists, merge with expansion
+        if (isInfiltrator && infiltratorInitialBasePolygon) {
+            console.log(`[DEBUG] Merging infiltrator base with expansion shape`);
+            newAreaPolygon = turf.union(infiltratorInitialBasePolygon, newAreaPolygon);
+            newAreaSqM = turf.area(newAreaPolygon);
+            player.infiltratorInitialBasePolygon = null;
         }
 
         const existingRes = await client.query(`SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1`, [userId]);
