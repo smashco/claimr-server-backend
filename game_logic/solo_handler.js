@@ -5,10 +5,24 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const isInitialBaseClaim = !!(baseClaim && baseClaim.lat && baseClaim.lng);
     const playerPower = (player.power || '').toLowerCase();
 
-    // =================== INFILTRATOR LOGIC ===================
+    // =========================================================
+    // ⛔ GUARD: Prevent Infiltrator from falling into normal claim
+    // =========================================================
+    if (playerPower === 'infiltrator' && isInitialBaseClaim && !trail?.length) {
+        // Assume this is a misuse of baseClaim without staging first
+        const hasStaged = !!player.infiltratorStagedPolygon;
+        if (!hasStaged) {
+            socket.emit('claimRejected', { reason: 'Use your Infiltrator power correctly: first stage a point, then carve a path.' });
+            return null;
+        }
+    }
+
+    // =========================================================
+    // 🕵️ INFILTRATOR POWER LOGIC
+    // =========================================================
     if (playerPower === 'infiltrator') {
         if (isInitialBaseClaim) {
-            console.log(`\n\n[DEBUG] =================== NEW INFILTRATOR STAGING ===================`);
+            console.log(`[DEBUG] =================== INFILTRATOR STAGING ===================`);
             const center = [baseClaim.lng, baseClaim.lat];
             const radius = baseClaim.radius || 10;
             player.infiltratorStagedPolygon = turf.circle(center, radius, { units: 'meters' });
@@ -20,27 +34,26 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                     [userExisting.rows[0].area, JSON.stringify(player.infiltratorStagedPolygon.geometry)]
                 );
                 if (!intersectsCheck.rows[0].connects) {
-                    socket.emit('claimRejected', { reason: 'Infiltrator move must start inside your territory.' });
+                    socket.emit('claimRejected', { reason: 'Infiltrator staging must start inside your own land.' });
                     player.infiltratorStagedPolygon = null;
                     return null;
                 }
             } else {
-                socket.emit('claimRejected', { reason: 'You must have a base to start an infiltration.' });
+                socket.emit('claimRejected', { reason: 'You must have a base before using Infiltrator.' });
                 return null;
             }
 
-            console.log('[DEBUG] Infiltrator move staged successfully.');
             socket.emit('infiltratorMoveStaged');
             return null;
         } else {
-            console.log(`\n\n[DEBUG] =================== NEW INFILTRATOR CLAIM ===================`);
+            console.log(`[DEBUG] =================== INFILTRATOR EXECUTION ===================`);
 
             if (!player.infiltratorStagedPolygon) {
-                socket.emit('claimRejected', { reason: 'Infiltrator move not started. Place a start point first.' });
+                socket.emit('claimRejected', { reason: 'No Infiltrator staging point found. Tap your land first.' });
                 return null;
             }
-            if (trail.length < 3) {
-                socket.emit('claimRejected', { reason: 'Infiltration trail is too short.' });
+            if (!trail || trail.length < 3) {
+                socket.emit('claimRejected', { reason: 'Infiltrator trail must form a loop.' });
                 return null;
             }
 
@@ -49,7 +62,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             player.infiltratorStagedPolygon = null;
 
             const infiltratorAreaSqM = turf.area(fullInfiltratorPolygon);
-            console.log(`[DEBUG] Infiltrator total area (circle + trail): ${infiltratorAreaSqM.toFixed(2)} sqm`);
+            console.log(`[DEBUG] Infiltrator total area (trail + circle): ${infiltratorAreaSqM.toFixed(2)} sqm`);
 
             const fullInfilGeoJSON = JSON.stringify(fullInfiltratorPolygon.geometry);
             const fullInfilWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${fullInfilGeoJSON}'))`;
@@ -59,15 +72,13 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 WHERE ST_Intersects(area, ${fullInfilWKT}) AND owner_id != $1;
             `, [userId]);
 
-            console.log(`[DEBUG] Creating island in ${victims.rowCount} enemy territories.`);
+            console.log(`[DEBUG] Infiltrator targeting ${victims.rowCount} enemy territories`);
 
             let affectedOwnerIds = new Set();
             let carvedSuccess = false;
 
             for (const victim of victims.rows) {
                 affectedOwnerIds.add(victim.owner_id);
-
-                console.log(`[DEBUG] Carving island from ${victim.username}`);
 
                 const carved = await client.query(`
                     SELECT ST_Difference($1::geometry, ${fullInfilWKT}) AS updated_geom,
@@ -88,11 +99,11 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             }
 
             if (!carvedSuccess) {
-                socket.emit('claimRejected', { reason: 'Your infiltration must cut into enemy land.' });
+                socket.emit('claimRejected', { reason: 'Your loop must carve into enemy land.' });
                 return null;
             }
 
-            console.log(`[SUCCESS] Infiltrator island carved into enemy land. You do not own the area, only damage.`);
+            console.log(`[SUCCESS] Infiltrator island carved into enemy land.`);
             return {
                 finalTotalArea: 0,
                 areaClaimed: 0,
@@ -101,21 +112,20 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
 
-    // =================== NORMAL CLAIM LOGIC ===================
-    console.log(`\n\n[DEBUG] =================== NEW CLAIM ===================`);
+    // =========================================================
+    // 🧱 NORMAL BASE / EXPANSION CLAIM LOGIC
+    // =========================================================
+    console.log(`[DEBUG] =================== NEW CLAIM ===================`);
     console.log(`[DEBUG] Claim Type: ${isInitialBaseClaim ? 'BASE' : 'EXPANSION'}`);
 
     let newAreaPolygon, newAreaSqM;
 
     if (isInitialBaseClaim) {
-        console.log(`[DEBUG] Processing Initial Base Claim`);
         const center = [baseClaim.lng, baseClaim.lat];
         const radius = baseClaim.radius || 30;
-
         try {
             newAreaPolygon = turf.circle(center, radius, { units: 'meters' });
         } catch (err) {
-            console.log(`[ERROR] Failed to generate base circle: ${err.message}`);
             socket.emit('claimRejected', { reason: 'Invalid base location.' });
             return null;
         }
@@ -125,14 +135,12 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         const check = await client.query(`SELECT 1 FROM territories WHERE ST_Intersects(area, ${newAreaWKT});`);
 
         if (check.rowCount > 0) {
-            console.log(`[REJECTED] Base overlaps existing territory`);
             socket.emit('claimRejected', { reason: 'Base overlaps existing territory.' });
             return null;
         }
     } else {
-        console.log(`[DEBUG] Processing Expansion Claim`);
         if (trail.length < 3) {
-            socket.emit('claimRejected', { reason: 'Need at least 3 points.' });
+            socket.emit('claimRejected', { reason: 'Trail must form a polygon.' });
             return null;
         }
 
@@ -152,7 +160,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
         const existingRes = await client.query(`SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1`, [userId]);
         if (existingRes.rowCount === 0) {
-            socket.emit('claimRejected', { reason: 'You must claim a base before expanding.' });
+            socket.emit('claimRejected', { reason: 'You must place a base first.' });
             return null;
         }
 
@@ -162,7 +170,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         `, [JSON.stringify(newAreaPolygon.geometry), JSON.stringify(existingArea.geometry || existingArea)]);
 
         if (!intersects.rows[0].intersect) {
-            socket.emit('claimRejected', { reason: 'Your expansion must connect to your existing land.' });
+            socket.emit('claimRejected', { reason: 'Expansion must connect to your land.' });
             return null;
         }
     }
