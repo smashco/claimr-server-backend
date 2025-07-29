@@ -6,25 +6,30 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const isInitialBaseClaim = !!baseClaim;
     const isInfiltrator = player.isInfiltratorActive;
 
+    console.log(`[DEBUG] Claim Type: ${isInitialBaseClaim ? 'BASE' : 'EXPANSION'}`);
+    console.log(`[DEBUG] Infiltrator Active: ${isInfiltrator}`);
+
     let newAreaPolygon, newAreaSqM;
 
-    // === BASE CLAIM ===
     if (isInitialBaseClaim) {
-        console.log(`[DEBUG] Initial Base Claim`);
+        console.log(`[DEBUG] Processing Initial Base Claim`);
         const center = [baseClaim.lng, baseClaim.lat];
         const radius = baseClaim.radius || 30;
+
         try {
             newAreaPolygon = turf.circle(center, radius, { units: 'meters' });
-        } catch {
+        } catch (err) {
+            console.log(`[ERROR] Failed to generate base circle: ${err.message}`);
             socket.emit('claimRejected', { reason: 'Invalid base location.' });
             return null;
         }
 
         newAreaSqM = turf.area(newAreaPolygon);
         const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
+        console.log(`[DEBUG] Base circle area: ${newAreaSqM.toFixed(2)} sqm`);
 
         if (isInfiltrator) {
-            console.log(`[DEBUG] Infiltrator Base Mode`);
+            console.log(`[DEBUG] Attempting Infiltrator Base`);
             const result = await client.query(`
                 SELECT owner_id, username, is_shield_active, area
                 FROM territories
@@ -32,16 +37,20 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 LIMIT 1;
             `, [userId]);
 
+            console.log(`[DEBUG] Enemy Territories Overlapping: ${result.rowCount}`);
+
             if (result.rowCount === 0) {
                 socket.emit('claimRejected', { reason: 'Base must be inside enemy territory.' });
                 return null;
             }
 
             const victim = result.rows[0];
+            console.log(`[DEBUG] Infiltrator Target: ${victim.username}, Shield Active: ${victim.is_shield_active}`);
 
             if (victim.is_shield_active) {
-                console.log(`[REJECTED] Infiltrator blocked by ${victim.username}'s shield.`);
+                console.log(`[REJECTED] Blocked by shield of ${victim.username}`);
                 await client.query(`UPDATE territories SET is_shield_active = false WHERE owner_id = $1`, [victim.owner_id]);
+
                 const vSocketId = Object.keys(players).find(id => players[id]?.googleId === victim.owner_id);
                 if (vSocketId) io.to(vSocketId).emit('lastStandActivated', { chargesLeft: 0 });
 
@@ -50,7 +59,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 return null;
             }
 
-            // === ✅ Final FIX: Create hole in enemy territory ===
+            console.log(`[DEBUG] Carving out base hole from ${victim.username}'s land`);
             await client.query(`
                 UPDATE territories
                 SET area = ST_MakeValid(ST_Difference(area, ${newAreaWKT})),
@@ -66,7 +75,9 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                     original_base_point = ST_SetSRID(ST_Point($4, $5), 4326);
             `, [userId, player.name, newAreaSqM, baseClaim.lng, baseClaim.lat]);
 
+            console.log(`[SUCCESS] Infiltrator base placed successfully`);
             player.isInfiltratorActive = false;
+
             return {
                 finalTotalArea: newAreaSqM,
                 areaClaimed: newAreaSqM,
@@ -75,15 +86,15 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         } else {
             const check = await client.query(`SELECT 1 FROM territories WHERE ST_Intersects(area, ${newAreaWKT});`);
             if (check.rowCount > 0) {
+                console.log(`[REJECTED] Base overlaps existing territory`);
                 socket.emit('claimRejected', { reason: 'Base overlaps existing territory.' });
                 return null;
             }
         }
     } else {
-        // === EXPANSION CLAIM ===
-        console.log(`[DEBUG] Expansion Claim`);
-
+        console.log(`[DEBUG] Processing Expansion Claim`);
         if (trail.length < 3) {
+            console.log(`[REJECTED] Trail too short`);
             socket.emit('claimRejected', { reason: 'Need at least 3 points.' });
             return null;
         }
@@ -91,12 +102,15 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         const points = [...trail.map(p => [p.lng, p.lat]), [trail[0].lng, trail[0].lat]];
         try {
             newAreaPolygon = turf.polygon([points]);
-        } catch {
+        } catch (err) {
+            console.log(`[ERROR] Invalid polygon: ${err.message}`);
             socket.emit('claimRejected', { reason: 'Invalid polygon geometry.' });
             return null;
         }
 
         newAreaSqM = turf.area(newAreaPolygon);
+        console.log(`[DEBUG] Expansion Area: ${newAreaSqM.toFixed(2)} sqm`);
+
         if (newAreaSqM < 100) {
             socket.emit('claimRejected', { reason: 'Area too small.' });
             return null;
@@ -114,13 +128,13 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         `, [JSON.stringify(newAreaPolygon.geometry), JSON.stringify(existingArea.geometry || existingArea)]);
 
         if (!intersects.rows[0].intersect) {
+            console.log(`[REJECTED] Expansion does not connect`);
             socket.emit('claimRejected', { reason: 'Your expansion must connect to your existing land.' });
             return null;
         }
     }
 
-    // === SHARED LOGIC (expansion + infiltrator) ===
-    console.log(`[DEBUG] Calculating territory changes...`);
+    console.log(`[DEBUG] Calculating geometry overlaps and adjustments...`);
     const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
     const affectedOwnerIds = new Set([userId]);
 
@@ -132,11 +146,13 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
     `, [userId]);
 
+    console.log(`[DEBUG] Overlapping enemies found: ${victims.rowCount}`);
+
     for (const victim of victims.rows) {
         affectedOwnerIds.add(victim.owner_id);
 
         if (victim.is_shield_active) {
-            console.log(`[DEBUG] Shielded territory detected: ${victim.username}`);
+            console.log(`[DEBUG] ${victim.username} is shielded, skipping carve.`);
             await client.query(`UPDATE territories SET is_shield_active = false WHERE owner_id = $1`, [victim.owner_id]);
 
             const vSocketId = Object.keys(players).find(id => players[id]?.googleId === victim.owner_id);
@@ -148,7 +164,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
 
         if (isInfiltrator) {
-            console.log(`[DEBUG] Infiltrator: carving from ${victim.username}`);
+            console.log(`[DEBUG] Infiltrator carving from ${victim.username}`);
             const carve = await client.query(`SELECT ST_Difference($1::geometry, $2::geometry) AS final_geom`, [victim.area, attackerNetGainGeom]);
 
             await client.query(`
@@ -166,11 +182,11 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
 
-    // === Merge with user territory ===
     const userExisting = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
     let finalArea = attackerNetGainGeom;
 
     if (userExisting.rowCount > 0 && userExisting.rows[0].area) {
+        console.log(`[DEBUG] Merging with existing area`);
         const unionRes = await client.query(`SELECT ST_Union($1::geometry, $2::geometry) AS final_area`, [userExisting.rows[0].area, attackerNetGainGeom]);
         finalArea = unionRes.rows[0].final_area;
     }
@@ -181,6 +197,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
     const finalAreaGeoJSON = finalRes.rows[0].geojson;
     const finalAreaSqM = finalRes.rows[0].area_sqm || 0;
+    console.log(`[DEBUG] Final total area: ${finalAreaSqM.toFixed(2)} sqm`);
 
     if (!finalAreaGeoJSON || finalAreaSqM < 1) {
         socket.emit('claimRejected', { reason: 'Final area is invalid.' });
@@ -199,6 +216,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
     player.isInfiltratorActive = false;
 
+    console.log(`[SUCCESS] Claim committed: +${newAreaSqM.toFixed(2)} sqm`);
     return {
         finalTotalArea: finalAreaSqM,
         areaClaimed: newAreaSqM,
