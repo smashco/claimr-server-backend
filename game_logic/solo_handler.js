@@ -3,8 +3,6 @@ const turf = require('@turf/turf');
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const userId = player.googleId;
     const isInitialBaseClaim = !!(baseClaim && baseClaim.lat && baseClaim.lng);
-
-    // Normalize power string for safety
     const playerPower = (player.power || '').toLowerCase();
 
     // =================== INFILTRATOR LOGIC ===================
@@ -36,6 +34,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             return null;
         } else {
             console.log(`\n\n[DEBUG] =================== NEW INFILTRATOR CLAIM ===================`);
+
             if (!player.infiltratorStagedPolygon) {
                 socket.emit('claimRejected', { reason: 'Infiltrator move not started. Place a start point first.' });
                 return null;
@@ -46,84 +45,63 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             }
 
             const trailPolygon = turf.polygon([[...trail.map(p => [p.lng, p.lat]), [trail[0].lng, trail[0].lat]]]);
-            const newAreaPolygon = turf.union(player.infiltratorStagedPolygon, trailPolygon);
+            const fullInfiltratorPolygon = turf.union(player.infiltratorStagedPolygon, trailPolygon);
             player.infiltratorStagedPolygon = null;
 
-            const newAreaSqM = turf.area(newAreaPolygon);
-            console.log(`[DEBUG] Infiltrator attack area: ${newAreaSqM.toFixed(2)} sqm`);
+            const infiltratorAreaSqM = turf.area(fullInfiltratorPolygon);
+            console.log(`[DEBUG] Infiltrator total area (circle + trail): ${infiltratorAreaSqM.toFixed(2)} sqm`);
 
-            const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
-            const affectedOwnerIds = new Set([userId]);
-            let totalStolenGeom = null;
+            const fullInfilGeoJSON = JSON.stringify(fullInfiltratorPolygon.geometry);
+            const fullInfilWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${fullInfilGeoJSON}'))`;
 
             const victims = await client.query(`
                 SELECT owner_id, username, area FROM territories
-                WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
+                WHERE ST_Intersects(area, ${fullInfilWKT}) AND owner_id != $1;
             `, [userId]);
 
-            console.log(`[DEBUG] Infiltrating ${victims.rowCount} enemy territories.`);
+            console.log(`[DEBUG] Creating island in ${victims.rowCount} enemy territories.`);
+
+            let affectedOwnerIds = new Set();
+            let carvedSuccess = false;
 
             for (const victim of victims.rows) {
                 affectedOwnerIds.add(victim.owner_id);
-                console.log(`[DEBUG] Carving from ${victim.username}`);
 
-                const stolenPieceRes = await client.query(
-                    `SELECT ST_Intersection(${newAreaWKT}, $1::geometry) as stolen_geom`, [victim.area]
-                );
-                const stolenPiece = stolenPieceRes.rows[0].stolen_geom;
+                console.log(`[DEBUG] Carving island from ${victim.username}`);
 
-                await client.query(`
-                    UPDATE territories
-                    SET area = ST_Difference(area, $1::geometry),
-                        area_sqm = ST_Area(ST_Difference(area, $1::geometry)::geography)
-                    WHERE owner_id = $2
-                `, [stolenPiece, victim.owner_id]);
+                const carved = await client.query(`
+                    SELECT ST_Difference($1::geometry, ${fullInfilWKT}) AS updated_geom,
+                           ST_Area(ST_Difference($1::geometry, ${fullInfilWKT})::geography) AS updated_area
+                `, [victim.area]);
 
-                if (!totalStolenGeom) {
-                    totalStolenGeom = stolenPiece;
-                } else {
-                    const unionRes = await client.query(
-                        `SELECT ST_Union($1::geometry, $2::geometry) as geom`, [totalStolenGeom, stolenPiece]
-                    );
-                    totalStolenGeom = unionRes.rows[0].geom;
+                const updatedGeom = carved.rows[0].updated_geom;
+                const updatedAreaSqM = carved.rows[0].updated_area;
+
+                if (updatedGeom && updatedAreaSqM > 0) {
+                    carvedSuccess = true;
+                    await client.query(`
+                        UPDATE territories
+                        SET area = $1::geometry, area_sqm = $2
+                        WHERE owner_id = $3
+                    `, [updatedGeom, updatedAreaSqM, victim.owner_id]);
                 }
             }
 
-            if (!totalStolenGeom) {
-                console.log(`[REJECTED] Infiltration did not overlap with any enemy territory.`);
-                socket.emit('claimRejected', { reason: 'Your loop must enclose enemy territory.' });
+            if (!carvedSuccess) {
+                socket.emit('claimRejected', { reason: 'Your infiltration must cut into enemy land.' });
                 return null;
             }
 
-            const userExisting = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
-            const unionRes = await client.query(`
-                SELECT ST_Union($1::geometry, $2::geometry) AS final_area
-            `, [userExisting.rows[0].area, totalStolenGeom]);
-            const finalArea = unionRes.rows[0].final_area;
-
-            const patched = await client.query(`
-                SELECT ST_AsGeoJSON(ST_CollectionExtract(ST_Multi(ST_MakeValid($1)), 3)) AS geojson,
-                       ST_Area(ST_MakeValid($1)::geography) AS area_sqm;
-            `, [finalArea]);
-
-            const finalAreaGeoJSON = patched.rows[0].geojson;
-            const finalAreaSqM = patched.rows[0].area_sqm || 0;
-
-            await client.query(`
-                UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2
-                WHERE owner_id = $3
-            `, [finalAreaGeoJSON, finalAreaSqM, userId]);
-
-            console.log(`[SUCCESS] Infiltration committed: +${newAreaSqM.toFixed(2)} sqm`);
+            console.log(`[SUCCESS] Infiltrator island carved into enemy land. You do not own the area, only damage.`);
             return {
-                finalTotalArea: finalAreaSqM,
-                areaClaimed: newAreaSqM,
+                finalTotalArea: 0,
+                areaClaimed: 0,
                 ownerIdsToUpdate: Array.from(affectedOwnerIds)
             };
         }
     }
 
-    // =============== ORIGINAL CLAIM LOGIC ===============
+    // =================== NORMAL CLAIM LOGIC ===================
     console.log(`\n\n[DEBUG] =================== NEW CLAIM ===================`);
     console.log(`[DEBUG] Claim Type: ${isInitialBaseClaim ? 'BASE' : 'EXPANSION'}`);
 
