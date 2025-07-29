@@ -6,53 +6,48 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const playerPower = (player.power || '').toLowerCase();
 
     // =========================================================
-    // ⛔ GUARD: Prevent Infiltrator from falling into normal claim
+    // ⛔ FAULTY GUARD BLOCK REMOVED
+    // The main 'if (playerPower === 'infiltrator')' block below
+    // correctly handles the logic for both staging and execution.
+    // The previous guard was incorrectly rejecting the first step (staging).
     // =========================================================
-    if (playerPower === 'infiltrator' && isInitialBaseClaim && !trail?.length) {
-        const hasStaged = !!player.infiltratorStagedPolygon;
-        if (!hasStaged) {
-            socket.emit('claimRejected', { reason: 'Use your Infiltrator power correctly: first stage a point, then carve a path.' });
-            return null;
-        }
-    }
 
     // =========================================================
     // 🕵️ INFILTRATOR POWER LOGIC
     // =========================================================
     if (playerPower === 'infiltrator') {
-        // --- Step 1: User places the initial circle in their own base ---
+        // --- Step 1: User places the initial circle in enemy territory (STAGING) ---
         if (isInitialBaseClaim) {
             console.log(`[DEBUG] =================== INFILTRATOR STAGING (INITIAL CIRCLE) ===================`);
             const center = [baseClaim.lng, baseClaim.lat];
-            const radius = baseClaim.radius || 10;
+            // NOTE: The base claim for Infiltrator is just for position, not a real claim yet.
+            // We use a fixed radius for the staging circle.
+            const radius = baseClaim.radius || 10; 
             player.infiltratorStagedPolygon = turf.circle(center, radius, { units: 'meters' });
 
-            const userExisting = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
-            if (userExisting.rowCount > 0 && userExisting.rows[0].area) {
-                // Check that the staging circle is inside the player's own land
-                const intersectsCheck = await client.query(
-                    `SELECT ST_Intersects($1::geometry, ST_GeomFromGeoJSON($2)) as connects`,
-                    [userExisting.rows[0].area, JSON.stringify(player.infiltratorStagedPolygon.geometry)]
-                );
-                if (!intersectsCheck.rows[0].connects) {
-                    socket.emit('claimRejected', { reason: 'Infiltrator staging must start inside your own land.' });
-                    player.infiltratorStagedPolygon = null;
-                    return null;
-                }
-            } else {
-                socket.emit('claimRejected', { reason: 'You must have a base before using Infiltrator.' });
+            // Check if staging point is inside an ENEMY territory
+            const enemyCheck = await client.query(
+                `SELECT 1 FROM territories WHERE ST_Intersects(area, ST_GeomFromGeoJSON($1)) AND owner_id != $2`,
+                [JSON.stringify(player.infiltratorStagedPolygon.geometry), userId]
+            );
+
+            if (enemyCheck.rowCount === 0) {
+                socket.emit('claimRejected', { reason: 'Infiltrator must start inside enemy territory.' });
+                player.infiltratorStagedPolygon = null;
                 return null;
             }
 
+            console.log(`[DEBUG] Infiltrator circle staged successfully inside enemy territory.`);
+            // Let the client know the staging was successful and they can now start carving their path
             socket.emit('infiltratorMoveStaged');
-            return null;
+            return null; // Staging is complete, wait for the trail.
         } 
-        // --- Step 2: User carves a path into enemy territory and returns to their base ---
+        // --- Step 2: User carves a path and returns to the initial circle to complete the claim ---
         else {
             console.log(`[DEBUG] =================== INFILTRATOR EXECUTION (CARVE & MERGE) ===================`);
 
             if (!player.infiltratorStagedPolygon) {
-                socket.emit('claimRejected', { reason: 'No Infiltrator staging point found. Tap your land first.' });
+                socket.emit('claimRejected', { reason: 'No Infiltrator staging point found. Tap inside enemy land first.' });
                 return null;
             }
             if (!trail || trail.length < 3) {
@@ -64,7 +59,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             const trailPolygon = turf.polygon([[...trail.map(p => [p.lng, p.lat]), [trail[0].lng, trail[0].lat]]]);
 
             // --- Step 3: Merge the initial circle with the carved area ---
-            // This combines the starting circle with the expansion trail into one big shape.
             const fullInfiltratorPolygon = turf.union(player.infiltratorStagedPolygon, trailPolygon);
             player.infiltratorStagedPolygon = null; // Clear the staged polygon for the next use
 
@@ -74,51 +68,64 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             const fullInfilGeoJSON = JSON.stringify(fullInfiltratorPolygon.geometry);
             const fullInfilWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${fullInfilGeoJSON}'))`;
 
+            // --- Step 4: Add player's OWN territory to the carving shape ---
+            // This ensures the carved path connects back to their base to create a valid hole.
+            const userExisting = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
+            if (userExisting.rowCount === 0 || !userExisting.rows[0].area) {
+                 socket.emit('claimRejected', { reason: 'You must have a base to complete the infiltration.' });
+                 return null;
+            }
+
+            // Combine the new shape with the player's existing territory
+            const combinedQuery = await client.query(
+                `SELECT ST_Union($1::geometry, ${fullInfilWKT}) as combined_geom`,
+                [userExisting.rows[0].area]
+            );
+            const finalCarvingShapeWKT = `ST_MakeValid($1::geometry)`;
+            const finalCarvingShapeGeom = combinedQuery.rows[0].combined_geom;
+
+
             // Find all enemy territories that this new shape intersects with
             const victims = await client.query(`
                 SELECT owner_id, username, area FROM territories
-                WHERE ST_Intersects(area, ${fullInfilWKT}) AND owner_id != $1;
-            `, [userId]);
+                WHERE ST_Intersects(area, $1::geometry) AND owner_id != $2;
+            `, [finalCarvingShapeGeom, userId]);
 
-            console.log(`[DEBUG] Infiltrator targeting ${victims.rowCount} enemy territories`);
+            console.log(`[DEBUG] Infiltrator targeting ${victims.rowCount} enemy territories for carving.`);
 
             let affectedOwnerIds = new Set();
             let carvedSuccess = false;
 
-            // --- Step 4: Use the total merged area to create a hole/island in enemy land ---
             for (const victim of victims.rows) {
                 affectedOwnerIds.add(victim.owner_id);
 
-                // The ST_Difference function subtracts the infiltrator's shape from the victim's territory.
+                // The ST_Difference function subtracts the final carving shape from the victim's territory.
                 const carved = await client.query(`
-                    SELECT ST_Difference($1::geometry, ${fullInfilWKT}) AS updated_geom,
-                           ST_Area(ST_Difference($1::geometry, ${fullInfilWKT})::geography) AS updated_area
-                `, [victim.area]);
+                    SELECT ST_Difference($1::geometry, $2::geometry) AS updated_geom,
+                           ST_Area(ST_Difference($1::geometry, $2::geometry)::geography) AS updated_area
+                `, [victim.area, finalCarvingShapeGeom]);
 
                 const updatedGeom = carved.rows[0].updated_geom;
                 const updatedAreaSqM = carved.rows[0].updated_area;
 
                 if (updatedGeom && updatedAreaSqM > 0) {
                     carvedSuccess = true;
-                    // Update the victim's territory with the new, smaller geometry
                     await client.query(`
                         UPDATE territories
                         SET area = $1::geometry, area_sqm = $2
                         WHERE owner_id = $3
                     `, [updatedGeom, updatedAreaSqM, victim.owner_id]);
                 } else {
-                    // If the difference is empty, the victim lost all their land
                     await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1`, [victim.owner_id]);
                 }
             }
 
             if (!carvedSuccess && victims.rowCount === 0) {
-                socket.emit('claimRejected', { reason: 'Your loop must carve into enemy land.' });
+                socket.emit('claimRejected', { reason: 'Your loop must carve into enemy land and connect to your own.' });
                 return null;
             }
 
             console.log(`[SUCCESS] Infiltrator island carved into enemy land.`);
-            // Infiltrator does not gain any territory, only destroys
             return {
                 finalTotalArea: 0,
                 areaClaimed: 0,
@@ -133,6 +140,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     console.log(`[DEBUG] =================== NEW CLAIM ===================`);
     console.log(`[DEBUG] Claim Type: ${isInitialBaseClaim ? 'BASE' : 'EXPANSION'}`);
 
+    // ... (The rest of the normal claim logic remains unchanged) ...
     let newAreaPolygon, newAreaSqM;
 
     if (isInitialBaseClaim) {
