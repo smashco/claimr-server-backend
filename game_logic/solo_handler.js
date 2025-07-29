@@ -4,11 +4,11 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const userId = player.googleId;
     const playerName = player.name;
     const isInitialClaim = !!baseClaim;
-
     const activePower = player.activePower;
     const isInfiltrator = activePower === 'INFILTRATOR';
 
     console.log(`[DEBUG] [START] Player: ${playerName}, ID: ${userId}, Power: ${activePower}, InitialClaim: ${isInitialClaim}`);
+    console.log('[DEBUG] Full player object:', JSON.stringify(player, null, 2));
 
     let newPolygon;
 
@@ -18,7 +18,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         const radius = baseClaim.radius || 30;
         newPolygon = turf.circle(center, radius, { steps: 32, units: 'meters' });
         const area = turf.area(newPolygon);
-
         console.log(`[DEBUG] Generated circle area: ${area.toFixed(2)} sqm`);
 
         // Check if player already owns any territory
@@ -46,8 +45,8 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             }
 
             if (isInfiltrator && hasOwnTerritory) {
-                console.log(`[REJECTED] Infiltrator only works with zero territory.`);
-                socket.emit('claimRejected', { reason: 'Infiltrator only works before you claim your first base.' });
+                console.log(`[REJECTED] INFILTRATOR only works before claiming your first base.`);
+                socket.emit('claimRejected', { reason: 'INFILTRATOR can only be used before your first claim.' });
                 player.activePower = null;
                 return;
             }
@@ -56,13 +55,12 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 console.log(`[INFILTRATOR BLOCKED] Enemy shield absorbed it.`);
                 await client.query(`UPDATE territories SET is_shield_active = false WHERE id = $1`, [target.id]);
                 player.activePower = null;
-                socket.emit('claimRejected', { reason: 'Enemy shield absorbed your Infiltrator. Shield removed. Power used.' });
+                socket.emit('claimRejected', { reason: 'Enemy shield absorbed INFILTRATOR. Shield removed. Power consumed.' });
                 return;
             }
 
-            // Enemy not shielded and player has Infiltrator power
-            console.log(`[SUCCESS] INFILTRATOR carving territory from enemy...`);
-
+            // Carve enemy land
+            console.log(`[SUCCESS] INFILTRATOR carving enemy territory...`);
             await client.query(`
                 UPDATE territories SET area = ST_Difference(area, ST_GeomFromGeoJSON($1)) WHERE id = $2
             `, [JSON.stringify(newPolygon.geometry), target.id]);
@@ -73,26 +71,27 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             `, [userId, JSON.stringify(newPolygon.geometry)]);
 
             player.activePower = null;
-            socket.emit('claimAccepted', { message: `INFILTRATOR power claim successful!` });
-            console.log(`[SUCCESS] Claim succeeded using INFILTRATOR`);
+            socket.emit('claimAccepted', { message: 'INFILTRATOR claim successful!' });
+            console.log(`[SUCCESS] INFILTRATOR claim succeeded.`);
             return;
         }
 
+        // INFILTRATOR used but no enemy
         if (isInfiltrator) {
             console.log(`[REJECTED] INFILTRATOR failed: no enemy target.`);
-            socket.emit('claimRejected', { reason: 'INFILTRATOR failed: no enemy territory found.' });
+            socket.emit('claimRejected', { reason: 'No enemy territory found. INFILTRATOR wasted.' });
             player.activePower = null;
             return;
         }
 
-        // Normal base claim (no overlaps)
+        // Normal base claim
         await client.query(`
             INSERT INTO territories (owner_id, area, mode, is_shield_active)
             VALUES ($1, ST_GeomFromGeoJSON($2), 'solo', false)
         `, [userId, JSON.stringify(newPolygon.geometry)]);
 
         socket.emit('claimAccepted', { message: 'Base claimed successfully!' });
-        console.log(`[SUCCESS] Base claim done.`);
+        console.log(`[SUCCESS] Base claim completed.`);
         return;
     }
 
@@ -106,17 +105,17 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const trailCoords = [...trail.map(p => [p.lng, p.lat]), [trail[0].lng, trail[0].lat]];
     newPolygon = turf.polygon([trailCoords]);
     const area = turf.area(newPolygon);
-
     console.log(`[DEBUG] Expansion area: ${area.toFixed(2)} sqm`);
 
     if (area < 100) {
-        console.log(`[REJECTED] Expansion area too small.`);
+        console.log(`[REJECTED] Expansion too small.`);
         socket.emit('claimRejected', { reason: 'Expansion too small. Minimum 100 sqm required.' });
         return;
     }
 
     const playerTerritories = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
     if (playerTerritories.rows.length === 0) {
+        console.log(`[REJECTED] Expansion attempted without a base.`);
         socket.emit('claimRejected', { reason: 'You need a base before expanding.' });
         return;
     }
@@ -127,8 +126,8 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     `, [JSON.stringify(newPolygon.geometry), baseArea]);
 
     if (!connectCheck.rows[0].connected) {
-        console.log(`[REJECTED] Expansion not connected to current territory.`);
-        socket.emit('claimRejected', { reason: 'Your expansion must touch your territory.' });
+        console.log(`[REJECTED] Expansion not connected.`);
+        socket.emit('claimRejected', { reason: 'Your expansion must connect to your existing territory.' });
         return;
     }
 
@@ -137,7 +136,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     `, [JSON.stringify(newPolygon.geometry), userId]);
 
     socket.emit('claimAccepted', { message: 'Territory expanded!' });
-    console.log(`[SUCCESS] Expansion claim added.`);
+    console.log(`[SUCCESS] Expansion added to territory.`);
 }
 
 module.exports = handleSoloClaim;
