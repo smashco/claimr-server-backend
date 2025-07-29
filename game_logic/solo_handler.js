@@ -9,7 +9,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     // ⛔ GUARD: Prevent Infiltrator from falling into normal claim
     // =========================================================
     if (playerPower === 'infiltrator' && isInitialBaseClaim && !trail?.length) {
-        // Assume this is a misuse of baseClaim without staging first
         const hasStaged = !!player.infiltratorStagedPolygon;
         if (!hasStaged) {
             socket.emit('claimRejected', { reason: 'Use your Infiltrator power correctly: first stage a point, then carve a path.' });
@@ -58,11 +57,19 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             }
 
             const trailPolygon = turf.polygon([[...trail.map(p => [p.lng, p.lat]), [trail[0].lng, trail[0].lat]]]);
-            const fullInfiltratorPolygon = turf.union(player.infiltratorStagedPolygon, trailPolygon);
-            player.infiltratorStagedPolygon = null;
+            const stagedCenter = turf.center(player.infiltratorStagedPolygon).geometry.coordinates;
+            const stagedPoint = turf.point(stagedCenter);
+            const trailTouchesBase = turf.booleanPointInPolygon(stagedPoint, trailPolygon);
 
+            if (!trailTouchesBase) {
+                socket.emit('claimRejected', { reason: 'Trail must reconnect to the initial circle.' });
+                return null;
+            }
+
+            const fullInfiltratorPolygon = turf.union(player.infiltratorStagedPolygon, trailPolygon);
             const infiltratorAreaSqM = turf.area(fullInfiltratorPolygon);
             console.log(`[DEBUG] Infiltrator total area (trail + circle): ${infiltratorAreaSqM.toFixed(2)} sqm`);
+            player.infiltratorStagedPolygon = null;
 
             const fullInfilGeoJSON = JSON.stringify(fullInfiltratorPolygon.geometry);
             const fullInfilWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${fullInfilGeoJSON}'))`;
