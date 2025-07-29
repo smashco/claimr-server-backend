@@ -123,7 +123,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
 
-    // === SHARED LOGIC (expansion + infiltrator) ===
+    // === SHARED LOGIC (expansion + REGULAR base claim) ===
     console.log(`[DEBUG] Calculating territory changes...`);
     const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
     const affectedOwnerIds = new Set([userId]);
@@ -148,25 +148,16 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
             const diff = await client.query(`SELECT ST_Difference($1::geometry, $2::geometry) AS final_geom`, [attackerNetGainGeom, victim.area]);
             attackerNetGainGeom = diff.rows[0].final_geom;
-            continue;
-        }
-
-        if (isInfiltrator) {
-            console.log(`[DEBUG] Infiltrator: carving from ${victim.username}`);
-            const carve = await client.query(`SELECT ST_Difference($1::geometry, $2::geometry) AS final_geom`, [victim.area, attackerNetGainGeom]);
-
-            await client.query(`
-                UPDATE territories
-                SET area = ST_MakeValid($1::geometry),
-                    area_sqm = ST_Area(ST_MakeValid($1::geometry)::geography)
-                WHERE owner_id = $2;
-            `, [carve.rows[0].final_geom, victim.owner_id]);
         } else {
+            // ========================= THE FIX IS HERE =========================
+            // This 'else' block now correctly handles ALL unshielded victims for expansions and regular base claims.
+            // The incorrect, redundant `if (isInfiltrator)` check has been removed.
             console.log(`[DEBUG] Absorbing ${victim.username}`);
             const merge = await client.query(`SELECT ST_Union($1::geometry, $2::geometry) AS final_geom`, [attackerNetGainGeom, victim.area]);
             attackerNetGainGeom = merge.rows[0].final_geom;
 
             await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1`, [victim.owner_id]);
+            // ======================= END OF THE FIX ========================
         }
     }
 
