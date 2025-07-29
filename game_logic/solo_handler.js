@@ -1,9 +1,9 @@
 const turf = require('@turf/turf');
-// Import the specific interaction handlers
 const { handleShieldHit } = require('./interactions/shield_interaction');
 const { handleWipeout } = require('./interactions/unshielded_interaction');
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
+    // ... all the function logic is the same ...
     console.log(`\n\n[DEBUG] =================== NEW CLAIM ===================`);
     const userId = player.googleId;
     const isInitialBaseClaim = !!baseClaim;
@@ -12,7 +12,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
     let newAreaPolygon, newAreaSqM;
 
-    // ... (rest of the initial base claim and expansion logic remains the same)
     if (isInitialBaseClaim) {
         console.log(`[DEBUG] Processing Initial Base Claim`);
         const center = [baseClaim.lng, baseClaim.lat];
@@ -79,8 +78,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
 
-
-    // === INTERACTION LOGIC ===
     console.log(`[DEBUG] Calculating geometry overlaps and adjustments...`);
     const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
     const affectedOwnerIds = new Set([userId]);
@@ -105,7 +102,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
 
-    // ... (rest of the final merge and database update logic remains the same)
     const userExisting = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
     let finalArea = attackerNetGainGeom;
 
@@ -150,4 +146,5 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     };
 }
 
-module.exports = { handleSoloClaim }; // Assuming this is how you export
+// Corrected export: exporting the function directly
+module.exports = handleSoloClaim;
