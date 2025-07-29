@@ -7,12 +7,12 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
     const activePower = player.activePower;
     const isInfiltrator = activePower === 'INFILTRATOR';
-    const isShieldBreaker = activePower === 'SHIELD_BREAKER';
 
     console.log(`[DEBUG] [START] Player: ${playerName}, ID: ${userId}, Power: ${activePower}, InitialClaim: ${isInitialClaim}`);
 
     let newPolygon;
 
+    // ========== Base Claim ==========
     if (isInitialClaim) {
         const center = [baseClaim.lng, baseClaim.lat];
         const radius = baseClaim.radius || 30;
@@ -39,9 +39,9 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             const target = enemyQuery.rows[0];
             const shielded = target.is_shield_active;
 
-            if (!isInfiltrator && !isShieldBreaker) {
+            if (!isInfiltrator) {
                 console.log(`[REJECTED] Power required to invade.`);
-                socket.emit('claimRejected', { reason: 'Use INFILTRATOR or SHIELD_BREAKER to invade enemy territory.' });
+                socket.emit('claimRejected', { reason: 'Use INFILTRATOR to invade enemy territory.' });
                 return;
             }
 
@@ -53,27 +53,15 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             }
 
             if (shielded) {
-                console.log(`[SHIELD DETECTED] Enemy shield is ON. Player power: ${activePower}`);
-
-                if (isShieldBreaker) {
-                    await client.query(`UPDATE territories SET is_shield_active = false WHERE id = $1`, [target.id]);
-                    player.activePower = null;
-                    console.log(`[SHIELD BREAKER USED] Shield removed. Claim denied.`);
-                    socket.emit('claimRejected', { reason: 'Shield broken. Try your next claim now.' });
-                    return;
-                }
-
-                if (isInfiltrator) {
-                    await client.query(`UPDATE territories SET is_shield_active = false WHERE id = $1`, [target.id]);
-                    player.activePower = null;
-                    console.log(`[INFILTRATOR BLOCKED] Enemy shield absorbed it. Power consumed.`);
-                    socket.emit('claimRejected', { reason: 'Enemy shield absorbed your Infiltrator. Power used.' });
-                    return;
-                }
+                console.log(`[INFILTRATOR BLOCKED] Enemy shield absorbed it.`);
+                await client.query(`UPDATE territories SET is_shield_active = false WHERE id = $1`, [target.id]);
+                player.activePower = null;
+                socket.emit('claimRejected', { reason: 'Enemy shield absorbed your Infiltrator. Shield removed. Power used.' });
+                return;
             }
 
-            // No shield and correct power
-            console.log(`[SUCCESS] ${activePower} carving territory from enemy...`);
+            // Enemy not shielded and player has Infiltrator power
+            console.log(`[SUCCESS] INFILTRATOR carving territory from enemy...`);
 
             await client.query(`
                 UPDATE territories SET area = ST_Difference(area, ST_GeomFromGeoJSON($1)) WHERE id = $2
@@ -85,18 +73,19 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             `, [userId, JSON.stringify(newPolygon.geometry)]);
 
             player.activePower = null;
-            socket.emit('claimAccepted', { message: `${activePower} power claim successful!` });
-            console.log(`[SUCCESS] Claim succeeded using ${activePower}`);
+            socket.emit('claimAccepted', { message: `INFILTRATOR power claim successful!` });
+            console.log(`[SUCCESS] Claim succeeded using INFILTRATOR`);
             return;
         }
 
-        if (isInfiltrator || isShieldBreaker) {
-            console.log(`[REJECTED] ${activePower} failed: no enemy target.`);
-            socket.emit('claimRejected', { reason: `${activePower} failed: no enemy territory found.` });
+        if (isInfiltrator) {
+            console.log(`[REJECTED] INFILTRATOR failed: no enemy target.`);
+            socket.emit('claimRejected', { reason: 'INFILTRATOR failed: no enemy territory found.' });
             player.activePower = null;
             return;
         }
 
+        // Normal base claim (no overlaps)
         await client.query(`
             INSERT INTO territories (owner_id, area, mode, is_shield_active)
             VALUES ($1, ST_GeomFromGeoJSON($2), 'solo', false)
