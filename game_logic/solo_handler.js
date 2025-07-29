@@ -25,7 +25,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
 
         newAreaSqM = turf.area(newAreaPolygon);
-        const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
+        const finalInfiltratorShapeGeoJSON = JSON.stringify(newAreaPolygon.geometry);
         console.log(`[DEBUG] Base circle area: ${newAreaSqM.toFixed(2)} sqm`);
 
         if (isInfiltrator) {
@@ -33,9 +33,9 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             const result = await client.query(`
                 SELECT owner_id, username, is_shield_active, area
                 FROM territories
-                WHERE ST_Contains(area, ${newAreaWKT}) AND owner_id != $1
+                WHERE ST_Contains(area, ST_MakeValid(ST_GeomFromGeoJSON($1))) AND owner_id != $2
                 LIMIT 1;
-            `, [userId]);
+            `, [finalInfiltratorShapeGeoJSON, userId]);
 
             console.log(`[DEBUG] Enemy Territories Overlapping: ${result.rowCount}`);
 
@@ -60,21 +60,25 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             }
 
             console.log(`[DEBUG] Carving out base hole from ${victim.username}'s land`);
-            await client.query(`
-                UPDATE territories
-                SET area = ST_MakeValid(ST_Difference(area, ${newAreaWKT})),
-                    area_sqm = ST_Area(ST_MakeValid(ST_Difference(area, ${newAreaWKT}))::geography)
-                WHERE owner_id = $1;
-            `, [victim.owner_id]);
 
-            await client.query(`
-                INSERT INTO territories (owner_id, owner_name, username, area, area_sqm, original_base_point)
-                VALUES ($1, $2, $2, ST_MakeValid(ST_GeomFromGeoJSON($3)), $4, ST_SetSRID(ST_Point($5, $6), 4326))
-                ON CONFLICT (owner_id) DO UPDATE
-                SET area = ST_Union(territories.area, ST_MakeValid(ST_GeomFromGeoJSON($3))),
-                    area_sqm = ST_Area(ST_Union(territories.area, ST_MakeValid(ST_GeomFromGeoJSON($3)))::geography),
-                    original_base_point = ST_SetSRID(ST_Point($5, $6), 4326);
-            `, [userId, player.name, JSON.stringify(newAreaPolygon.geometry), newAreaSqM, baseClaim.lng, baseClaim.lat]);
+            // 1. Cut a hole in the enemy territory
+            await client.query(
+                `UPDATE territories
+                 SET area = ST_MakeValid(ST_Difference(area, ST_MakeValid(ST_GeomFromGeoJSON($1))))
+                 WHERE owner_id = $2`,
+                [finalInfiltratorShapeGeoJSON, victim.owner_id]
+            );
+
+            // 2. Add this shape to infiltrator's area
+            await client.query(
+                `INSERT INTO territories (owner_id, owner_name, username, area, area_sqm, original_base_point)
+                 VALUES ($1, $2, $2, ST_MakeValid(ST_GeomFromGeoJSON($3)), $4, ST_SetSRID(ST_Point($5, $6), 4326))
+                 ON CONFLICT (owner_id) DO UPDATE
+                 SET area = ST_CollectionExtract(ST_Union(territories.area, ST_MakeValid(ST_GeomFromGeoJSON($3))), 3),
+                     area_sqm = ST_Area(ST_Union(territories.area, ST_MakeValid(ST_GeomFromGeoJSON($3)))::geography),
+                     original_base_point = territories.original_base_point`,
+                [userId, player.name, finalInfiltratorShapeGeoJSON, newAreaSqM, baseClaim.lng, baseClaim.lat]
+            );
 
             console.log(`[SUCCESS] Infiltrator base placed successfully`);
             player.isInfiltratorActive = false;
@@ -85,6 +89,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 ownerIdsToUpdate: [victim.owner_id, userId]
             };
         } else {
+            const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
             const check = await client.query(`SELECT 1 FROM territories WHERE ST_Intersects(area, ${newAreaWKT});`);
             if (check.rowCount > 0) {
                 console.log(`[REJECTED] Base overlaps existing territory`);
@@ -212,12 +217,12 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     await client.query(`
         INSERT INTO territories (owner_id, owner_name, username, area, area_sqm, original_base_point)
         VALUES ($1, $2, $2, ST_GeomFromGeoJSON($3), $4,
-            CASE WHEN ${isInitialBaseClaim} THEN ST_SetSRID(ST_Point($5, $6), 4326) ELSE NULL END)
+            CASE WHEN $5 THEN ST_SetSRID(ST_Point($6, $7), 4326) ELSE NULL END)
         ON CONFLICT (owner_id) DO UPDATE
         SET area = ST_GeomFromGeoJSON($3), area_sqm = $4,
-            original_base_point = CASE WHEN ${isInitialBaseClaim} THEN ST_SetSRID(ST_Point($5, $6), 4326)
+            original_base_point = CASE WHEN $5 THEN ST_SetSRID(ST_Point($6, $7), 4326)
                                        ELSE territories.original_base_point END;
-    `, [userId, player.name, finalAreaGeoJSON, finalAreaSqM, baseClaim?.lng, baseClaim?.lat]);
+    `, [userId, player.name, finalAreaGeoJSON, finalAreaSqM, isInitialBaseClaim, baseClaim?.lng, baseClaim?.lat]);
 
     player.isInfiltratorActive = false;
 
