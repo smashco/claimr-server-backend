@@ -25,7 +25,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
         if (isInfiltrator) {
             console.log(`[DEBUG] Infiltrator Base Mode`);
-
             const result = await client.query(`
                 SELECT owner_id, username, is_shield_active, area
                 FROM territories
@@ -42,8 +41,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
             if (victim.is_shield_active) {
                 console.log(`[REJECTED] Infiltrator blocked by ${victim.username}'s shield.`);
-                await client.query('UPDATE territories SET is_shield_active = false WHERE owner_id = $1', [victim.owner_id]);
-
+                await client.query(`UPDATE territories SET is_shield_active = false WHERE owner_id = $1`, [victim.owner_id]);
                 const vSocketId = Object.keys(players).find(id => players[id]?.googleId === victim.owner_id);
                 if (vSocketId) io.to(vSocketId).emit('lastStandActivated', { chargesLeft: 0 });
 
@@ -52,7 +50,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 return null;
             }
 
-            // Carve hole
+            // === ✅ Final FIX: Create hole in enemy territory ===
             await client.query(`
                 UPDATE territories
                 SET area = ST_MakeValid(ST_Difference(area, ${newAreaWKT})),
@@ -75,9 +73,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 ownerIdsToUpdate: [victim.owner_id, userId]
             };
         } else {
-            const check = await client.query(`
-                SELECT 1 FROM territories WHERE ST_Intersects(area, ${newAreaWKT});
-            `);
+            const check = await client.query(`SELECT 1 FROM territories WHERE ST_Intersects(area, ${newAreaWKT});`);
             if (check.rowCount > 0) {
                 socket.emit('claimRejected', { reason: 'Base overlaps existing territory.' });
                 return null;
@@ -170,7 +166,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
 
-    // Final merge with player's territory
+    // === Merge with user territory ===
     const userExisting = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
     let finalArea = attackerNetGainGeom;
 
