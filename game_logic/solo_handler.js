@@ -5,7 +5,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     const playerName = player.name;
     const isInitialClaim = !!baseClaim;
 
-    // Ensure activePower is read fresh
     const activePower = player.activePower;
     const isInfiltrator = activePower === 'INFILTRATOR';
     const isShieldBreaker = activePower === 'SHIELD_BREAKER';
@@ -28,7 +27,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
         // Check for enemy overlaps
         const enemyQuery = await client.query(`
-            SELECT id, owner_id, area, shield_active
+            SELECT id, owner_id, area, is_shield_active
             FROM territories
             WHERE owner_id != $1 AND ST_Intersects(area, ST_GeomFromGeoJSON($2))
         `, [userId, JSON.stringify(newPolygon.geometry)]);
@@ -38,7 +37,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
         if (enemyCount > 0) {
             const target = enemyQuery.rows[0];
-            const shielded = target.shield_active;
+            const shielded = target.is_shield_active;
 
             if (!isInfiltrator && !isShieldBreaker) {
                 console.log(`[REJECTED] Power required to invade.`);
@@ -46,7 +45,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 return;
             }
 
-            // INFILTRATOR can't be used after owning land
             if (isInfiltrator && hasOwnTerritory) {
                 console.log(`[REJECTED] Infiltrator only works with zero territory.`);
                 socket.emit('claimRejected', { reason: 'Infiltrator only works before you claim your first base.' });
@@ -58,7 +56,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 console.log(`[SHIELD DETECTED] Enemy shield is ON. Player power: ${activePower}`);
 
                 if (isShieldBreaker) {
-                    await client.query(`UPDATE territories SET shield_active = false WHERE id = $1`, [target.id]);
+                    await client.query(`UPDATE territories SET is_shield_active = false WHERE id = $1`, [target.id]);
                     player.activePower = null;
                     console.log(`[SHIELD BREAKER USED] Shield removed. Claim denied.`);
                     socket.emit('claimRejected', { reason: 'Shield broken. Try your next claim now.' });
@@ -66,7 +64,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 }
 
                 if (isInfiltrator) {
-                    await client.query(`UPDATE territories SET shield_active = false WHERE id = $1`, [target.id]);
+                    await client.query(`UPDATE territories SET is_shield_active = false WHERE id = $1`, [target.id]);
                     player.activePower = null;
                     console.log(`[INFILTRATOR BLOCKED] Enemy shield absorbed it. Power consumed.`);
                     socket.emit('claimRejected', { reason: 'Enemy shield absorbed your Infiltrator. Power used.' });
@@ -82,7 +80,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             `, [JSON.stringify(newPolygon.geometry), target.id]);
 
             await client.query(`
-                INSERT INTO territories (owner_id, area, mode, shield_active)
+                INSERT INTO territories (owner_id, area, mode, is_shield_active)
                 VALUES ($1, ST_GeomFromGeoJSON($2), 'solo', false)
             `, [userId, JSON.stringify(newPolygon.geometry)]);
 
@@ -92,7 +90,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             return;
         }
 
-        // No overlaps but power was used
         if (isInfiltrator || isShieldBreaker) {
             console.log(`[REJECTED] ${activePower} failed: no enemy target.`);
             socket.emit('claimRejected', { reason: `${activePower} failed: no enemy territory found.` });
@@ -100,9 +97,8 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             return;
         }
 
-        // Normal base claim (no enemies or powers)
         await client.query(`
-            INSERT INTO territories (owner_id, area, mode, shield_active)
+            INSERT INTO territories (owner_id, area, mode, is_shield_active)
             VALUES ($1, ST_GeomFromGeoJSON($2), 'solo', false)
         `, [userId, JSON.stringify(newPolygon.geometry)]);
 
