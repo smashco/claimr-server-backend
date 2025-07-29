@@ -1,7 +1,7 @@
 const turf = require('@turf/turf');
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
-    console.log(`\n\n[DEBUG] =================== NEW CLAIM (v15 User Logic + Targeted Fix) ===================`);
+    console.log(`\n\n[DEBUG] =================== NEW CLAIM (v15 User Logic + Infiltrator) ===================`);
     console.log(`[DEBUG] Attacker: ${player.name} (${player.id})`);
 
     const userId = player.googleId;
@@ -112,23 +112,10 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             const protectedResult = await client.query(`SELECT ST_Difference($1::geometry, $2::geometry) as final_geom;`, [attackerNetGainGeom, row.area]);
             attackerNetGainGeom = protectedResult.rows[0].final_geom;
         } else {
-            // ========================= THE FIX IS HERE =========================
-            console.log(`[DEBUG]   - Calculating partial hit on unshielded victim: ${row.username}.`);
-            // The victim's new area is their old area MINUS the new claim loop.
-            const remainingResult = await client.query(`SELECT ST_AsGeoJSON(ST_MakeValid(ST_Difference($1::geometry, ${newAreaWKT}))) as remaining_geojson;`, [row.area]);
-            const remainingGeoJSON = remainingResult.rows[0].remaining_geojson;
-            const remainingSqM = remainingGeoJSON ? (turf.area(JSON.parse(remainingGeoJSON)) || 0) : 0;
-            
-            // The attacker's net gain remains their original loop. They do NOT absorb the victim's land.
-            // We just update the victim's territory to be smaller.
-            if (remainingSqM < 1) {
-                console.log(`[DEBUG]     -> Victim wiped out by partial hit.`);
-                await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [row.owner_id]);
-            } else {
-                console.log(`[DEBUG]     -> Victim partially hit. Remaining area: ${remainingSqM.toFixed(2)} sqm`);
-                await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, [remainingGeoJSON, remainingSqM, row.owner_id]);
-            }
-            // ======================= END OF THE FIX ========================
+            console.log(`[DEBUG]   - Absorbing unshielded victim: ${row.username}.`);
+            const absorptionResult = await client.query(`SELECT ST_Union($1::geometry, $2::geometry) as final_geom;`, [attackerNetGainGeom, row.area]);
+            attackerNetGainGeom = absorptionResult.rows[0].final_geom;
+            await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [row.owner_id]);
         }
     }
 
