@@ -1,46 +1,35 @@
-const turf = require('@turf/turf');
-
-// This script handles ALL normal attacks on unshielded players.
+/**
+ * @file unshielded_interaction.js
+ * @description Handles the complete wipeout of an unshielded victim.
+ */
 
 /**
- * Handles an attack on an unshielded victim, determining if it's a partial hit or a full wipeout.
- * @param {object} client - The database client.
- * @param {object} victimCurrentArea - The victim's current territory geometry.
- * @param {string} newAreaWKT - The WKT of the attacker's new claim loop.
- * @param {object} attackerTotalInfluenceGeom - The attacker's full potential territory for this turn.
- * @param {string} victimId - The ID of the victim.
+ * Merges the victim's territory into the attacker's claim and then
+ * erases the victim's territory from the database.
+ *
+ * @param {object} victim - The victim player's data from the database { owner_id, username, area }.
+ * @param {string} attackerNetGainGeom - The WKT representation of the attacker's claim geometry.
+ * @param {object} client - The PostgreSQL database client.
+ * @returns {Promise<string>} The updated WKT geometry for the attacker's claim after absorbing the victim's land.
  */
-async function handleUnshieldedInteraction(client, victimCurrentArea, newAreaWKT, attackerTotalInfluenceGeom, victimId) {
-    // First, determine if this is a full wipeout by checking against the attacker's total influence.
-    const diffForWipeoutCheck = await client.query(
-        `SELECT ST_AsGeoJSON(ST_CollectionExtract(ST_Difference($1::geometry, $2::geometry), 3)) AS remaining_area;`, 
-        [victimCurrentArea, attackerTotalInfluenceGeom]
+async function handleWipeout(victim, attackerNetGainGeom, client) {
+    console.log(`[WIPEOUT] Absorbing territory from ${victim.username}.`);
+
+    // Merge the victim's area into the attacker's gain
+    const mergeResult = await client.query(
+        `SELECT ST_Union($1::geometry, $2::geometry) AS final_geom`,
+        [attackerNetGainGeom, victim.area]
     );
 
-    const remainingAreaForWipeout = diffForWipeoutCheck.rows[0].remaining_area;
-    const remainingSqMWipeout = remainingAreaForWipeout ? (turf.area(JSON.parse(remainingAreaForWipeout)) || 0) : 0;
+    // Erase the victim's territory by setting it to an empty geometry
+    await client.query(
+        `UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1`,
+        [victim.owner_id]
+    );
+    console.log(`[WIPEOUT] ${victim.username}'s territory has been wiped.`);
 
-    if (Math.round(remainingSqMWipeout) > 10) {
-        // PARTIAL HIT: The victim survives with a smaller area.
-        console.log(`[Interaction] Unshielded partial hit on victim ${victimId}.`);
-        
-        // The victim's territory is reduced ONLY by the new claim loop.
-        const partialHitResult = await client.query(
-            `SELECT ST_AsGeoJSON(ST_CollectionExtract(ST_Difference($1::geometry, ${newAreaWKT}), 3)) as remaining_area;`, 
-            [victimCurrentArea]
-        );
-        const remainingAreaGeoJSON = partialHitResult.rows[0].remaining_area;
-        const remainingAreaSqM = remainingAreaGeoJSON ? (turf.area(JSON.parse(remainingAreaGeoJSON)) || 0) : 0;
-        await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3;`, 
-            [remainingAreaGeoJSON, remainingAreaSqM, victimId]
-        );
-        return { wasWipedOut: false };
-    } else {
-        // FULL WIPEOUT: The victim is eliminated.
-        console.log(`[Interaction] Unshielded player ${victimId} was wiped out.`);
-        await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victimId]);
-        return { wasWipedOut: true };
-    }
+    // Return the new, larger geometry
+    return mergeResult.rows[0].final_geom;
 }
 
-module.exports = handleUnshieldedInteraction;
+module.exports = { handleWipeout };
