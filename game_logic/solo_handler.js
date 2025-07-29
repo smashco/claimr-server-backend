@@ -191,12 +191,17 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         finalArea = unionRes.rows[0].final_area;
     }
 
-    const finalRes = await client.query(`
-        SELECT ST_AsGeoJSON($1) as geojson, ST_Area($1::geography) as area_sqm;
+    // ✅ [PATCH] Remove invalid interior holes and force MultiPolygon
+    const patched = await client.query(`
+        SELECT
+            ST_AsGeoJSON(
+                ST_CollectionExtract(ST_Multi(ST_RemoveRepeatedPoints(ST_MakeValid($1))), 3)
+            ) AS geojson,
+            ST_Area(ST_MakeValid($1)::geography) AS area_sqm;
     `, [finalArea]);
 
-    const finalAreaGeoJSON = finalRes.rows[0].geojson;
-    const finalAreaSqM = finalRes.rows[0].area_sqm || 0;
+    const finalAreaGeoJSON = patched.rows[0].geojson;
+    const finalAreaSqM = patched.rows[0].area_sqm || 0;
     console.log(`[DEBUG] Final total area: ${finalAreaSqM.toFixed(2)} sqm`);
 
     if (!finalAreaGeoJSON || finalAreaSqM < 1) {
