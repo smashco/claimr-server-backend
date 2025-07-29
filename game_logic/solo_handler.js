@@ -1,7 +1,7 @@
 const turf = require('@turf/turf');
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
-    console.log(`\n\n[DEBUG] =================== NEW CLAIM (v16 Final Targeted Fix) ===================`);
+    console.log(`\n\n[DEBUG] =================== NEW CLAIM (v17 - YOUR LOGIC PRESERVED) ===================`);
     console.log(`[DEBUG] Attacker: ${player.name} (${player.id})`);
 
     const userId = player.googleId;
@@ -11,7 +11,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     let newAreaPolygon, newAreaSqM;
 
     // --- Part 1: Initial Claim Logic (Base or Infiltrator) ---
-    // THIS SECTION IS UNCHANGED
+    // THIS SECTION IS UNCHANGED FROM YOUR CODE
     if (isInitialBaseClaim) {
         console.log(`[DEBUG] SECTION 1: Processing Initial Base Claim.`);
         const center = [baseClaim.lng, baseClaim.lat];
@@ -44,7 +44,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
                 const victimSocketId = Object.keys(players).find(id => players[id]?.googleId === victimId);
                 if (victimSocketId) io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: 0 });
-                player.isInfiltratorActive = false;
+                player.isInfiltratorActive = false; // Consume power on failed attempt
                 return null;
             }
 
@@ -58,7 +58,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             `;
             await client.query(saveQuery, [userId, player.name, newAreaSqM, baseClaim.lng, baseClaim.lat]);
             
-            player.isInfiltratorActive = false;
+            player.isInfiltratorActive = false; // Consume power on success
             return {
                 finalTotalArea: newAreaSqM,
                 areaClaimed: newAreaSqM,
@@ -76,7 +76,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     } else {
         // --- Part 2: Expansion Logic ---
-        // THIS SECTION IS UNCHANGED
+        // THIS SECTION IS UNCHANGED FROM YOUR CODE
         console.log(`[DEBUG] SECTION 1: Processing Expansion Claim.`);
         if (trail.length < 3) { socket.emit('claimRejected', { reason: 'Expansion trail must have at least 3 points.' }); return null; }
         const pointsForPolygon = [...trail.map(p => [p.lng, p.lat]), trail[0] ? [trail[0].lng, trail[0].lat] : null].filter(Boolean);
@@ -97,7 +97,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     let attackerNetGainGeomRes = await client.query(`SELECT ${newAreaWKT} AS geom`);
     let attackerNetGainGeom = attackerNetGainGeomRes.rows[0].geom;
     
-    // This pre-calculation is necessary for the encirclement check
+    // This pre-calculation is REQUIRED for the encirclement check to work correctly.
     const attackerExistingAreaRes = await client.query('SELECT area FROM territories WHERE owner_id = $1', [userId]);
     const attackerExistingArea = attackerExistingAreaRes.rows[0]?.area || `ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')`;
     const influenceResult = await client.query(`SELECT ST_Union($1::geometry, ${newAreaWKT}) AS full_influence`, [attackerExistingArea]);
@@ -110,7 +110,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
     for (const victim of victims.rows) {
         affectedOwnerIds.add(victim.owner_id);
-
         if (victim.is_shield_active) {
             console.log(`[DEBUG]   - Victim ${victim.username} is SHIELDED. Punching hole in net gain.`);
             await client.query('UPDATE territories SET is_shield_active = false WHERE owner_id = $1', [victim.owner_id]);
@@ -120,17 +119,18 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             attackerNetGainGeom = protectedResult.rows[0].final_geom;
         } else {
             // ========================= THE FIX IS HERE =========================
-            // This logic now correctly differentiates between a wipeout and a partial hit.
+            // This logic now correctly differentiates between a wipeout and a partial hit,
+            // PRESERVING your original wipeout/absorption logic.
             const encirclementCheck = await client.query("SELECT ST_Relate($1::geometry, $2::geometry, 'T*F**F***') as is_encircled", [victim.area, attackerInfluenceZone]);
             
             if (encirclementCheck.rows[0].is_encircled) {
-                // VICTIM IS ENCIRCLED -> This is a total wipeout, use your absorption logic.
+                // VICTIM IS ENCIRCLED -> This is a total wipeout. We run YOUR absorption logic.
                 console.log(`[DEBUG]   - Absorbing ENCIRCLED unshielded victim: ${victim.username}.`);
                 const absorptionResult = await client.query(`SELECT ST_Union($1::geometry, $2::geometry) as final_geom;`, [attackerNetGainGeom, victim.area]);
                 attackerNetGainGeom = absorptionResult.rows[0].final_geom;
                 await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1;`, [victim.owner_id]);
             } else {
-                // VICTIM IS NOT ENCIRCLED -> This is a partial hit. Only subtract the new loop.
+                // VICTIM IS NOT ENCIRCLED -> This is a partial hit. We only subtract the new loop area.
                 console.log(`[DEBUG]   - Calculating PARTIAL HIT on unshielded victim: ${victim.username}.`);
                 const remainingResult = await client.query(`SELECT ST_AsGeoJSON(ST_MakeValid(ST_Difference($1::geometry, ${newAreaWKT}))) as remaining_geojson;`, [victim.area]);
                 const remainingGeoJSON = remainingResult.rows[0].remaining_geojson;
@@ -146,7 +146,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
 
-    // --- Part 4: Final Merge and Save (Unchanged) ---
+    // --- Part 4: Final Merge and Save (Unchanged from your code) ---
     let attackerFinalAreaGeom;
     const attackerCurrentAreaRes = await client.query('SELECT area FROM territories WHERE owner_id = $1', [userId]);
     if (attackerCurrentAreaRes.rowCount > 0 && attackerCurrentAreaRes.rows[0].area) {
