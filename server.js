@@ -934,21 +934,34 @@ io.on('connection', (socket) => {
             return; 
         }
 
-        const { finalTotalArea, areaClaimed, ownerIdsToUpdate } = result;
+        // --- FIXED BLOCK STARTS HERE ---
+        if (result.status === 'infiltratorBaseSet') {
+            console.log('[Claim] Infiltrator Phase 1 complete. No territory change yet.');
+            await client.query('COMMIT'); 
+            return; 
+        }
+        
+        const { finalTotalArea, areaClaimed, ownerIdsToUpdate, isInfiltratorCarve } = result;
         await client.query('COMMIT'); 
 
-        console.log(`[Claim] Player ${player.name} claimed ${areaClaimed.toFixed(2)} sqm. Total: ${finalTotalArea.toFixed(2)}. Owners updated: ${[...ownerIdsToUpdate]}`);
-        
-        socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
+        if (isInfiltratorCarve) {
+             console.log(`[Claim] Infiltrator ${player.name} carved out ${areaClaimed.toFixed(2)} sqm from enemies. Owners updated: ${[...ownerIdsToUpdate]}`);
+             socket.emit('claimSuccessful', { newTotalArea: 0, areaClaimed: areaClaimed, message: 'Infiltrator carve successful!' });
+        } else {
+             console.log(`[Claim] Player ${player.name} claimed ${areaClaimed.toFixed(2)} sqm. Total: ${finalTotalArea.toFixed(2)}. Owners updated: ${[...ownerIdsToUpdate]}`);
+             socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
+        }
         
         const soloOwnersToUpdate = [];
         const clanOwnersToUpdate = [];
 
-        for (const id of ownerIdsToUpdate) {
-            if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id) && id.length < 10)) { 
-                clanOwnersToUpdate.push(parseInt(id, 10));
-            } else if (typeof id === 'string') {
-                soloOwnersToUpdate.push(id);
+        if (ownerIdsToUpdate && ownerIdsToUpdate.length > 0) {
+            for (const id of ownerIdsToUpdate) {
+                if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id) && id.length < 10)) { 
+                    clanOwnersToUpdate.push(parseInt(id, 10));
+                } else if (typeof id === 'string') {
+                    soloOwnersToUpdate.push(id);
+                }
             }
         }
 
@@ -980,6 +993,7 @@ io.on('connection', (socket) => {
         player.isDrawing = false;
         player.activeTrail = [];
         io.emit('trailCleared', { id: socket.id });
+        // --- FIXED BLOCK ENDS HERE ---
 
     } catch (err) {
         await client.query('ROLLBACK');
