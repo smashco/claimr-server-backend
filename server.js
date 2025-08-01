@@ -156,14 +156,6 @@ const setupDatabase = async () => {
 };
 
 // --- Middleware ---
-const checkAdminSecret = (req, res, next) => {
-    const { secret } = req.query;
-    if (!process.env.ADMIN_SECRET_KEY || secret !== process.env.ADMIN_SECRET_KEY) {
-        return res.status(403).send('Forbidden: Invalid or missing secret key.');
-    }
-    next();
-};
-
 const authenticate = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -196,20 +188,32 @@ const checkAdminAuth = (req, res, next) => {
     res.redirect('/admin.html');
 };
 
+// Main entry point for the admin section
 app.get('/admin', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+    if (req.cookies.admin_session === process.env.ADMIN_SECRET_KEY) {
+        res.redirect('/admin/dashboard');
+    } else {
+        res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+    }
 });
 
+// Handle the login form submission
 app.post('/admin/login', (req, res) => {
     const { password } = req.body;
     if (password === process.env.ADMIN_SECRET_KEY) {
-        res.cookie('admin_session', password, { httpOnly: true, secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000 });
+        res.cookie('admin_session', password, { 
+            httpOnly: true, 
+            secure: process.env.NODE_ENV === 'production', 
+            maxAge: 24 * 60 * 60 * 1000, // 1 day cookie
+            path: '/admin' // Scope cookie to the admin path
+        });
         res.redirect('/admin/dashboard');
     } else {
         res.status(401).send('Invalid Password. <a href="/admin">Try again</a>');
     }
 });
 
+// Serve the main dashboard (protected by middleware)
 app.get('/admin/dashboard', checkAdminAuth, (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
