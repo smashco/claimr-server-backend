@@ -156,6 +156,14 @@ const setupDatabase = async () => {
 };
 
 // --- Middleware ---
+const checkAdminSecret = (req, res, next) => {
+    const { secret } = req.query;
+    if (!process.env.ADMIN_SECRET_KEY || secret !== process.env.ADMIN_SECRET_KEY) {
+        return res.status(403).send('Forbidden: Invalid or missing secret key.');
+    }
+    next();
+};
+
 const authenticate = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -183,12 +191,11 @@ const checkAdminAuth = (req, res, next) => {
         return next();
     }
     if (req.headers['accept'] && req.headers['accept'].includes('application/json')) {
-        return res.status(401).json({ message: 'Unauthorized' });
+        return res.status(401).json({ message: 'Unauthorized: Please log in.' });
     }
-    res.redirect('/admin.html');
+    res.redirect('/admin');
 };
 
-// Main entry point for the admin section
 app.get('/admin', (req, res) => {
     if (req.cookies.admin_session === process.env.ADMIN_SECRET_KEY) {
         res.redirect('/admin/dashboard');
@@ -197,15 +204,14 @@ app.get('/admin', (req, res) => {
     }
 });
 
-// Handle the login form submission
 app.post('/admin/login', (req, res) => {
     const { password } = req.body;
     if (password === process.env.ADMIN_SECRET_KEY) {
         res.cookie('admin_session', password, { 
             httpOnly: true, 
             secure: process.env.NODE_ENV === 'production', 
-            maxAge: 24 * 60 * 60 * 1000, // 1 day cookie
-            path: '/admin' // Scope cookie to the admin path
+            maxAge: 24 * 60 * 60 * 1000,
+            path: '/admin'
         });
         res.redirect('/admin/dashboard');
     } else {
@@ -213,7 +219,6 @@ app.post('/admin/login', (req, res) => {
     }
 });
 
-// Serve the main dashboard (protected by middleware)
 app.get('/admin/dashboard', checkAdminAuth, (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
@@ -687,6 +692,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     }
 });
 
+
 // --- Socket.IO Logic ---
 async function broadcastAllPlayers() {
     const playerIds = Object.keys(players);
@@ -997,11 +1003,13 @@ io.on('connection', (socket) => {
         const soloOwnersToUpdate = [];
         const clanOwnersToUpdate = [];
 
-        for (const id of ownerIdsToUpdate) {
-            if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id) && id.length < 10)) { 
-                clanOwnersToUpdate.push(parseInt(id, 10));
-            } else if (typeof id === 'string') {
-                soloOwnersToUpdate.push(id);
+        if (ownerIdsToUpdate && ownerIdsToUpdate.length > 0) {
+            for (const id of ownerIdsToUpdate) {
+                if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id) && id.length < 10)) { 
+                    clanOwnersToUpdate.push(parseInt(id, 10));
+                } else if (typeof id === 'string') {
+                    soloOwnersToUpdate.push(id);
+                }
             }
         }
 
