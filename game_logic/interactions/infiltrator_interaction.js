@@ -70,9 +70,7 @@ async function handleInfiltratorClaim(io, socket, player, players, trail, baseCl
 
     player.isInfiltratorActive = false;
     
-    // --- UPDATED: Set the persistent flag in the database ---
     await client.query('UPDATE territories SET is_carve_mode_active = true WHERE owner_id = $1', [userId]);
-    // Also update the current in-memory object so the state is consistent for this session
     player.isCarveModeActive = true; 
 
     console.log(`[SUCCESS] Infiltrator base placed successfully. Carve mode activated for next run.`);
