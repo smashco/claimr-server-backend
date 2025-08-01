@@ -116,7 +116,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
 
-    // --- UPDATED: Reset the Carve Mode flag in the database ---
     if (isCarveModeActive) {
         console.log('[DEBUG] Carve mode expansion complete. Deactivating carve mode in DB.');
         await client.query('UPDATE territories SET is_carve_mode_active = false WHERE owner_id = $1', [userId]);
