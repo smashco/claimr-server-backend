@@ -67,30 +67,31 @@ async function handleInfiltratorClaim(io, socket, player, players, trail, baseCl
             return null;
         }
 
-        // --- FIX: Robustly create and union polygons ---
-        
-        // 1. Create a list of polygons to be unioned, starting with the guaranteed valid one.
-        const polygonsToUnion = [player.infiltratorInitialBasePolygon];
+        // --- NEW DEFENSIVE FIX ---
 
-        // 2. Safely create the expansion polygon from the client's trail.
+        const polygonsToUnion = [player.infiltratorInitialBasePolygon];
+        let expansionPolygon;
+        
         try {
             const points = [...trail.map(p => [p.lng, p.lat]), [trail[0].lng, trail[0].lat]];
-            const expansionPolygon = turf.polygon([points]);
-            // If creation is successful, add it to our list.
-            polygonsToUnion.push(expansionPolygon);
+            expansionPolygon = turf.polygon([points]);
         } catch (err) {
-            // If turf.polygon fails (e.g., self-intersecting trail), log it but don't crash.
-            // The claim will proceed using only the initial base stake.
-            console.warn(`[INFILTRATOR] Warning: Could not create a valid expansion polygon from trail. Error: ${err.message}`);
+            console.warn(`[INFILTRATOR] Warning: turf.polygon threw an error on trail data: ${err.message}.`);
+        }
+        
+        // Explicitly check if the created polygon is valid before adding it to our list for union.
+        // This prevents null or malformed geometries from causing a crash.
+        if (expansionPolygon && expansionPolygon.geometry && expansionPolygon.geometry.coordinates.length > 0) {
+            polygonsToUnion.push(expansionPolygon);
+            console.log('[INFILTRATOR] Expansion trail formed a valid polygon.');
+        } else {
+            console.warn('[INFILTRATOR] Warning: Expansion trail did not produce a valid polygon. Proceeding with base stake only.');
         }
 
-        // 3. Decide how to create the final shape based on how many valid polygons we have.
         let finalCarvePolygon;
         if (polygonsToUnion.length >= 2) {
-            // If we have both the stake and a valid expansion, union them.
             finalCarvePolygon = turf.union(...polygonsToUnion);
         } else {
-            // Otherwise, use the only valid polygon we have (the initial stake).
             finalCarvePolygon = polygonsToUnion[0];
         }
 
