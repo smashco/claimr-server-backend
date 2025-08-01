@@ -8,7 +8,6 @@ const { Pool } = require('pg');
 const admin = require('firebase-admin');
 const turf = require('@turf/turf'); 
 
-
 // --- Require the Game Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
@@ -296,6 +295,7 @@ app.use('/admin', adminRouter);
 app.get('/admin', (req, res) => {
     res.redirect('/admin/login');
 });
+
 
 // =======================================================================
 // --- MAIN GAME LOGIC (API & SOCKETS) ---
@@ -693,6 +693,34 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
 
 
 // --- Socket.IO Logic ---
+async function broadcastAllPlayers() {
+    const playerIds = Object.keys(players);
+    if (playerIds.length === 0) return;
+    const googleIds = Object.values(players).map(p => p.googleId).filter(id => id);
+    if (googleIds.length === 0) return;
+    try {
+        const profileQuery = await pool.query('SELECT owner_id, username, profile_image_url, identity_color FROM territories WHERE owner_id = ANY($1::varchar[])', [googleIds]);
+        const profiles = profileQuery.rows.reduce((acc, row) => {
+            acc[row.owner_id] = { username: row.username, imageUrl: row.profile_image_url, identityColor: row.identity_color };
+            return acc;
+        }, {});
+        const allPlayersData = Object.values(players).map(p => {
+            const profile = profiles[p.googleId] || {};
+            return { 
+                id: p.id,
+                ownerId: p.googleId,
+                name: profile.username || p.name,
+                imageUrl: profile.imageUrl,
+                identityColor: profile.identityColor,
+                lastKnownPosition: p.lastKnownPosition
+            };
+        });
+        io.emit('allPlayersUpdate', allPlayersData);
+    } catch(e) {
+        console.error("[Broadcast] Error fetching profiles for broadcast:", e);
+    }
+}
+
 io.on('connection', (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
   
