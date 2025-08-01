@@ -3,16 +3,13 @@ const turf = require('@turf/turf');
 /**
  * @file infiltrator_interaction.js
  * @description Handles the special claim logic for an Infiltrator's base.
- * This function now creates a permanent base for the Infiltrator inside enemy territory.
  */
 async function handleInfiltratorClaim(io, socket, player, players, trail, baseClaim, client) {
     const userId = player.googleId;
 
-    // The Infiltrator power is ONLY used for the initial base claim.
-    // If this is somehow called for an expansion, something is wrong. Reject it.
     if (!baseClaim) {
         socket.emit('claimRejected', { reason: 'Infiltrator power can only be used to claim a new base.' });
-        player.isInfiltratorActive = false; // Reset the power
+        player.isInfiltratorActive = false;
         return null;
     }
 
@@ -23,7 +20,6 @@ async function handleInfiltratorClaim(io, socket, player, players, trail, baseCl
     const newAreaSqM = turf.area(newAreaPolygon);
     const newAreaGeoJSON = JSON.stringify(newAreaPolygon.geometry);
 
-    // --- Find the victim and validate the claim ---
     const result = await client.query(`
         SELECT owner_id, username, is_shield_active, area
         FROM territories
@@ -39,7 +35,6 @@ async function handleInfiltratorClaim(io, socket, player, players, trail, baseCl
     const victim = result.rows[0];
     console.log(`[INFILTRATOR] Target: ${victim.username}, Shield: ${victim.is_shield_active}`);
 
-    // --- Handle Shield Interaction ---
     if (victim.is_shield_active) {
         console.log(`[INFILTRATOR] Blocked by shield of ${victim.username}. Power used up.`);
         await client.query(`UPDATE territories SET is_shield_active = false WHERE owner_id = $1`, [victim.owner_id]);
@@ -52,7 +47,6 @@ async function handleInfiltratorClaim(io, socket, player, players, trail, baseCl
         return null;
     }
 
-    // --- Carve a hole in the victim's territory ---
     console.log(`[INFILTRATOR] Carving out base hole from ${victim.username}'s land.`);
     await client.query(
         `UPDATE territories
@@ -62,21 +56,25 @@ async function handleInfiltratorClaim(io, socket, player, players, trail, baseCl
         [newAreaGeoJSON, victim.owner_id]
     );
 
-    // --- Insert the new base for the Infiltrator ---
+    // --- FIX: Use INSERT ... ON CONFLICT DO UPDATE ---
+    // This safely handles both new and existing player rows.
     await client.query(
         `INSERT INTO territories (owner_id, owner_name, username, area, area_sqm, original_base_point)
-         VALUES ($1, $2, $2, ST_MakeValid(ST_GeomFromGeoJSON($3)), $4, ST_SetSRID(ST_Point($5, $6), 4326))`,
+         VALUES ($1, $2, $2, ST_MakeValid(ST_GeomFromGeoJSON($3)), $4, ST_SetSRID(ST_Point($5, $6), 4326))
+         ON CONFLICT (owner_id) DO UPDATE
+         SET area = ST_MakeValid(ST_GeomFromGeoJSON($3)),
+             area_sqm = $4,
+             original_base_point = ST_SetSRID(ST_Point($5, $6), 4326);`,
         [userId, player.name, newAreaGeoJSON, newAreaSqM, baseClaim.lng, baseClaim.lat]
     );
 
-    // --- Reset player state and return success ---
-    player.isInfiltratorActive = false; // The power is now used up.
+    player.isInfiltratorActive = false;
 
     console.log(`[SUCCESS] Infiltrator base placed successfully.`);
     return {
         finalTotalArea: newAreaSqM,
         areaClaimed: newAreaSqM,
-        ownerIdsToUpdate: [victim.owner_id, userId] // Both players' maps need updating
+        ownerIdsToUpdate: [victim.owner_id, userId]
     };
 }
 
