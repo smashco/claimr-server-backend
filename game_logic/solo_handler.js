@@ -2,33 +2,18 @@ const turf = require('@turf/turf');
 const { handleShieldHit } = require('./interactions/shield_interaction');
 const { handleWipeout } = require('./interactions/unshielded_interaction');
 const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
+const { handleCarveOut } = require('./interactions/carve_interaction'); // Import the new handler
 
-/**
- * Main handler for all solo player claims. It acts as a router, delegating
- * to specialized handlers based on the player's active abilities (e.g., Infiltrator),
- * or processing a standard claim otherwise.
- *
- * @param {object} io - The Socket.IO server instance.
- * @param {object} socket - The player's socket object.
- * @param {object} player - The player object from the server's state.
- * @param {object} players - The map of all active players.
- * @param {Array<object>} trail - The list of coordinates for an expansion claim.
- * @param {object} baseClaim - The data for an initial base claim.
- * @param {object} client - The PostgreSQL database client.
- * @returns {Promise<object|null>} An object with claim results or null on failure.
- */
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
-    const { isInfiltratorActive } = player;
+    const { isInfiltratorActive, isCarveModeActive } = player;
 
-    // --- DELEGATION LOGIC ---
-    // If the player has infiltrator power active, use the specialized handler and stop here.
+    // --- DELEGATION FOR INFILTRATOR BASE CLAIM ---
     if (isInfiltratorActive) {
-        console.log('[DEBUG] Delegating to Infiltrator handler.');
+        console.log('[DEBUG] Delegating to Infiltrator handler for base claim.');
         return await handleInfiltratorClaim(io, socket, player, players, trail, baseClaim, client);
     }
-    // --- END DELEGATION ---
-
-    // All the standard claim logic below will only run for non-infiltrator claims.
+    
+    // --- STANDARD CLAIM LOGIC (BASE OR EXPANSION) ---
     console.log(`\n\n[DEBUG] =================== NEW STANDARD CLAIM ===================`);
     const userId = player.googleId;
     const isInitialBaseClaim = !!baseClaim;
@@ -123,8 +108,21 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         if (victim.is_shield_active) {
             attackerNetGainGeom = await handleShieldHit(victim, attackerNetGainGeom, client, io, players);
         } else {
-            attackerNetGainGeom = await handleWipeout(victim, attackerNetGainGeom, client);
+            // --- NEW ROUTING LOGIC ---
+            if (isCarveModeActive) {
+                console.log('[DEBUG] Carve Mode is active. Calling handleCarveOut.');
+                await handleCarveOut(victim, attackerNetGainGeom, client);
+            } else {
+                console.log('[DEBUG] Standard mode. Calling handleWipeout.');
+                attackerNetGainGeom = await handleWipeout(victim, attackerNetGainGeom, client);
+            }
         }
+    }
+
+    // --- RESET THE CARVE MODE FLAG ---
+    if (isCarveModeActive) {
+        console.log('[DEBUG] Carve mode expansion complete. Deactivating carve mode.');
+        player.isCarveModeActive = false; // Reset the flag after this one expansion.
     }
 
     const userExisting = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
