@@ -8,7 +8,6 @@ const { Pool } = require('pg');
 const admin = require('firebase-admin');
 const turf = require('@turf/turf'); 
 
-
 // --- Require the Game Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
@@ -213,7 +212,7 @@ app.post('/admin/login', (req, res) => {
     }
 });
 
-// All routes below this point are protected by the checkAdminAuth middleware
+// Create a new router for all protected admin routes
 const adminRouter = express.Router();
 adminRouter.use(checkAdminAuth);
 
@@ -301,7 +300,6 @@ adminRouter.delete('/player/:id/delete', async (req, res) => {
 
 // Mount the protected admin router at the /admin path
 app.use('/admin', adminRouter);
-
 
 // =======================================================================
 // --- MAIN GAME LOGIC (API & SOCKETS) ---
