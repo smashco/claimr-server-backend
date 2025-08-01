@@ -58,9 +58,8 @@
 
         async function fetchPlayers() {
             try {
-                const response = await fetch('/admin/players');
+                const response = await fetch('/admin/players', { credentials: 'include' });
                 
-                // --- FIX: Handle unauthorized (session expired) responses ---
                 if (response.status === 401 || response.status === 403) {
                     alert('Session expired. Please log in again.');
                     window.location.href = '/admin';
@@ -148,7 +147,8 @@
             try {
                 const response = await fetch(`/admin/player/${playerId}/${action}`, {
                     method: actions[action].method,
-                    headers: { 'Content-Type': 'application/json' }
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include'
                 });
                 const result = await response.json();
                 alert(result.message);
