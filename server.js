@@ -8,6 +8,7 @@ const { Pool } = require('pg');
 const admin = require('firebase-admin');
 const turf = require('@turf/turf'); 
 
+
 // --- Require the Game Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
@@ -212,12 +213,17 @@ app.post('/admin/login', (req, res) => {
     }
 });
 
-// Serve the main dashboard (protected by middleware)
-app.get('/admin/dashboard', checkAdminAuth, (req, res) => {
+// All routes below this point are protected by the checkAdminAuth middleware
+const adminRouter = express.Router();
+adminRouter.use(checkAdminAuth);
+
+// Serve the main dashboard
+adminRouter.get('/dashboard', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
 
-app.get('/admin/players', checkAdminAuth, async (req, res) => {
+// API endpoint to get all player data
+adminRouter.get('/players', async (req, res) => {
     try {
         const result = await pool.query('SELECT owner_id, username, area_sqm, is_carve_mode_active FROM territories ORDER BY username');
         const dbPlayers = result.rows;
@@ -236,7 +242,8 @@ app.get('/admin/players', checkAdminAuth, async (req, res) => {
     }
 });
 
-app.post('/admin/player/:id/:action', checkAdminAuth, async (req, res) => {
+// API endpoint for player actions
+adminRouter.post('/player/:id/:action', async (req, res) => {
     const { id, action } = req.params;
     const playerSocket = Object.values(players).find(p => p.googleId === id);
 
@@ -279,7 +286,7 @@ app.post('/admin/player/:id/:action', checkAdminAuth, async (req, res) => {
     }
 });
 
-app.delete('/admin/player/:id/delete', checkAdminAuth, async (req, res) => {
+adminRouter.delete('/player/:id/delete', async (req, res) => {
     const { id } = req.params;
      try {
         const playerSocket = Object.values(players).find(p => p.googleId === id);
@@ -291,6 +298,10 @@ app.delete('/admin/player/:id/delete', checkAdminAuth, async (req, res) => {
         res.status(500).json({ message: 'Server error' });
     }
 });
+
+// Mount the protected admin router at the /admin path
+app.use('/admin', adminRouter);
+
 
 // =======================================================================
 // --- MAIN GAME LOGIC (API & SOCKETS) ---
