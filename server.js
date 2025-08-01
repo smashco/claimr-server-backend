@@ -8,6 +8,7 @@ const { Pool } = require('pg');
 const admin = require('firebase-admin');
 const turf = require('@turf/turf'); 
 
+
 // --- Require the Game Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
@@ -177,27 +178,24 @@ const authenticate = async (req, res, next) => {
 // =======================================================================
 // --- ADMIN PANEL LOGIC ---
 // =======================================================================
+const adminRouter = express.Router();
+
 const checkAdminAuth = (req, res, next) => {
     if (req.cookies.admin_session === process.env.ADMIN_SECRET_KEY) {
         return next();
     }
-    if (req.headers['accept'] && req.headers['accept'].includes('application/json')) {
-        return res.status(401).json({ message: 'Unauthorized: Please log in.' });
+    if (req.originalUrl.startsWith('/admin/api')) {
+        return res.status(401).json({ message: 'Unauthorized' });
     }
-    res.redirect('/admin');
+    res.redirect('/admin/login');
 };
 
-// Main entry point for the admin section
-app.get('/admin', (req, res) => {
-    if (req.cookies.admin_session === process.env.ADMIN_SECRET_KEY) {
-        res.redirect('/admin/dashboard');
-    } else {
-        res.sendFile(path.join(__dirname, 'public', 'admin.html'));
-    }
+// --- Public Admin Routes ---
+adminRouter.get('/login', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
-// Handle the login form submission
-app.post('/admin/login', (req, res) => {
+adminRouter.post('/login', (req, res) => {
     const { password } = req.body;
     if (password === process.env.ADMIN_SECRET_KEY) {
         res.cookie('admin_session', password, { 
@@ -208,21 +206,16 @@ app.post('/admin/login', (req, res) => {
         });
         res.redirect('/admin/dashboard');
     } else {
-        res.status(401).send('Invalid Password. <a href="/admin">Try again</a>');
+        res.status(401).send('Invalid Password. <a href="/admin/login">Try again</a>');
     }
 });
 
-// Create a new router for all protected admin routes
-const adminRouter = express.Router();
-adminRouter.use(checkAdminAuth);
-
-// Serve the main dashboard
-adminRouter.get('/dashboard', (req, res) => {
+// --- Protected Admin Routes ---
+adminRouter.get('/dashboard', checkAdminAuth, (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
 
-// API endpoint to get all player data
-adminRouter.get('/players', async (req, res) => {
+adminRouter.get('/api/players', checkAdminAuth, async (req, res) => {
     try {
         const result = await pool.query('SELECT owner_id, username, area_sqm, is_carve_mode_active FROM territories ORDER BY username');
         const dbPlayers = result.rows;
@@ -241,11 +234,9 @@ adminRouter.get('/players', async (req, res) => {
     }
 });
 
-// API endpoint for player actions
-adminRouter.post('/player/:id/:action', async (req, res) => {
+adminRouter.post('/api/player/:id/:action', checkAdminAuth, async (req, res) => {
     const { id, action } = req.params;
     const playerSocket = Object.values(players).find(p => p.googleId === id);
-
     try {
         switch (action) {
             case 'reset-territory':
@@ -285,7 +276,7 @@ adminRouter.post('/player/:id/:action', async (req, res) => {
     }
 });
 
-adminRouter.delete('/player/:id/delete', async (req, res) => {
+adminRouter.delete('/api/player/:id/delete', checkAdminAuth, async (req, res) => {
     const { id } = req.params;
      try {
         const playerSocket = Object.values(players).find(p => p.googleId === id);
@@ -298,8 +289,13 @@ adminRouter.delete('/player/:id/delete', async (req, res) => {
     }
 });
 
-// Mount the protected admin router at the /admin path
+// Mount the entire admin router under the /admin path
 app.use('/admin', adminRouter);
+
+// Main entry point for admin redirect
+app.get('/admin', (req, res) => {
+    res.redirect('/admin/login');
+});
 
 // =======================================================================
 // --- MAIN GAME LOGIC (API & SOCKETS) ---
@@ -697,34 +693,6 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
 
 
 // --- Socket.IO Logic ---
-async function broadcastAllPlayers() {
-    const playerIds = Object.keys(players);
-    if (playerIds.length === 0) return;
-    const googleIds = Object.values(players).map(p => p.googleId).filter(id => id);
-    if (googleIds.length === 0) return;
-    try {
-        const profileQuery = await pool.query('SELECT owner_id, username, profile_image_url, identity_color FROM territories WHERE owner_id = ANY($1::varchar[])', [googleIds]);
-        const profiles = profileQuery.rows.reduce((acc, row) => {
-            acc[row.owner_id] = { username: row.username, imageUrl: row.profile_image_url, identityColor: row.identity_color };
-            return acc;
-        }, {});
-        const allPlayersData = Object.values(players).map(p => {
-            const profile = profiles[p.googleId] || {};
-            return { 
-                id: p.id,
-                ownerId: p.googleId,
-                name: profile.username || p.name,
-                imageUrl: profile.imageUrl,
-                identityColor: profile.identityColor,
-                lastKnownPosition: p.lastKnownPosition
-            };
-        });
-        io.emit('allPlayersUpdate', allPlayersData);
-    } catch(e) {
-        console.error("[Broadcast] Error fetching profiles for broadcast:", e);
-    }
-}
-
 io.on('connection', (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
   
