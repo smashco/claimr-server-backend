@@ -4,7 +4,7 @@ const turf = require('@turf/turf');
  * @file infiltrator_interaction.js
  * @description Handles the special claim logic for an Infiltrator's base.
  * This function creates a permanent base for the Infiltrator inside enemy territory
- * and activates "Carve Mode" for their next expansion.
+ * and activates "Carve Mode" for their next expansion by setting a persistent DB flag.
  */
 async function handleInfiltratorClaim(io, socket, player, players, trail, baseClaim, client) {
     const userId = player.googleId;
@@ -69,7 +69,10 @@ async function handleInfiltratorClaim(io, socket, player, players, trail, baseCl
     );
 
     player.isInfiltratorActive = false;
-    // Activate Carve Mode for the player's very next claim.
+    
+    // --- UPDATED: Set the persistent flag in the database ---
+    await client.query('UPDATE territories SET is_carve_mode_active = true WHERE owner_id = $1', [userId]);
+    // Also update the current in-memory object so the state is consistent for this session
     player.isCarveModeActive = true; 
 
     console.log(`[SUCCESS] Infiltrator base placed successfully. Carve mode activated for next run.`);

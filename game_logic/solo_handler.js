@@ -2,18 +2,16 @@ const turf = require('@turf/turf');
 const { handleShieldHit } = require('./interactions/shield_interaction');
 const { handleWipeout } = require('./interactions/unshielded_interaction');
 const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
-const { handleCarveOut } = require('./interactions/carve_interaction'); // Import the new handler
+const { handleCarveOut } = require('./interactions/carve_interaction');
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const { isInfiltratorActive, isCarveModeActive } = player;
 
-    // --- DELEGATION FOR INFILTRATOR BASE CLAIM ---
     if (isInfiltratorActive) {
         console.log('[DEBUG] Delegating to Infiltrator handler for base claim.');
         return await handleInfiltratorClaim(io, socket, player, players, trail, baseClaim, client);
     }
     
-    // --- STANDARD CLAIM LOGIC (BASE OR EXPANSION) ---
     console.log(`\n\n[DEBUG] =================== NEW STANDARD CLAIM ===================`);
     const userId = player.googleId;
     const isInitialBaseClaim = !!baseClaim;
@@ -108,7 +106,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         if (victim.is_shield_active) {
             attackerNetGainGeom = await handleShieldHit(victim, attackerNetGainGeom, client, io, players);
         } else {
-            // --- NEW ROUTING LOGIC ---
             if (isCarveModeActive) {
                 console.log('[DEBUG] Carve Mode is active. Calling handleCarveOut.');
                 await handleCarveOut(victim, attackerNetGainGeom, client);
@@ -119,10 +116,11 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
 
-    // --- RESET THE CARVE MODE FLAG ---
+    // --- UPDATED: Reset the Carve Mode flag in the database ---
     if (isCarveModeActive) {
-        console.log('[DEBUG] Carve mode expansion complete. Deactivating carve mode.');
-        player.isCarveModeActive = false; // Reset the flag after this one expansion.
+        console.log('[DEBUG] Carve mode expansion complete. Deactivating carve mode in DB.');
+        await client.query('UPDATE territories SET is_carve_mode_active = false WHERE owner_id = $1', [userId]);
+        player.isCarveModeActive = false;
     }
 
     const userExisting = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);

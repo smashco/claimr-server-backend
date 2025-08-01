@@ -89,6 +89,10 @@ const setupDatabase = async () => {
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_shield_active BOOLEAN DEFAULT FALSE;');
     console.log('[DB] "is_shield_active" column ensured in territories table.');
 
+    // --- NEW COLUMN FOR CARVE MODE ---
+    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_carve_mode_active BOOLEAN DEFAULT FALSE;');
+    console.log('[DB] "is_carve_mode_active" column ensured in territories table.');
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
         id SERIAL PRIMARY KEY,
@@ -687,10 +691,14 @@ io.on('connection', (socket) => {
         const memberInfoRes = await client.query('SELECT clan_id, role FROM clan_members WHERE user_id = $1', [googleId]);
         const clanId = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].clan_id : null;
         const role = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].role : null;
-        const playerProfileRes = await client.query('SELECT has_shield, username IS NOT NULL as has_record FROM territories WHERE owner_id = $1', [googleId]);
+        
+        // --- UPDATED QUERY TO FETCH CARVE MODE ---
+        const playerProfileRes = await client.query('SELECT has_shield, is_carve_mode_active, username IS NOT NULL as has_record FROM territories WHERE owner_id = $1', [googleId]);
         const hasShield = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_shield : false;
+        const isCarveModeActive = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].is_carve_mode_active : false;
         const playerHasRecord = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_record : false;
 
+        // --- UPDATED PLAYER OBJECT TO INCLUDE CARVE MODE ---
         players[socket.id] = { 
             id: socket.id, 
             name, 
@@ -709,6 +717,7 @@ io.on('connection', (socket) => {
             isGhostRunnerActive: false,
             isLastStandActive: false,
             isInfiltratorActive: false,
+            isCarveModeActive: isCarveModeActive,
         };
     
         let activeTerritories = [];
@@ -933,8 +942,7 @@ io.on('connection', (socket) => {
             await client.query('ROLLBACK');
             return; 
         }
-
-        // --- FIXED BLOCK STARTS HERE ---
+        
         if (result.status === 'infiltratorBaseSet') {
             console.log('[Claim] Infiltrator Phase 1 complete. No territory change yet.');
             await client.query('COMMIT'); 
@@ -993,7 +1001,6 @@ io.on('connection', (socket) => {
         player.isDrawing = false;
         player.activeTrail = [];
         io.emit('trailCleared', { id: socket.id });
-        // --- FIXED BLOCK ENDS HERE ---
 
     } catch (err) {
         await client.query('ROLLBACK');
@@ -1013,7 +1020,7 @@ io.on('connection', (socket) => {
         console.log(`[SERVER] Player ${player.name}'s trail will persist for ${DISCONNECT_TRAIL_PERSIST_SECONDS} seconds.`);
         player.disconnectTimer = setTimeout(async () => {
             console.log(`[SERVER] Disconnect timer expired for ${player.name}. Clearing trail.`);
-            if(players[socket.id]) { // Check if player reconnected in time
+            if(players[socket.id]) {
                 players[socket.id].isDrawing = false; 
                 players[socket.id].activeTrail = []; 
                 delete players[socket.id]; 
