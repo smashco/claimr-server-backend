@@ -3,32 +3,16 @@ const { handleShieldHit } = require('./interactions/shield_interaction');
 const { handleWipeout } = require('./interactions/unshielded_interaction');
 const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
 
-/**
- * Main handler for all solo player claims. It acts as a router, delegating
- * to specialized handlers based on the player's active abilities (e.g., Infiltrator),
- * or processing a standard claim otherwise.
- *
- * @param {object} io - The Socket.IO server instance.
- * @param {object} socket - The player's socket object.
- * @param {object} player - The player object from the server's state.
- * @param {object} players - The map of all active players.
- * @param {Array<object>} trail - The list of coordinates for an expansion claim.
- * @param {object} baseClaim - The data for an initial base claim.
- * @param {object} client - The PostgreSQL database client.
- * @returns {Promise<object|null>} An object with claim results or null on failure.
- */
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const { isInfiltratorActive } = player;
 
     // --- DELEGATION LOGIC ---
-    // If the player has infiltrator power active, use the specialized handler and stop here.
     if (isInfiltratorActive) {
         console.log('[DEBUG] Delegating to Infiltrator handler.');
         return await handleInfiltratorClaim(io, socket, player, players, trail, baseClaim, client);
     }
     // --- END DELEGATION ---
 
-    // All the standard claim logic below will only run for non-infiltrator claims.
     console.log(`\n\n[DEBUG] =================== NEW STANDARD CLAIM ===================`);
     const userId = player.googleId;
     const isInitialBaseClaim = !!baseClaim;
