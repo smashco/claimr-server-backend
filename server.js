@@ -184,15 +184,13 @@ const checkAdminAuth = (req, res, next) => {
     if (req.cookies.admin_session === process.env.ADMIN_SECRET_KEY) {
         return next();
     }
-    // Differentiate between API calls and page navigation
     if (req.originalUrl.startsWith('/admin/api')) {
         return res.status(401).json({ message: 'Unauthorized' });
     }
-    // For any other unauthorized /admin path, redirect to login
     res.redirect('/admin/login');
 };
 
-// --- Public Admin Routes on the Router ---
+// --- Public Admin Routes ---
 adminRouter.get('/login', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
@@ -212,7 +210,7 @@ adminRouter.post('/login', (req, res) => {
     }
 });
 
-// --- Protected Admin Routes on the Router ---
+// --- Protected Admin Routes ---
 adminRouter.get('/dashboard', checkAdminAuth, (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
@@ -298,6 +296,7 @@ app.use('/admin', adminRouter);
 app.get('/admin', (req, res) => {
     res.redirect('/admin/login');
 });
+
 
 // =======================================================================
 // --- MAIN GAME LOGIC (API & SOCKETS) ---
@@ -559,7 +558,7 @@ app.post('/clans/:id/set-base', authenticate, async (req, res) => {
         for (const memberRow of clanMembers.rows) {
             const memberSocketId = Object.keys(players).find(sockId => players[sockId].googleId === memberRow.user_id);
             if (memberSocketId) {
-                io.to(memberSocketId).emit('clanBase Activated', { center: baseLocation }); 
+                io.to(memberSocketId).emit('clanBaseActivated', { center: baseLocation }); 
             }
         }
         await client.query('COMMIT');
