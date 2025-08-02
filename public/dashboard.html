@@ -58,8 +58,10 @@
 
         async function fetchPlayers() {
             try {
+                // Ensure credentials are included for authentication with cookies
                 const response = await fetch('/admin/api/players', { credentials: 'include' });
                 
+                // If unauthorized (401 or 403), redirect to login
                 if (response.status === 401 || response.status === 403) {
                     alert('Session expired. Please log in again.');
                     window.location.href = '/admin/login';
@@ -83,6 +85,7 @@
             const tableBody = document.getElementById('player-table-body');
             tableBody.innerHTML = '';
             
+            // Clear existing map markers
             Object.values(playerMarkers).forEach(marker => marker.remove());
             playerMarkers = {};
 
@@ -111,7 +114,7 @@
                         <button class="btn btn-sm btn-info" onclick="performAction('${player.owner_id}', 'give-shield', '${player.username}')">Give Shield</button>
                         <button class="btn btn-sm btn-primary" onclick="performAction('${player.owner_id}', 'give-infiltrator', '${player.username}')">Give Infiltrator</button>
                         ${isOnline ? `<button class="btn btn-sm btn-secondary" onclick="performAction('${player.owner_id}', 'kick', '${player.username}')">Kick</button>` : ''}
-                        <button class="btn btn-sm btn-danger" onclick="performAction('${player.owner_id}', 'delete', '${player.username}')">Delete</button>
+                        <button class="btn btn-sm btn-danger" onclick="performAction('${player.owner_id}', 'delete', '${player.username}')">Delete Player</button>
                     </td>
                 `;
                 tableBody.appendChild(row);
@@ -135,7 +138,7 @@
         
         async function performAction(playerId, action, username) {
             const actions = {
-                'reset-territory': { confirm: `Are you sure you want to reset ALL territory for ${username}?`, method: 'POST' },
+                'reset-territory': { confirm: `Are you sure you want to reset ALL territory for ${username}? This will set their area to zero.`, method: 'POST' },
                 'give-shield': { confirm: `Give a shield charge to ${username}?`, method: 'POST' },
                 'give-infiltrator': { confirm: `Give an INFILTRATOR charge to ${username}?`, method: 'POST' },
                 'kick': { confirm: `Are you sure you want to disconnect ${username}?`, method: 'POST' },
@@ -145,6 +148,7 @@
             if (!confirm(actions[action].confirm)) return;
 
             try {
+                // Ensure credentials are included for authentication with cookies
                 const response = await fetch(`/admin/api/player/${playerId}/${action}`, {
                     method: actions[action].method,
                     headers: { 'Content-Type': 'application/json' },
