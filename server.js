@@ -184,13 +184,18 @@ const checkAdminAuth = (req, res, next) => {
     if (req.cookies.admin_session === process.env.ADMIN_SECRET_KEY) {
         return next();
     }
+    // Check if the request is an API call
     if (req.originalUrl.startsWith('/admin/api')) {
-        return res.status(401).json({ message: 'Unauthorized' });
+        return res.status(401).json({ message: 'Unauthorized: Please log in.' });
     }
+    // Otherwise, it's a direct page access, redirect to login
     res.redirect('/admin/login');
 };
 
-// --- Public Admin Routes ---
+// Mount the admin router at the /admin path
+app.use('/admin', adminRouter);
+
+// --- Public Admin Routes on the Router ---
 adminRouter.get('/login', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
@@ -210,7 +215,7 @@ adminRouter.post('/login', (req, res) => {
     }
 });
 
-// --- Protected Admin Routes ---
+// --- Protected Admin Routes on the Router ---
 adminRouter.get('/dashboard', checkAdminAuth, (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
@@ -289,14 +294,11 @@ adminRouter.delete('/api/player/:id/delete', checkAdminAuth, async (req, res) =>
     }
 });
 
-// Mount the entire admin router under the /admin path
-app.use('/admin', adminRouter);
-
 // Main entry point for anyone navigating to /admin
 app.get('/admin', (req, res) => {
+    // This is defined outside the adminRouter so it correctly handles the root /admin URL
     res.redirect('/admin/login');
 });
-
 
 // =======================================================================
 // --- MAIN GAME LOGIC (API & SOCKETS) ---
