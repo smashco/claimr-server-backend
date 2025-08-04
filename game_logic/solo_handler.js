@@ -1,8 +1,9 @@
 const turf = require('@turf/turf');
-const { handleShieldHit } = require('../interactions/shield_interaction');
-const { handleWipeout } = require('../interactions/unshielded_interaction');
-const { handleInfiltratorClaim } = require('../interactions/infiltrator_interaction');
-const { handleCarveOut } = require('../interactions/carve_interaction');
+// CORRECTED FILE PATHS
+const { handleShieldHit } = require('./interactions/shield_interaction');
+const { handleWipeout } = require('./interactions/unshielded_interaction');
+const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
+const { handleCarveOut } = require('./interactions/carve_interaction');
 const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler');
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
