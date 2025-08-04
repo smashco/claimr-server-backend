@@ -1,3 +1,4 @@
+// game_logic/solo_handler.js
 const turf = require('@turf/turf');
 const { handleShieldHit } = require('./interactions/shield_interaction');
 const { handleWipeout } = require('./interactions/unshielded_interaction');
@@ -5,8 +6,36 @@ const { handleInfiltratorClaim } = require('./interactions/infiltrator_interacti
 const { handleCarveOut } = require('./interactions/carve_interaction');
 const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler');
 
-async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
+/**
+ * Handles all logic for a solo player's territory claim, including geofence checks and quest updates.
+ * @param {object} io - The Socket.IO server instance.
+ * @param {object} socket - The player's socket.
+ * @param {object} player - The player's in-memory data.
+ * @param {object} players - The map of all online players.
+ * @param {Array<object>} trail - The array of LatLng points for the claim.
+ * @param {object|null} baseClaim - Data for an initial base claim.
+ * @param {object} client - The PostgreSQL database client.
+ * @param {object} geofenceService - The geofence service instance for validation.
+ * @returns {Promise<object|null>} The result of the claim or null if failed.
+ */
+async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client, geofenceService) {
     const { isInfiltratorActive, isCarveModeActive } = player;
+
+    // --- NEW: GEOFENCE VALIDATION ---
+    // Determine the single point to check against the geofence.
+    const validationPoint = baseClaim ? baseClaim : (trail.length > 0 ? trail[0] : null);
+    if (!validationPoint) {
+        socket.emit('claimRejected', { reason: 'Invalid claim data. No starting point.' });
+        return null;
+    }
+
+    const isLocationValid = await geofenceService.isLocationValid(validationPoint.lat, validationPoint.lng);
+    if (!isLocationValid) {
+        console.log(`[REJECTED] Claim by ${player.name} at (${validationPoint.lat}, ${validationPoint.lng}) is outside playable area.`);
+        socket.emit('claimRejected', { reason: 'You are outside the designated playable area.' });
+        return null;
+    }
+    // --- END GEOFENCE VALIDATION ---
 
     if (isInfiltratorActive) {
         console.log('[DEBUG] Delegating to Infiltrator handler for base claim.');
@@ -74,8 +103,23 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             socket.emit('claimRejected', { reason: 'You must claim a base before expanding.' });
             return null;
         }
-
-        const existingArea = JSON.parse(existingRes.rows[0].geojson_area);
+        
+        // Ensure geojson_area is not null and is a valid JSON string before parsing
+        const geojsonString = existingRes.rows[0].geojson_area;
+        if (!geojsonString) {
+            socket.emit('claimRejected', { reason: 'Cannot expand from a non-existent territory.' });
+            return null;
+        }
+        
+        let existingArea;
+        try {
+            existingArea = JSON.parse(geojsonString);
+        } catch (e) {
+            console.error('[ERROR] Failed to parse existing area GeoJSON:', e);
+            socket.emit('claimRejected', { reason: 'Server error: Corrupted territory data.' });
+            return null;
+        }
+        
         const intersects = await client.query(`
             SELECT ST_Intersects(ST_GeomFromGeoJSON($1), ST_GeomFromGeoJSON($2)) AS intersect;
         `, [JSON.stringify(newAreaPolygon.geometry), JSON.stringify(existingArea.geometry || existingArea)]);
@@ -167,7 +211,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                                        ELSE territories.original_base_point END;
     `, [userId, player.name, finalAreaGeoJSON, finalAreaSqM, isInitialBaseClaim, baseClaim?.lng, baseClaim?.lat]);
 
-    console.log(`[SUCCESS] Claim committed: +${newAreaSqM.toFixed(2)} sqm`);
+    console.log(`[SUCCESS] Claim committed: +${newAreaSqM.toFixed(2)} sqm for player ${player.name}`);
     return {
         finalTotalArea: finalAreaSqM,
         areaClaimed: newAreaSqM,
