@@ -1114,59 +1114,109 @@ io.on('connection', (socket) => {
 
   socket.on('claimTerritory', async (req) => {
     const player = players[socket.id];
-    if (!player) return;
+    if (!player || !player.googleId || !req.gameMode) {
+      console.warn(`[Claim] Invalid claimTerritory request from ${socket.id}`);
+      return;
+    }
+
+    const { gameMode, trail, baseClaim } = req; 
+    
+    if (trail.length < 1 && !baseClaim) { 
+        console.warn(`[Claim] Invalid trail length for claim by ${player.name}. Trail length: ${trail.length}, BaseClaim: ${!!baseClaim}`);
+        socket.emit('claimRejected', { reason: 'Invalid trail length.' });
+        return;
+    }
+
+    if (player.lastClaimAttempt && (Date.now() - player.lastClaimAttempt.timestamp < 3000)) { 
+        console.warn(`[Claim] Player ${player.name} attempting claims too fast.`);
+        socket.emit('claimRejected', { reason: 'Please wait a moment before claiming again.' });
+        return;
+    }
+    player.lastClaimAttempt = { timestamp: Date.now(), type: baseClaim ? 'base' : 'expansion' };
+
     const client = await pool.connect();
     try {
-        await client.query('BEGIN');
+        await client.query('BEGIN'); 
         let result;
-        if (req.gameMode === 'solo') {
-            result = await handleSoloClaim(io, socket, player, players, req.trail, req.baseClaim, client);
+        if (gameMode === 'solo') {
+            result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client); 
+        } else if (gameMode === 'clan') {
+            result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client); 
         } else {
-            result = await handleClanClaim(io, socket, player, players, req.trail, req.baseClaim, client);
+            throw new Error('Invalid game mode specified.');
         }
-        if (!result) { await client.query('ROLLBACK'); return; }
+
+        if (!result) { 
+            await client.query('ROLLBACK');
+            return; 
+        }
         
-        await client.query('COMMIT');
-        socket.emit('claimSuccessful', { newTotalArea: result.finalTotalArea, areaClaimed: result.areaClaimed });
+        const { finalTotalArea, areaClaimed, ownerIdsToUpdate } = result;
+        await client.query('COMMIT'); 
+
+        socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
+        
+        const soloOwnersToUpdate = [];
+        const clanOwnersToUpdate = [];
+
+        if (ownerIdsToUpdate && ownerIdsToUpdate.length > 0) {
+            for (const id of ownerIdsToUpdate) {
+                if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id) && id.length < 10)) { 
+                    clanOwnersToUpdate.push(parseInt(id, 10));
+                } else if (typeof id === 'string') {
+                    soloOwnersToUpdate.push(id);
+                }
+            }
+        }
 
         let batchUpdateData = [];
-        const { soloOwners, clanOwners } = result.ownerIdsToUpdate.reduce((acc, id) => {
-            (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id))) ? acc.clanOwners.push(parseInt(id, 10)) : acc.soloOwners.push(id);
-            return acc;
-        }, { soloOwners: [], clanOwners: [] });
+        if (soloOwnersToUpdate.length > 0) {
+            const soloQueryResult = await client.query(`
+                SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", identity_color, ST_AsGeoJSON(area) as geojson, area_sqm as area 
+                FROM territories WHERE owner_id = ANY($1::varchar[]);`, [soloOwnersToUpdate]);
+            batchUpdateData = batchUpdateData.concat(soloQueryResult.rows.map(r => ({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
+        }
+        if (clanOwnersToUpdate.length > 0) {
+            const clanQueryResult = await client.query(`
+                SELECT ct.clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", '#CCCCCC' as identity_color, ST_AsGeoJSON(ct.area) as geojson, ct.area_sqm as area
+                FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[]);`, [clanOwnersToUpdate]);
+            batchUpdateData = batchUpdateData.concat(clanQueryResult.rows.map(r => ({...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
+        }
 
-        if (soloOwners.length > 0) {
-            const soloRes = await client.query(`SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", identity_color, ST_AsGeoJSON(area) as geojson, area_sqm as area FROM territories WHERE owner_id = ANY($1::varchar[]);`, [soloOwners]);
-            batchUpdateData = batchUpdateData.concat(soloRes.rows.map(r => ({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
-        }
-        if (clanOwners.length > 0) {
-            const clanRes = await client.query(`SELECT ct.clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", '#CCCCCC' as identity_color, ST_AsGeoJSON(ct.area) as geojson, ct.area_sqm as area FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[]);`, [clanOwners]);
-            batchUpdateData = batchUpdateData.concat(clanRes.rows.map(r => ({...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
-        }
         if (batchUpdateData.length > 0) {
+            console.log(`[GAME] Broadcasting territory updates for ${batchUpdateData.length} entities.`);
             io.emit('batchTerritoryUpdate', batchUpdateData);
         }
+        
         player.isDrawing = false;
         player.activeTrail = [];
         io.emit('trailCleared', { id: socket.id });
+
     } catch (err) {
         await client.query('ROLLBACK');
-        socket.emit('claimRejected', { reason: 'Server error during claim.' });
+        console.error('[DB] FATAL Error during territory claim:', err);
+        socket.emit('claimRejected', { reason: err.message || 'Server error during claim.' });
     } finally {
         client.release();
     }
   });
-
+  
   socket.on('disconnect', () => {
     const player = players[socket.id];
     if (player) {
+      console.log(`[SERVER] User ${player?.name || 'Unknown'} disconnected: ${socket.id}`);
+      
       if (player.isDrawing) {
-        player.disconnectTimer = setTimeout(() => {
-            if(players[socket.id]) delete players[socket.id];
-            io.emit('trailCleared', { id: socket.id });
+        console.log(`[SERVER] Player ${player.name}'s trail will persist for ${DISCONNECT_TRAIL_PERSIST_SECONDS} seconds.`);
+        player.disconnectTimer = setTimeout(async () => {
+            console.log(`[SERVER] Disconnect timer expired for ${player.name}. Clearing trail.`);
+            if(players[socket.id]) {
+                delete players[socket.id]; 
+            }
+            io.emit('trailCleared', { id: socket.id }); 
         }, DISCONNECT_TRAIL_PERSIST_SECONDS * 1000);
       } else {
-        delete players[socket.id];
+        delete players[socket.id]; 
         io.emit('playerLeft', { id: socket.id });
       }
     }
@@ -1179,8 +1229,8 @@ const main = async () => {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`[SERVER] Listening on 0.0.0.0:${PORT}`);
     setupDatabase().catch(err => {
-        console.error("[SERVER] Failed to setup database:", err);
-        process.exit(1);
+        console.error("[SERVER] Failed to setup database after server start:", err);
+        process.exit(1); 
     });
     checkExpiredShields(); 
     setInterval(checkExpiredShields, 1000 * 60 * 60);
