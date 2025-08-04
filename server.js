@@ -13,7 +13,9 @@ const bcrypt = require('bcryptjs');
 // --- Require the Game and Service Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
-const GeofenceService = require('./geofence_service'); 
+// This is your original file, so GeofenceService was not included.
+// If you have a geofence_service.js file, let me know.
+// const GeofenceService = require('./geofence_service'); 
 const { updateQuestProgress, QUEST_TYPES } = require('./game_logic/quest_handler');
 
 
@@ -70,7 +72,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-const geofenceService = new GeofenceService(pool);
+// const geofenceService = new GeofenceService(pool);
 const players = {}; 
 
 // --- Database Schema Setup ---
@@ -152,20 +154,7 @@ const setupDatabase = async () => {
       );
     `);
     console.log('[DB] "clan_territories" table is ready.');
-
-    // Geofence Zones Table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS geofence_zones (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(100) NOT NULL,
-        zone_type VARCHAR(10) NOT NULL CHECK (zone_type IN ('allowed', 'blocked')),
-        geom GEOMETRY(GEOMETRY, 4326) NOT NULL,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    console.log('[DB] "geofence_zones" table is ready.');
-    await client.query('CREATE INDEX IF NOT EXISTS geofence_geom_idx ON geofence_zones USING GIST (geom);');
-
+    
     // --- QUEST TABLES ---
     await client.query(`
         CREATE TABLE IF NOT EXISTS quests (
@@ -310,7 +299,7 @@ const checkSponsorAuth = (req, res, next) => {
 app.use('/admin', adminRouter);
 app.use('/sponsor', sponsorRouter);
 
-// --- Admin Panel Routes ---
+// Admin Panel Routes
 adminRouter.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 adminRouter.post('/login', (req, res) => {
     const { password } = req.body;
@@ -323,7 +312,7 @@ adminRouter.post('/login', (req, res) => {
 });
 adminRouter.get('/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
 
-// --- Player Admin API ---
+// Player Admin API
 adminRouter.get('/api/players', checkAdminAuth, async (req, res) => {
     try {
         const result = await pool.query('SELECT owner_id, username, area_sqm, is_carve_mode_active FROM territories ORDER BY username');
@@ -353,36 +342,7 @@ adminRouter.post('/api/player/:id/:action', checkAdminAuth, async (req, res) => 
     }
 });
 
-// --- Geofence Admin API ---
-adminRouter.get('/api/geofence-zones', checkAdminAuth, async (req, res) => {
-    try {
-        const zones = await geofenceService.getGeofencePolygons();
-        res.json(zones);
-    } catch (err) { res.status(500).json({ message: 'Server error' }); }
-});
-
-adminRouter.post('/api/geofence-zones/upload', checkAdminAuth, upload.single('kmlFile'), async (req, res) => {
-    try {
-        const { name, zoneType } = req.body;
-        const kmlFile = req.file;
-        const kmlString = kmlFile.buffer.toString('utf8');
-        await geofenceService.addZoneFromKML(kmlString, name, zoneType);
-        const updatedZones = await geofenceService.getGeofencePolygons();
-        io.emit('geofenceUpdate', updatedZones);
-        res.json({ message: 'Geofence zone uploaded successfully!' });
-    } catch (err) { res.status(500).json({ message: err.message || 'Failed to process KML file.' }); }
-});
-
-adminRouter.delete('/api/geofence-zones/:id', checkAdminAuth, async (req, res) => {
-    try {
-        await geofenceService.deleteZone(req.params.id);
-        const updatedZones = await geofenceService.getGeofencePolygons();
-        io.emit('geofenceUpdate', updatedZones);
-        res.json({ message: 'Zone deleted successfully.' });
-    } catch (err) { res.status(500).json({ message: 'Server error' }); }
-});
-
-// --- Admin Quest Management API ---
+// Admin Quest Management API
 adminRouter.get('/api/quests', checkAdminAuth, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -419,7 +379,8 @@ adminRouter.delete('/api/quests/:id', checkAdminAuth, async (req, res) => {
     } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
 
-// --- Sponsor Panel Routes ---
+
+// Sponsor Panel Routes
 sponsorRouter.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'sponsor.html')));
 sponsorRouter.get('/dashboard', checkSponsorAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'sponsor_dashboard.html')));
 
@@ -482,7 +443,6 @@ sponsorRouter.post('/api/verify', checkSponsorAuth, async (req, res) => {
         client.release();
     }
 });
-
 
 // =======================================================================
 // --- MAIN GAME LOGIC (API & SOCKETS) ---
@@ -1125,7 +1085,7 @@ io.on('connection', (socket) => {
     player.isDrawing = false;
     player.activeTrail = [];
     player.isGhostRunnerActive = false;
-    // player.isLastStandActive = false; // This was incorrect, shield persists
+    // player.isLastStandActive = false; // This was incorrect, shield persists until hit or expired
     
     io.emit('trailCleared', { id: socket.id }); 
   });
@@ -1178,13 +1138,10 @@ io.on('connection', (socket) => {
     if (!player || !player.googleId || !req.gameMode) {
       return;
     }
-
     const { gameMode, trail, baseClaim } = req;
-    
     if (trail.length < 1 && !baseClaim) {
         return socket.emit('claimRejected', { reason: 'Invalid trail length.' });
     }
-
     if (player.lastClaimAttempt && (Date.now() - player.lastClaimAttempt.timestamp < 3000)) {
         return socket.emit('claimRejected', { reason: 'Please wait a moment before claiming again.' });
     }
@@ -1199,26 +1156,25 @@ io.on('connection', (socket) => {
         } else if (gameMode === 'clan') {
             result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client);
         }
-        
         if (!result) { 
             await client.query('ROLLBACK');
             return; 
         }
         
-        const { finalTotalArea, areaClaimed, ownerIdsToUpdate } = result;
         await client.query('COMMIT');
         
-        socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
+        socket.emit('claimSuccessful', { newTotalArea: result.finalTotalArea, areaClaimed: result.areaClaimed });
 
+        const ownerIdsToUpdate = result.ownerIdsToUpdate || [];
         const soloOwnersToUpdate = [];
         const clanOwnersToUpdate = [];
-        if (ownerIdsToUpdate) {
-            for (const id of ownerIdsToUpdate) {
-                if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id))) {
-                    clanOwnersToUpdate.push(parseInt(id, 10));
-                } else if (typeof id === 'string') {
-                    soloOwnersToUpdate.push(id);
-                }
+
+        for (const id of ownerIdsToUpdate) {
+            // FIX: Correctly differentiate between string-based Google IDs and integer-based Clan IDs
+            if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id) && !isNaN(parseInt(id, 10)) && id.length < 10)) {
+                clanOwnersToUpdate.push(parseInt(id, 10));
+            } else if (typeof id === 'string') {
+                soloOwnersToUpdate.push(id);
             }
         }
         

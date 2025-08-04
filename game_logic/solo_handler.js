@@ -3,7 +3,7 @@ const { handleShieldHit } = require('./interactions/shield_interaction');
 const { handleWipeout } = require('./interactions/unshielded_interaction');
 const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
 const { handleCarveOut } = require('./interactions/carve_interaction');
-const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler'); // Added for quests
+const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler');
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const { isInfiltratorActive, isCarveModeActive } = player;
@@ -125,7 +125,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         await updateQuestProgress(userId, QUEST_TYPES.ATTACK_BASE, basesAttackedCount, client, io, players);
     }
 
-    // --- UPDATED: Reset the Carve Mode flag in the database ---
     if (isCarveModeActive) {
         console.log('[DEBUG] Carve mode expansion complete. Deactivating carve mode in DB.');
         await client.query('UPDATE territories SET is_carve_mode_active = false WHERE owner_id = $1', [userId]);
