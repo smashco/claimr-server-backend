@@ -99,9 +99,6 @@ const setupDatabase = async () => {
       );
     `);
     console.log('[DB] "territories" table is ready.');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_shield_active BOOLEAN DEFAULT FALSE;');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS shield_activated_at TIMESTAMP WITH TIME ZONE DEFAULT NULL;');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_carve_mode_active BOOLEAN DEFAULT FALSE;');
 
     // Clans Table
     await client.query(`
@@ -343,9 +340,12 @@ adminRouter.post('/api/player/:id/:action', checkAdminAuth, async (req, res) => 
         if (action === 'reset-territory') {
             await pool.query("UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0, original_base_point = NULL, is_carve_mode_active = false WHERE owner_id = $1", [id]);
             io.emit('batchTerritoryUpdate', [{ ownerId: id, area: 0, geojson: null }]);
-            res.json({ message: `Territory for player ${id} has been reset.` });
-        } else { res.status(400).json({ message: 'Invalid action.' }); }
-    } catch (err) { res.status(500).json({ message: 'Server error' }); }
+            return res.json({ message: `Territory for player ${id} has been reset.` });
+        }
+        return res.status(400).json({ message: 'Invalid action.' });
+    } catch (err) {
+        res.status(500).json({ message: 'Server error' });
+    }
 });
 
 adminRouter.delete('/api/player/:id/delete', checkAdminAuth, async (req, res) => {
@@ -390,7 +390,6 @@ adminRouter.delete('/api/geofence-zones/:id', checkAdminAuth, async (req, res) =
 // --- Admin Quest Management API ---
 adminRouter.get('/api/quests', checkAdminAuth, async (req, res) => {
     try {
-        // CORRECTED QUERY: Removed join with non-existent 'users' table
         const result = await pool.query(`
             SELECT q.*, t.username as winner_username, t.owner_name as winner_fullname
             FROM quests q
@@ -489,13 +488,13 @@ sponsorRouter.post('/api/verify', checkSponsorAuth, async (req, res) => {
     }
 });
 
+
 // =======================================================================
 // --- MAIN GAME LOGIC (API & SOCKETS) ---
 // =======================================================================
 app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
 
-// ... (All existing API routes from your file go here, unchanged)
 app.put('/users/me/preferences', authenticate, async (req, res) => {
     const { googleId } = req.user;
     const { identityColor } = req.body;

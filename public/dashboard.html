@@ -215,8 +215,8 @@
                     <td><span class="badge ${player.isOnline ? 'bg-success' : 'bg-secondary'}">${player.isOnline ? 'Online' : 'Offline'}</span></td>
                     <td>${player.username || 'N/A'}</td><td>${areaKm2}</td>
                     <td>
-                        <button class="btn btn-sm btn-warning" onclick="performAction('${player.owner_id}', 'reset-territory', '${player.username}')">Reset Territory</button>
-                        <button class="btn btn-sm btn-danger" onclick="performAction('${player.owner_id}', 'delete', '${player.username}')">Delete Player</button>
+                        <button class="btn btn-sm btn-warning" onclick="performAction('${player.owner_id}', 'reset-territory', '${player.username}')">Reset</button>
+                        <button class="btn btn-sm btn-danger" onclick="performAction('${player.owner_id}', 'delete', '${player.username}')">Delete</button>
                     </td>`;
                 tableBody.appendChild(row);
                 if (player.isOnline && player.lastKnownPosition) {
@@ -244,7 +244,7 @@
                 const quests = await apiFetch('/admin/api/quests');
                 renderQuests(quests);
             } catch (error) {
-                document.getElementById('quest-table-body').innerHTML = `<tr><td colspan="7" class="text-center text-danger">${error.message}</td></tr>`;
+                document.getElementById('quest-table-body').innerHTML = `<tr><td colspan="7" class="text-center text-danger">${error.message || 'Server error'}</td></tr>`;
             }
         }
         

@@ -1,35 +1,44 @@
 /**
  * @file unshielded_interaction.js
- * @description Handles the complete wipeout of an unshielded victim.
+ * @description Handles the interaction when an attacker hits an unshielded victim.
+ *              This is a "carve" operation, not a "wipeout".
  */
 
 /**
- * Merges the victim's territory into the attacker's claim and then
- * erases the victim's territory from the database.
+ * Calculates the victim's remaining territory after the attacker's claim is subtracted from it.
+ * This function DOES NOT modify the attacker's geometry.
  *
  * @param {object} victim - The victim player's data from the database { owner_id, username, area }.
  * @param {string} attackerNetGainGeom - The WKT representation of the attacker's claim geometry.
  * @param {object} client - The PostgreSQL database client.
- * @returns {Promise<string>} The updated WKT geometry for the attacker's claim after absorbing the victim's land.
+ * @returns {Promise<void>}
  */
 async function handleWipeout(victim, attackerNetGainGeom, client) {
-    console.log(`[WIPEOUT] Absorbing territory from ${victim.username}.`);
+    console.log(`[CARVE] Carving out territory from ${victim.username}.`);
 
-    // Merge the victim's area into the attacker's gain
-    const mergeResult = await client.query(
-        `SELECT ST_Union($1::geometry, $2::geometry) AS final_geom`,
-        [attackerNetGainGeom, victim.area]
+    // Calculate the victim's remaining area by subtracting the attacker's claim.
+    const diffResult = await client.query(
+        `SELECT ST_Difference($1::geometry, $2::geometry) AS remaining_geom`,
+        [victim.area, attackerNetGainGeom]
     );
 
-    // Erase the victim's territory by setting it to an empty geometry
-    await client.query(
-        `UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1`,
-        [victim.owner_id]
-    );
-    console.log(`[WIPEOUT] ${victim.username}'s territory has been wiped.`);
+    const remainingGeom = diffResult.rows[0].remaining_geom;
 
-    // Return the new, larger geometry
-    return mergeResult.rows[0].final_geom;
+    // Update the victim's territory with the new, smaller geometry.
+    // We also need to recalculate their total area.
+    const updateResult = await client.query(
+        `UPDATE territories 
+         SET 
+            area = ST_CollectionExtract(ST_Multi(ST_MakeValid($1)), 3), 
+            area_sqm = ST_Area(ST_MakeValid($1)::geography)
+         WHERE owner_id = $2`,
+        [remainingGeom, victim.owner_id]
+    );
+    
+    console.log(`[CARVE] ${victim.username}'s territory has been reduced.`);
+
+    // This function no longer returns a value because it doesn't add the victim's land to the attacker.
+    // The attacker just gets what they originally drew.
 }
 
 module.exports = { handleWipeout };

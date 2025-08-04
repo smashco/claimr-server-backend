@@ -1,10 +1,10 @@
 const turf = require('@turf/turf');
-// CORRECTED FILE PATHS
 const { handleShieldHit } = require('./interactions/shield_interaction');
 const { handleWipeout } = require('./interactions/unshielded_interaction');
 const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
 const { handleCarveOut } = require('./interactions/carve_interaction');
 const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler');
+
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const { isInfiltratorActive, isCarveModeActive } = player;
@@ -77,10 +77,9 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
 
         const existingArea = JSON.parse(existingRes.rows[0].geojson_area);
-        const intersects = await client.query(
-            `SELECT ST_Intersects(ST_GeomFromGeoJSON($1), ST_GeomFromGeoJSON($2)) AS intersect;`,
-            [JSON.stringify(newAreaPolygon.geometry), JSON.stringify(existingArea.geometry || existingArea)]
-        );
+        const intersects = await client.query(`
+            SELECT ST_Intersects(ST_GeomFromGeoJSON($1), ST_GeomFromGeoJSON($2)) AS intersect;
+        `, [JSON.stringify(newAreaPolygon.geometry), JSON.stringify(existingArea.geometry || existingArea)]);
 
         if (!intersects.rows[0].intersect) {
             console.log(`[REJECTED] Expansion does not connect`);
@@ -128,6 +127,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         await updateQuestProgress(userId, QUEST_TYPES.ATTACK_BASE, basesAttackedCount, client, io, players);
     }
 
+    // --- UPDATED: Reset the Carve Mode flag in the database ---
     if (isCarveModeActive) {
         console.log('[DEBUG] Carve mode expansion complete. Deactivating carve mode in DB.');
         await client.query('UPDATE territories SET is_carve_mode_active = false WHERE owner_id = $1', [userId]);
