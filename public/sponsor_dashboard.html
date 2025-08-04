@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sponsor Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #212529; color: #dee2e6; }
+        .table { color: #dee2e6; }
+        .card { background-color: #343a40; }
+    </style>
+</head>
+<body>
+    <div class="container py-4">
+        <h1 class="mb-4">Sponsor Dashboard</h1>
+        
+        <div class="row">
+            <div class="col-md-4 mb-4">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Verify Player</h5>
+                        <form id="verifyForm">
+                            <div class="mb-3">
+                                <label for="unique_code" class="form-label">Player's Unique Code</label>
+                                <input type="text" class="form-control" id="unique_code" required>
+                            </div>
+                            <button type="submit" class="btn btn-success">Verify & Complete</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-8">
+                <h2>Quest Registrations</h2>
+                <div class="table-responsive">
+                    <table class="table table-dark table-striped">
+                        <thead>
+                            <tr><th>Player</th><th>Unique Code</th><th>Status</th></tr>
+                        </thead>
+                        <tbody id="registrations-table-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function apiFetch(url, options = {}) {
+            options.credentials = 'include';
+            const response = await fetch(url, options);
+            if (response.status === 401) {
+                window.location.href = '/sponsor/login';
+                throw new Error('Unauthorized');
+            }
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ message: `HTTP error!` }));
+                throw new Error(errorData.message);
+            }
+            return response.json();
+        }
+
+        async function fetchRegistrations() {
+            try {
+                const registrations = await apiFetch('/sponsor/api/registrations');
+                renderRegistrations(registrations);
+            } catch (error) {
+                console.error('Error fetching registrations:', error);
+                document.getElementById('registrations-table-body').innerHTML = `<tr><td colspan="3" class="text-danger">${error.message}</td></tr>`;
+            }
+        }
+
+        function renderRegistrations(registrations) {
+            const tableBody = document.getElementById('registrations-table-body');
+            tableBody.innerHTML = '';
+            if (registrations.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="3" class="text-center">No players have registered for your quest yet.</td></tr>';
+                return;
+            }
+            registrations.forEach(reg => {
+                const row = document.createElement('tr');
+                const statusClass = reg.status === 'verified' ? 'text-success' : 'text-warning';
+                row.innerHTML = `
+                    <td>
+                        <img src="${reg.profile_image_url}" width="30" height="30" class="rounded-circle me-2">
+                        ${reg.username}
+                    </td>
+                    <td><code>${reg.unique_code}</code></td>
+                    <td class="${statusClass}">${reg.status.toUpperCase()}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+
+        document.getElementById('verifyForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const code = document.getElementById('unique_code').value;
+            try {
+                const result = await apiFetch('/sponsor/api/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ unique_code: code })
+                });
+                alert(result.message);
+                this.reset();
+                fetchRegistrations();
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        });
+
+        window.onload = fetchRegistrations;
+    </script>
+</body>
+</html>
