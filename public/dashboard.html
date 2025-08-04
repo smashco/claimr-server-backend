@@ -80,7 +80,10 @@
     <script>
         let map;
         let playerMarkers = {};
-        let geofenceLayers = L.layerGroup();
+        // --- THIS IS THE FIX ---
+        // L.featureGroup has the .getBounds() method, while L.layerGroup does not.
+        let geofenceLayers = L.featureGroup();
+        // --- END OF FIX ---
 
         function initMap() {
             map = L.map('map').setView([19.0760, 72.8777], 10); // Center on Mumbai
@@ -154,7 +157,6 @@
                 `;
                 list.appendChild(listItem);
 
-                // Add to map
                 const style = {
                     color: zone.zone_type === 'allowed' ? '#28a745' : '#dc3545',
                     weight: 2,
@@ -201,8 +203,7 @@
             }
         }
 
-        // Previous player rendering and action functions...
-        function renderPlayers(players) { /* Unchanged but simplified columns */
+        function renderPlayers(players) {
             const tableBody = document.getElementById('player-table-body');
             tableBody.innerHTML = '';
             Object.values(playerMarkers).forEach(marker => marker.remove());
@@ -235,7 +236,7 @@
             });
         }
         
-        async function performAction(playerId, action, username) { /* simplified from original */
+        async function performAction(playerId, action, username) {
             const actions = {
                 'reset-territory': { confirm: `Reset ALL territory for ${username}?`, method: 'POST' },
                 'delete': { confirm: `DANGER: Permanently DELETE ${username} and all their data?`, method: 'DELETE' }
