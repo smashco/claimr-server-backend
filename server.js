@@ -153,6 +153,7 @@ const setupDatabase = async () => {
     `);
     console.log('[DB] "clan_territories" table is ready.');
 
+    // Geofence Zones Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS geofence_zones (
         id SERIAL PRIMARY KEY,
@@ -309,7 +310,7 @@ const checkSponsorAuth = (req, res, next) => {
 app.use('/admin', adminRouter);
 app.use('/sponsor', sponsorRouter);
 
-// Admin Panel Routes
+// --- Admin Panel Routes ---
 adminRouter.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 adminRouter.post('/login', (req, res) => {
     const { password } = req.body;
@@ -322,7 +323,7 @@ adminRouter.post('/login', (req, res) => {
 });
 adminRouter.get('/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
 
-// Player Admin API
+// --- Player Admin API ---
 adminRouter.get('/api/players', checkAdminAuth, async (req, res) => {
     try {
         const result = await pool.query('SELECT owner_id, username, area_sqm, is_carve_mode_active FROM territories ORDER BY username');
@@ -341,19 +342,18 @@ adminRouter.post('/api/player/:id/:action', checkAdminAuth, async (req, res) => 
         if (action === 'reset-territory') {
             await pool.query("UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0, original_base_point = NULL, is_carve_mode_active = false WHERE owner_id = $1", [id]);
             io.emit('batchTerritoryUpdate', [{ ownerId: id, area: 0, geojson: null }]);
-            res.json({ message: `Territory for player ${id} has been reset.` });
+            return res.json({ message: `Territory for player ${id} has been reset.` });
         } else if (action === 'delete') {
              await pool.query('DELETE FROM territories WHERE owner_id = $1', [id]);
-            res.json({ message: `Player ${id} has been deleted.` });
-        } else {
-             res.status(400).json({ message: 'Invalid action.' });
+            return res.json({ message: `Player ${id} has been deleted.` });
         }
+        return res.status(400).json({ message: 'Invalid action.' });
     } catch (err) {
         res.status(500).json({ message: 'Server error' });
     }
 });
 
-// Geofence Admin API
+// --- Geofence Admin API ---
 adminRouter.get('/api/geofence-zones', checkAdminAuth, async (req, res) => {
     try {
         const zones = await geofenceService.getGeofencePolygons();
@@ -382,7 +382,7 @@ adminRouter.delete('/api/geofence-zones/:id', checkAdminAuth, async (req, res) =
     } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
 
-// Admin Quest Management API
+// --- Admin Quest Management API ---
 adminRouter.get('/api/quests', checkAdminAuth, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -419,7 +419,7 @@ adminRouter.delete('/api/quests/:id', checkAdminAuth, async (req, res) => {
     } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
 
-// Sponsor Panel Routes
+// --- Sponsor Panel Routes ---
 sponsorRouter.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'sponsor.html')));
 sponsorRouter.get('/dashboard', checkSponsorAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'sponsor_dashboard.html')));
 
@@ -482,6 +482,7 @@ sponsorRouter.post('/api/verify', checkSponsorAuth, async (req, res) => {
         client.release();
     }
 });
+
 
 // =======================================================================
 // --- MAIN GAME LOGIC (API & SOCKETS) ---

@@ -3,7 +3,7 @@ const { handleShieldHit } = require('./interactions/shield_interaction');
 const { handleWipeout } = require('./interactions/unshielded_interaction');
 const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
 const { handleCarveOut } = require('./interactions/carve_interaction');
-const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler');
+const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler'); // Added for quests
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const { isInfiltratorActive, isCarveModeActive } = player;
@@ -100,12 +100,12 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     `, [userId]);
 
     console.log(`[DEBUG] Overlapping enemies found: ${victims.rowCount}`);
-    
+
     let basesAttackedCount = 0;
 
     for (const victim of victims.rows) {
         affectedOwnerIds.add(victim.owner_id);
-        basesAttackedCount++; 
+        basesAttackedCount++;
 
         if (victim.is_shield_active) {
             attackerNetGainGeom = await handleShieldHit(victim, attackerNetGainGeom, client, io, players);
@@ -120,6 +120,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
     
+    // SAFE TO ADD: Quest progress update
     if (basesAttackedCount > 0) {
         await updateQuestProgress(userId, QUEST_TYPES.ATTACK_BASE, basesAttackedCount, client, io, players);
     }
