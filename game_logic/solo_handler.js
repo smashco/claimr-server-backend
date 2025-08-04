@@ -5,7 +5,6 @@ const { handleInfiltratorClaim } = require('./interactions/infiltrator_interacti
 const { handleCarveOut } = require('./interactions/carve_interaction');
 const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler');
 
-
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const { isInfiltratorActive, isCarveModeActive } = player;
 
@@ -102,12 +101,11 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
     console.log(`[DEBUG] Overlapping enemies found: ${victims.rowCount}`);
     
-    // Quest Tracking: Count how many unique bases were attacked
     let basesAttackedCount = 0;
 
     for (const victim of victims.rows) {
         affectedOwnerIds.add(victim.owner_id);
-        basesAttackedCount++; // Increment for each enemy territory hit
+        basesAttackedCount++; 
 
         if (victim.is_shield_active) {
             attackerNetGainGeom = await handleShieldHit(victim, attackerNetGainGeom, client, io, players);
@@ -121,13 +119,11 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             }
         }
     }
-
-    // If any bases were attacked, update quest progress
+    
     if (basesAttackedCount > 0) {
         await updateQuestProgress(userId, QUEST_TYPES.ATTACK_BASE, basesAttackedCount, client, io, players);
     }
 
-    // --- UPDATED: Reset the Carve Mode flag in the database ---
     if (isCarveModeActive) {
         console.log('[DEBUG] Carve mode expansion complete. Deactivating carve mode in DB.');
         await client.query('UPDATE territories SET is_carve_mode_active = false WHERE owner_id = $1', [userId]);

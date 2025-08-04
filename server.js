@@ -488,7 +488,6 @@ sponsorRouter.post('/api/verify', checkSponsorAuth, async (req, res) => {
     }
 });
 
-
 // =======================================================================
 // --- MAIN GAME LOGIC (API & SOCKETS) ---
 // =======================================================================
@@ -1115,57 +1114,48 @@ io.on('connection', (socket) => {
   socket.on('claimTerritory', async (req) => {
     const player = players[socket.id];
     if (!player || !player.googleId || !req.gameMode) {
-      console.warn(`[Claim] Invalid claimTerritory request from ${socket.id}`);
       return;
     }
 
-    const { gameMode, trail, baseClaim } = req; 
+    const { gameMode, trail, baseClaim } = req;
     
-    if (trail.length < 1 && !baseClaim) { 
-        console.warn(`[Claim] Invalid trail length for claim by ${player.name}. Trail length: ${trail.length}, BaseClaim: ${!!baseClaim}`);
-        socket.emit('claimRejected', { reason: 'Invalid trail length.' });
-        return;
+    if (trail.length < 1 && !baseClaim) {
+        return socket.emit('claimRejected', { reason: 'Invalid trail length.' });
     }
 
-    if (player.lastClaimAttempt && (Date.now() - player.lastClaimAttempt.timestamp < 3000)) { 
-        console.warn(`[Claim] Player ${player.name} attempting claims too fast.`);
-        socket.emit('claimRejected', { reason: 'Please wait a moment before claiming again.' });
-        return;
+    if (player.lastClaimAttempt && (Date.now() - player.lastClaimAttempt.timestamp < 3000)) {
+        return socket.emit('claimRejected', { reason: 'Please wait a moment before claiming again.' });
     }
-    player.lastClaimAttempt = { timestamp: Date.now(), type: baseClaim ? 'base' : 'expansion' };
+    player.lastClaimAttempt = { timestamp: Date.now() };
 
     const client = await pool.connect();
     try {
-        await client.query('BEGIN'); 
+        await client.query('BEGIN');
         let result;
         if (gameMode === 'solo') {
-            result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client); 
+            result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client);
         } else if (gameMode === 'clan') {
-            result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client); 
-        } else {
-            throw new Error('Invalid game mode specified.');
+            result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client);
         }
-
+        
         if (!result) { 
             await client.query('ROLLBACK');
             return; 
         }
         
-        const { finalTotalArea, areaClaimed, ownerIdsToUpdate } = result;
-        await client.query('COMMIT'); 
-
-        socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
+        await client.query('COMMIT');
         
+        socket.emit('claimSuccessful', { newTotalArea: result.finalTotalArea, areaClaimed: result.areaClaimed });
+
+        const ownerIdsToUpdate = result.ownerIdsToUpdate || [];
         const soloOwnersToUpdate = [];
         const clanOwnersToUpdate = [];
 
-        if (ownerIdsToUpdate && ownerIdsToUpdate.length > 0) {
-            for (const id of ownerIdsToUpdate) {
-                if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id) && id.length < 10)) { 
-                    clanOwnersToUpdate.push(parseInt(id, 10));
-                } else if (typeof id === 'string') {
-                    soloOwnersToUpdate.push(id);
-                }
+        for (const id of ownerIdsToUpdate) {
+            if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id))) {
+                clanOwnersToUpdate.push(parseInt(id, 10));
+            } else if (typeof id === 'string') {
+                soloOwnersToUpdate.push(id);
             }
         }
 
@@ -1182,41 +1172,33 @@ io.on('connection', (socket) => {
                 FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[]);`, [clanOwnersToUpdate]);
             batchUpdateData = batchUpdateData.concat(clanQueryResult.rows.map(r => ({...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
         }
-
+        
         if (batchUpdateData.length > 0) {
-            console.log(`[GAME] Broadcasting territory updates for ${batchUpdateData.length} entities.`);
             io.emit('batchTerritoryUpdate', batchUpdateData);
         }
         
         player.isDrawing = false;
         player.activeTrail = [];
         io.emit('trailCleared', { id: socket.id });
-
     } catch (err) {
         await client.query('ROLLBACK');
         console.error('[DB] FATAL Error during territory claim:', err);
-        socket.emit('claimRejected', { reason: err.message || 'Server error during claim.' });
+        socket.emit('claimRejected', { reason: 'Server error during claim.' });
     } finally {
         client.release();
     }
   });
-  
+
   socket.on('disconnect', () => {
     const player = players[socket.id];
     if (player) {
-      console.log(`[SERVER] User ${player?.name || 'Unknown'} disconnected: ${socket.id}`);
-      
       if (player.isDrawing) {
-        console.log(`[SERVER] Player ${player.name}'s trail will persist for ${DISCONNECT_TRAIL_PERSIST_SECONDS} seconds.`);
-        player.disconnectTimer = setTimeout(async () => {
-            console.log(`[SERVER] Disconnect timer expired for ${player.name}. Clearing trail.`);
-            if(players[socket.id]) {
-                delete players[socket.id]; 
-            }
-            io.emit('trailCleared', { id: socket.id }); 
+        player.disconnectTimer = setTimeout(() => {
+            if(players[socket.id]) delete players[socket.id];
+            io.emit('trailCleared', { id: socket.id });
         }, DISCONNECT_TRAIL_PERSIST_SECONDS * 1000);
       } else {
-        delete players[socket.id]; 
+        delete players[socket.id];
         io.emit('playerLeft', { id: socket.id });
       }
     }
@@ -1229,8 +1211,8 @@ const main = async () => {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`[SERVER] Listening on 0.0.0.0:${PORT}`);
     setupDatabase().catch(err => {
-        console.error("[SERVER] Failed to setup database after server start:", err);
-        process.exit(1); 
+        console.error("[SERVER] Failed to setup database:", err);
+        process.exit(1);
     });
     checkExpiredShields(); 
     setInterval(checkExpiredShields, 1000 * 60 * 60);
