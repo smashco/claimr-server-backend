@@ -91,12 +91,14 @@ const setupDatabase = async () => {
         original_base_point GEOMETRY(POINT, 4326),
         has_shield BOOLEAN DEFAULT FALSE,
         is_shield_active BOOLEAN DEFAULT FALSE,
+        shield_activated_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
         is_carve_mode_active BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
     console.log('[DB] "territories" table is ready.');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_shield_active BOOLEAN DEFAULT FALSE;');
+    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS shield_activated_at TIMESTAMP WITH TIME ZONE DEFAULT NULL;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_carve_mode_active BOOLEAN DEFAULT FALSE;');
 
     // Clans Table
@@ -174,6 +176,46 @@ const setupDatabase = async () => {
     client.release();
   }
 };
+
+// --- Shield Expiry Check Function ---
+async function checkExpiredShields() {
+    console.log('[SHIELD EXPIRY] Running check for expired shields...');
+    const client = await pool.connect();
+    try {
+        const expiredShields = await client.query(
+            `SELECT owner_id, username FROM territories WHERE is_shield_active = true AND shield_activated_at < NOW() - INTERVAL '48 hours'`
+        );
+
+        if (expiredShields.rowCount === 0) {
+            console.log('[SHIELD EXPIRY] No expired shields found.');
+            return;
+        }
+
+        for (const shield of expiredShields.rows) {
+            console.log(`[SHIELD EXPIRY] Shield for ${shield.username} (${shield.owner_id}) has expired. Deactivating.`);
+            
+            await client.query(
+                `UPDATE territories SET is_shield_active = false, shield_activated_at = NULL WHERE owner_id = $1`,
+                [shield.owner_id]
+            );
+
+            const playerSocketId = Object.keys(players).find(id => players[id]?.googleId === shield.owner_id);
+            if (playerSocketId) {
+                // Update server state for the player
+                if (players[playerSocketId]) {
+                    players[playerSocketId].isLastStandActive = false;
+                }
+                // Notify the client
+                io.to(playerSocketId).emit('shieldExpired');
+                console.log(`[SHIELD EXPIRY] Notified online player ${shield.username} of shield expiration.`);
+            }
+        }
+    } catch (err) {
+        console.error('[SHIELD EXPIRY] Error during shield expiration check:', err);
+    } finally {
+        client.release();
+    }
+}
 
 // --- Middleware ---
 const authenticate = async (req, res, next) => {
@@ -801,8 +843,14 @@ io.on('connection', (socket) => {
         const clanId = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].clan_id : null;
         const role = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].role : null;
 
-        const playerProfileRes = await client.query('SELECT has_shield, is_carve_mode_active, username IS NOT NULL as has_record FROM territories WHERE owner_id = $1', [googleId]);
+        const playerProfileRes = await client.query(
+            'SELECT has_shield, is_shield_active, shield_activated_at, is_carve_mode_active, username IS NOT NULL as has_record FROM territories WHERE owner_id = $1', 
+            [googleId]
+        );
+        
         const hasShield = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_shield : false;
+        const isShieldActive = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].is_shield_active : false;
+        const shieldActivatedAt = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].shield_activated_at : null;
         const isCarveModeActive = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].is_carve_mode_active : false;
         const playerHasRecord = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_record : false;
 
@@ -822,10 +870,17 @@ io.on('connection', (socket) => {
             infiltratorCharges: 1,
             ghostRunnerCharges: 1,
             isGhostRunnerActive: false,
-            isLastStandActive: false,
+            isLastStandActive: isShieldActive,
             isInfiltratorActive: false,
             isCarveModeActive: isCarveModeActive,
         };
+        
+        if (isShieldActive && shieldActivatedAt) {
+            socket.emit('initialShieldState', { 
+                isActive: true, 
+                activatedAt: shieldActivatedAt 
+            });
+        }
 
         const geofencePolygons = await geofenceService.getGeofencePolygons();
         socket.emit('geofenceUpdate', geofencePolygons);
@@ -972,7 +1027,7 @@ io.on('connection', (socket) => {
     player.isDrawing = false;
     player.activeTrail = [];
     player.isGhostRunnerActive = false;
-    player.isLastStandActive = false;
+    // Do not reset isLastStandActive here, it persists until hit or expired.
 
     io.emit('trailCleared', { id: socket.id });
   });
@@ -1001,12 +1056,24 @@ io.on('connection', (socket) => {
       const player = players[socket.id];
       if (player && player.lastStandCharges > 0) {
           player.lastStandCharges--;
-          player.isLastStandActive = true;
-
+          
           try {
-              await pool.query('UPDATE territories SET is_shield_active = true WHERE owner_id = $1', [player.googleId]);
-              console.log(`[GAME] ${player.name} activated LAST STAND. Charges left: ${player.lastStandCharges}`);
-              socket.emit('superpowerAcknowledged', { power: 'lastStand', chargesLeft: player.lastStandCharges });
+              const result = await pool.query(
+                  'UPDATE territories SET is_shield_active = true, shield_activated_at = CURRENT_TIMESTAMP WHERE owner_id = $1 RETURNING shield_activated_at', 
+                  [player.googleId]
+              );
+              
+              const activationTime = result.rows[0].shield_activated_at;
+              player.isLastStandActive = true;
+
+              console.log(`[GAME] ${player.name} activated LAST STAND. Charges left: ${player.lastStandCharges}. Expires in 48 hours.`);
+              
+              socket.emit('superpowerAcknowledged', { 
+                  power: 'lastStand', 
+                  chargesLeft: player.lastStandCharges,
+                  shieldActivatedAt: activationTime
+              });
+
           } catch(e) {
               console.error(`[DB] Error activating shield for ${player.googleId}`, e);
               player.lastStandCharges++;
@@ -1147,6 +1214,7 @@ io.on('connection', (socket) => {
 
 // --- Server Start ---
 setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
+
 const main = async () => {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`[SERVER] Listening on 0.0.0.0:${PORT}`);
@@ -1154,6 +1222,9 @@ const main = async () => {
         console.error("[SERVER] Failed to setup database after server start:", err);
         process.exit(1);
     });
+    // Run the shield expiry check once on startup and then every hour.
+    checkExpiredShields(); 
+    setInterval(checkExpiredShields, 1000 * 60 * 60);
   });
 };
 

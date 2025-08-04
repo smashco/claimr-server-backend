@@ -17,13 +17,19 @@
 async function handleShieldHit(victim, attackerNetGainGeom, client, io, players) {
     console.log(`[SHIELD] Attacker hit a shield owned by ${victim.username}.`);
 
-    // Deactivate the victim's shield in the database
-    await client.query(`UPDATE territories SET is_shield_active = false WHERE owner_id = $1`, [victim.owner_id]);
+    // Deactivate the victim's shield and clear the activation timestamp in the database
+    await client.query(
+        `UPDATE territories SET is_shield_active = false, shield_activated_at = NULL WHERE owner_id = $1`, 
+        [victim.owner_id]
+    );
     console.log(`[SHIELD] Shield for ${victim.username} has been broken.`);
 
     // Notify the victim that their shield was used and broken
     const victimSocketId = Object.keys(players).find(id => players[id]?.googleId === victim.owner_id);
     if (victimSocketId) {
+        if(players[victimSocketId]) {
+            players[victimSocketId].isLastStandActive = false;
+        }
         io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: 0 });
         console.log(`[SHIELD] Notified ${victim.username} of shield break.`);
     }
