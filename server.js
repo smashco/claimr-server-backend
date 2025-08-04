@@ -13,7 +13,6 @@ const bcrypt = require('bcryptjs');
 // --- Require the Game and Service Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
-// *** FIX: UNCOMMENTED GeofenceService REQUIRE ***
 const GeofenceService = require('./geofence_service'); 
 const { updateQuestProgress, QUEST_TYPES } = require('./game_logic/quest_handler');
 
@@ -71,7 +70,6 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// *** FIX: UNCOMMENTED GeofenceService INITIALIZATION ***
 const geofenceService = new GeofenceService(pool);
 const players = {}; 
 
@@ -154,8 +152,7 @@ const setupDatabase = async () => {
       );
     `);
     console.log('[DB] "clan_territories" table is ready.');
-    
-    // Geofence Zones Table
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS geofence_zones (
         id SERIAL PRIMARY KEY,
@@ -168,7 +165,7 @@ const setupDatabase = async () => {
     console.log('[DB] "geofence_zones" table is ready.');
     await client.query('CREATE INDEX IF NOT EXISTS geofence_geom_idx ON geofence_zones USING GIST (geom);');
 
-    // --- NEW QUEST TABLES ---
+    // --- QUEST TABLES ---
     await client.query(`
         CREATE TABLE IF NOT EXISTS quests (
             id SERIAL PRIMARY KEY,
@@ -312,7 +309,7 @@ const checkSponsorAuth = (req, res, next) => {
 app.use('/admin', adminRouter);
 app.use('/sponsor', sponsorRouter);
 
-// --- Admin Panel Routes ---
+// Admin Panel Routes
 adminRouter.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 adminRouter.post('/login', (req, res) => {
     const { password } = req.body;
@@ -325,10 +322,10 @@ adminRouter.post('/login', (req, res) => {
 });
 adminRouter.get('/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
 
-// --- Player Admin API ---
+// Player Admin API
 adminRouter.get('/api/players', checkAdminAuth, async (req, res) => {
     try {
-        const result = await pool.query('SELECT owner_id, username, area_sqm FROM territories ORDER BY username');
+        const result = await pool.query('SELECT owner_id, username, area_sqm, is_carve_mode_active FROM territories ORDER BY username');
         const dbPlayers = result.rows;
         const enhancedPlayers = dbPlayers.map(dbPlayer => {
             const onlinePlayer = Object.values(players).find(p => p.googleId === dbPlayer.owner_id);
@@ -342,17 +339,50 @@ adminRouter.post('/api/player/:id/:action', checkAdminAuth, async (req, res) => 
     const { id, action } = req.params;
     try {
         if (action === 'reset-territory') {
-            await pool.query("UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0, original_base_point = NULL WHERE owner_id = $1", [id]);
+            await pool.query("UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0, original_base_point = NULL, is_carve_mode_active = false WHERE owner_id = $1", [id]);
             io.emit('batchTerritoryUpdate', [{ ownerId: id, area: 0, geojson: null }]);
             res.json({ message: `Territory for player ${id} has been reset.` });
         } else if (action === 'delete') {
              await pool.query('DELETE FROM territories WHERE owner_id = $1', [id]);
             res.json({ message: `Player ${id} has been deleted.` });
-        } else { res.status(400).json({ message: 'Invalid action.' }); }
+        } else {
+             res.status(400).json({ message: 'Invalid action.' });
+        }
+    } catch (err) {
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// Geofence Admin API
+adminRouter.get('/api/geofence-zones', checkAdminAuth, async (req, res) => {
+    try {
+        const zones = await geofenceService.getGeofencePolygons();
+        res.json(zones);
     } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
 
-// --- Admin Quest Management API ---
+adminRouter.post('/api/geofence-zones/upload', checkAdminAuth, upload.single('kmlFile'), async (req, res) => {
+    try {
+        const { name, zoneType } = req.body;
+        const kmlFile = req.file;
+        const kmlString = kmlFile.buffer.toString('utf8');
+        await geofenceService.addZoneFromKML(kmlString, name, zoneType);
+        const updatedZones = await geofenceService.getGeofencePolygons();
+        io.emit('geofenceUpdate', updatedZones);
+        res.json({ message: 'Geofence zone uploaded successfully!' });
+    } catch (err) { res.status(500).json({ message: err.message || 'Failed to process KML file.' }); }
+});
+
+adminRouter.delete('/api/geofence-zones/:id', checkAdminAuth, async (req, res) => {
+    try {
+        await geofenceService.deleteZone(req.params.id);
+        const updatedZones = await geofenceService.getGeofencePolygons();
+        io.emit('geofenceUpdate', updatedZones);
+        res.json({ message: 'Zone deleted successfully.' });
+    } catch (err) { res.status(500).json({ message: 'Server error' }); }
+});
+
+// Admin Quest Management API
 adminRouter.get('/api/quests', checkAdminAuth, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -389,8 +419,7 @@ adminRouter.delete('/api/quests/:id', checkAdminAuth, async (req, res) => {
     } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
 
-
-// --- Sponsor Panel Routes ---
+// Sponsor Panel Routes
 sponsorRouter.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'sponsor.html')));
 sponsorRouter.get('/dashboard', checkSponsorAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'sponsor_dashboard.html')));
 
@@ -1076,7 +1105,6 @@ io.on('connection', (socket) => {
     if (!player) return;
     console.log(`[Socket] Player ${player.name} (${socket.id}) stopped drawing trail (run ended).`);
     
-    // FIX for Quest Progress: check if the player was actually drawing
     if (player.isDrawing && player.activeTrail.length > 1) {
         const trailLineString = turf.lineString(player.activeTrail.map(p => [p.lng, p.lat]));
         const distanceMeters = turf.length(trailLineString, { units: 'meters' });
@@ -1096,7 +1124,7 @@ io.on('connection', (socket) => {
     player.isDrawing = false;
     player.activeTrail = [];
     player.isGhostRunnerActive = false;
-    player.isLastStandActive = false; 
+    // player.isLastStandActive = false; // This was incorrect, shield persists
     
     io.emit('trailCleared', { id: socket.id }); 
   });
