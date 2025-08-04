@@ -13,9 +13,8 @@ const bcrypt = require('bcryptjs');
 // --- Require the Game and Service Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
-// This is your original file, so GeofenceService was not included.
-// If you have a geofence_service.js file, let me know.
-// const GeofenceService = require('./geofence_service'); 
+// *** FIX: UNCOMMENTED GeofenceService REQUIRE ***
+const GeofenceService = require('./geofence_service'); 
 const { updateQuestProgress, QUEST_TYPES } = require('./game_logic/quest_handler');
 
 
@@ -72,7 +71,8 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// const geofenceService = new GeofenceService(pool);
+// *** FIX: UNCOMMENTED GeofenceService INITIALIZATION ***
+const geofenceService = new GeofenceService(pool);
 const players = {}; 
 
 // --- Database Schema Setup ---
@@ -155,6 +155,19 @@ const setupDatabase = async () => {
     `);
     console.log('[DB] "clan_territories" table is ready.');
     
+    // Geofence Zones Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS geofence_zones (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        zone_type VARCHAR(10) NOT NULL CHECK (zone_type IN ('allowed', 'blocked')),
+        geom GEOMETRY(GEOMETRY, 4326) NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[DB] "geofence_zones" table is ready.');
+    await client.query('CREATE INDEX IF NOT EXISTS geofence_geom_idx ON geofence_zones USING GIST (geom);');
+
     // --- NEW QUEST TABLES ---
     await client.query(`
         CREATE TABLE IF NOT EXISTS quests (
@@ -270,9 +283,8 @@ const authenticate = async (req, res, next) => {
 };
 
 // =======================================================================
-// --- ADMIN & SPONSOR PANEL LOGIC (as per your original script) ---
+// --- ADMIN & SPONSOR PANEL LOGIC ---
 // =======================================================================
-// ... (Your original script did not have the new admin panel, adding it now) ...
 const adminRouter = express.Router();
 const sponsorRouter = express.Router();
 
@@ -300,7 +312,7 @@ const checkSponsorAuth = (req, res, next) => {
 app.use('/admin', adminRouter);
 app.use('/sponsor', sponsorRouter);
 
-// Admin Panel Routes
+// --- Admin Panel Routes ---
 adminRouter.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 adminRouter.post('/login', (req, res) => {
     const { password } = req.body;
@@ -313,7 +325,7 @@ adminRouter.post('/login', (req, res) => {
 });
 adminRouter.get('/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
 
-// Player Admin API
+// --- Player Admin API ---
 adminRouter.get('/api/players', checkAdminAuth, async (req, res) => {
     try {
         const result = await pool.query('SELECT owner_id, username, area_sqm FROM territories ORDER BY username');
@@ -340,7 +352,7 @@ adminRouter.post('/api/player/:id/:action', checkAdminAuth, async (req, res) => 
     } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
 
-// Admin Quest Management API
+// --- Admin Quest Management API ---
 adminRouter.get('/api/quests', checkAdminAuth, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -448,7 +460,6 @@ sponsorRouter.post('/api/verify', checkSponsorAuth, async (req, res) => {
 app.get('/', (req, res) => { res.send('ClaimrunX Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
 
-// ... (All existing API routes from your file) ...
 app.put('/users/me/preferences', authenticate, async (req, res) => {
     const { googleId } = req.user;
     const { identityColor } = req.body;
@@ -751,7 +762,7 @@ app.post('/clans/:id/requests', authenticate, async (req, res) => {
     const { id: clanId } = req.params;
     const { googleId } = req.user;
     try {
-        const memberCheck = await client.query('SELECT 1 FROM clan_members WHERE user_id = $1', [googleId]);
+        const memberCheck = await pool.query('SELECT 1 FROM clan_members WHERE user_id = $1', [googleId]);
         if (memberCheck.rowCount > 0) {
             return res.status(409).json({ message: 'You are already in a clan.' });
         }
@@ -875,6 +886,7 @@ app.post('/api/quests/:id/register', authenticate, async (req, res) => {
         res.status(500).json({ message: 'Server error.' });
     }
 });
+
 
 // --- Socket.IO Logic ---
 async function broadcastAllPlayers() {
@@ -1064,6 +1076,7 @@ io.on('connection', (socket) => {
     if (!player) return;
     console.log(`[Socket] Player ${player.name} (${socket.id}) stopped drawing trail (run ended).`);
     
+    // FIX for Quest Progress: check if the player was actually drawing
     if (player.isDrawing && player.activeTrail.length > 1) {
         const trailLineString = turf.lineString(player.activeTrail.map(p => [p.lng, p.lat]));
         const distanceMeters = turf.length(trailLineString, { units: 'meters' });
@@ -1134,87 +1147,77 @@ io.on('connection', (socket) => {
   socket.on('claimTerritory', async (req) => {
     const player = players[socket.id];
     if (!player || !player.googleId || !req.gameMode) {
-      console.warn(`[Claim] Invalid claimTerritory request from ${socket.id}`);
       return;
     }
 
-    const { gameMode, trail, baseClaim } = req; 
+    const { gameMode, trail, baseClaim } = req;
     
-    if (trail.length < 1 && !baseClaim) { 
-        console.warn(`[Claim] Invalid trail length for claim by ${player.name}. Trail length: ${trail.length}, BaseClaim: ${!!baseClaim}`);
-        socket.emit('claimRejected', { reason: 'Invalid trail length.' });
-        return;
+    if (trail.length < 1 && !baseClaim) {
+        return socket.emit('claimRejected', { reason: 'Invalid trail length.' });
     }
 
-    if (player.lastClaimAttempt && (Date.now() - player.lastClaimAttempt.timestamp < 3000)) { 
-        console.warn(`[Claim] Player ${player.name} attempting claims too fast.`);
-        socket.emit('claimRejected', { reason: 'Please wait a moment before claiming again.' });
-        return;
+    if (player.lastClaimAttempt && (Date.now() - player.lastClaimAttempt.timestamp < 3000)) {
+        return socket.emit('claimRejected', { reason: 'Please wait a moment before claiming again.' });
     }
-    player.lastClaimAttempt = { timestamp: Date.now(), type: baseClaim ? 'base' : 'expansion' };
+    player.lastClaimAttempt = { timestamp: Date.now() };
 
     const client = await pool.connect();
     try {
-        await client.query('BEGIN'); 
+        await client.query('BEGIN');
         let result;
         if (gameMode === 'solo') {
-            result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client); 
+            result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client);
         } else if (gameMode === 'clan') {
-            result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client); 
-        } else {
-            throw new Error('Invalid game mode specified.');
+            result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client);
         }
-
+        
         if (!result) { 
             await client.query('ROLLBACK');
             return; 
         }
         
         const { finalTotalArea, areaClaimed, ownerIdsToUpdate } = result;
-        await client.query('COMMIT'); 
-
-        socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
+        await client.query('COMMIT');
         
+        socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
+
         const soloOwnersToUpdate = [];
         const clanOwnersToUpdate = [];
-
-        if (ownerIdsToUpdate && ownerIdsToUpdate.length > 0) {
+        if (ownerIdsToUpdate) {
             for (const id of ownerIdsToUpdate) {
-                if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id) && id.length < 10)) { 
+                if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id))) {
                     clanOwnersToUpdate.push(parseInt(id, 10));
                 } else if (typeof id === 'string') {
                     soloOwnersToUpdate.push(id);
                 }
             }
         }
-
+        
         let batchUpdateData = [];
         if (soloOwnersToUpdate.length > 0) {
             const soloQueryResult = await client.query(`
                 SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", identity_color, ST_AsGeoJSON(area) as geojson, area_sqm as area 
                 FROM territories WHERE owner_id = ANY($1::varchar[]);`, [soloOwnersToUpdate]);
-            batchUpdateData = batchUpdateData.concat(soloQueryResult.rows.map(r => ({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
+            batchUpdateData.push(...soloQueryResult.rows.map(r => ({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
         }
         if (clanOwnersToUpdate.length > 0) {
             const clanQueryResult = await client.query(`
                 SELECT ct.clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", '#CCCCCC' as identity_color, ST_AsGeoJSON(ct.area) as geojson, ct.area_sqm as area
                 FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[]);`, [clanOwnersToUpdate]);
-            batchUpdateData = batchUpdateData.concat(clanQueryResult.rows.map(r => ({...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
+            batchUpdateData.push(...clanQueryResult.rows.map(r => ({...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
         }
-
+        
         if (batchUpdateData.length > 0) {
-            console.log(`[GAME] Broadcasting territory updates for ${batchUpdateData.length} entities.`);
             io.emit('batchTerritoryUpdate', batchUpdateData);
         }
         
         player.isDrawing = false;
         player.activeTrail = [];
         io.emit('trailCleared', { id: socket.id });
-
     } catch (err) {
         await client.query('ROLLBACK');
         console.error('[DB] FATAL Error during territory claim:', err);
-        socket.emit('claimRejected', { reason: err.message || 'Server error during claim.' });
+        socket.emit('claimRejected', { reason: 'Server error during claim.' });
     } finally {
         client.release();
     }
