@@ -21,8 +21,7 @@ const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler');
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client, geofenceService) {
     const { isInfiltratorActive, isCarveModeActive } = player;
 
-    // --- NEW: GEOFENCE VALIDATION ---
-    // Determine the single point to check against the geofence.
+    // --- GEOFENCE VALIDATION ---
     const validationPoint = baseClaim ? baseClaim : (trail.length > 0 ? trail[0] : null);
     if (!validationPoint) {
         socket.emit('claimRejected', { reason: 'Invalid claim data. No starting point.' });
@@ -104,7 +103,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             return null;
         }
         
-        // Ensure geojson_area is not null and is a valid JSON string before parsing
         const geojsonString = existingRes.rows[0].geojson_area;
         if (!geojsonString) {
             socket.emit('claimRejected', { reason: 'Cannot expand from a non-existent territory.' });
@@ -164,7 +162,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         }
     }
     
-    // SAFE TO ADD: Quest progress update
     if (basesAttackedCount > 0) {
         await updateQuestProgress(userId, QUEST_TYPES.ATTACK_BASE, basesAttackedCount, client, io, players);
     }
@@ -212,6 +209,14 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     `, [userId, player.name, finalAreaGeoJSON, finalAreaSqM, isInitialBaseClaim, baseClaim?.lng, baseClaim?.lat]);
 
     console.log(`[SUCCESS] Claim committed: +${newAreaSqM.toFixed(2)} sqm for player ${player.name}`);
+
+    // --- NEW: QUEST HOOK FOR COMPLETING A RUN ---
+    // This is only triggered on a successful expansion claim, not the initial base.
+    if (!isInitialBaseClaim) {
+        await updateQuestProgress(userId, QUEST_TYPES.COMPLETE_RUN, 1, client, io, players);
+    }
+    // --- END NEW QUEST HOOK ---
+
     return {
         finalTotalArea: finalAreaSqM,
         areaClaimed: newAreaSqM,
