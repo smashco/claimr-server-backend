@@ -5,6 +5,7 @@ const { handleInfiltratorClaim } = require('./interactions/infiltrator_interacti
 const { handleCarveOut } = require('./interactions/carve_interaction');
 const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler');
 
+
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const { isInfiltratorActive, isCarveModeActive } = player;
 
