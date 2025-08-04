@@ -1,11 +1,13 @@
 const turf = require('@turf/turf');
+// ** CORRECTED PATHS FROM EARLIER BUG **
 const { handleShieldHit } = require('./interactions/shield_interaction');
 const { handleWipeout } = require('./interactions/unshielded_interaction');
 const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
 const { handleCarveOut } = require('./interactions/carve_interaction');
 const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler');
 
-
+// THIS FUNCTION IS NOW RESTORED TO YOUR ORIGINAL, WORKING LOGIC
+// WITH ONLY THE QUEST HOOK ADDED
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const { isInfiltratorActive, isCarveModeActive } = player;
 
@@ -101,12 +103,12 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     `, [userId]);
 
     console.log(`[DEBUG] Overlapping enemies found: ${victims.rowCount}`);
-    
+
     let basesAttackedCount = 0;
 
     for (const victim of victims.rows) {
         affectedOwnerIds.add(victim.owner_id);
-        basesAttackedCount++; 
+        basesAttackedCount++;
 
         if (victim.is_shield_active) {
             attackerNetGainGeom = await handleShieldHit(victim, attackerNetGainGeom, client, io, players);

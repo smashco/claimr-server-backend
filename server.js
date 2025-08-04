@@ -8,7 +8,7 @@ const { Pool } = require('pg');
 const admin = require('firebase-admin');
 const turf = require('@turf/turf');
 const multer = require('multer');
-const bcrypt = require('bcryptjs'); // For sponsor password hashing
+const bcrypt = require('bcryptjs');
 
 // --- Require the Game and Service Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
@@ -922,7 +922,6 @@ app.post('/api/quests/:id/register', authenticate, async (req, res) => {
     }
 });
 
-
 // --- Socket.IO Logic ---
 async function broadcastAllPlayers() {
     const playerIds = Object.keys(players);
@@ -1181,25 +1180,33 @@ io.on('connection', (socket) => {
   socket.on('claimTerritory', async (req) => {
     const player = players[socket.id];
     if (!player || !player.googleId || !req.gameMode) {
+      console.warn(`[Claim] Invalid claimTerritory request from ${socket.id}`);
       return;
     }
-    const { gameMode, trail, baseClaim } = req;
-    if (trail.length < 1 && !baseClaim) {
-      return socket.emit('claimRejected', { reason: 'Invalid trail length.' });
+
+    const { gameMode, trail, baseClaim } = req; 
+    
+    if (trail.length < 1 && !baseClaim) { 
+        console.warn(`[Claim] Invalid trail length for claim by ${player.name}. Trail length: ${trail.length}, BaseClaim: ${!!baseClaim}`);
+        socket.emit('claimRejected', { reason: 'Invalid trail length.' });
+        return;
     }
-    if (player.lastClaimAttempt && (Date.now() - player.lastClaimAttempt.timestamp < 3000)) {
-      return socket.emit('claimRejected', { reason: 'Please wait a moment before claiming again.' });
+
+    if (player.lastClaimAttempt && (Date.now() - player.lastClaimAttempt.timestamp < 3000)) { 
+        console.warn(`[Claim] Player ${player.name} attempting claims too fast.`);
+        socket.emit('claimRejected', { reason: 'Please wait a moment before claiming again.' });
+        return;
     }
-    player.lastClaimAttempt = { timestamp: Date.now() };
+    player.lastClaimAttempt = { timestamp: Date.now(), type: baseClaim ? 'base' : 'expansion' };
 
     const client = await pool.connect();
     try {
-        await client.query('BEGIN');
+        await client.query('BEGIN'); 
         let result;
         if (gameMode === 'solo') {
-            result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client);
+            result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client); 
         } else if (gameMode === 'clan') {
-            result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client);
+            result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client); 
         }
         
         if (!result) { 
@@ -1208,47 +1215,50 @@ io.on('connection', (socket) => {
         }
         
         const { finalTotalArea, areaClaimed, ownerIdsToUpdate } = result;
-        await client.query('COMMIT');
-        
-        socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
+        await client.query('COMMIT'); 
 
+        socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
+        
         const soloOwnersToUpdate = [];
         const clanOwnersToUpdate = [];
-        if (ownerIdsToUpdate) {
+
+        if (ownerIdsToUpdate && ownerIdsToUpdate.length > 0) {
             for (const id of ownerIdsToUpdate) {
-                if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id))) {
+                if (typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id) && id.length < 10)) { 
                     clanOwnersToUpdate.push(parseInt(id, 10));
                 } else if (typeof id === 'string') {
                     soloOwnersToUpdate.push(id);
                 }
             }
         }
-        
+
         let batchUpdateData = [];
         if (soloOwnersToUpdate.length > 0) {
             const soloQueryResult = await client.query(`
                 SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", identity_color, ST_AsGeoJSON(area) as geojson, area_sqm as area 
                 FROM territories WHERE owner_id = ANY($1::varchar[]);`, [soloOwnersToUpdate]);
-            batchUpdateData.push(...soloQueryResult.rows.map(r => ({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
+            batchUpdateData = batchUpdateData.concat(soloQueryResult.rows.map(r => ({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
         }
         if (clanOwnersToUpdate.length > 0) {
             const clanQueryResult = await client.query(`
                 SELECT ct.clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", '#CCCCCC' as identity_color, ST_AsGeoJSON(ct.area) as geojson, ct.area_sqm as area
                 FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[]);`, [clanOwnersToUpdate]);
-            batchUpdateData.push(...clanQueryResult.rows.map(r => ({...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
+            batchUpdateData = batchUpdateData.concat(clanQueryResult.rows.map(r => ({...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
         }
-        
+
         if (batchUpdateData.length > 0) {
+            console.log(`[GAME] Broadcasting territory updates for ${batchUpdateData.length} entities.`);
             io.emit('batchTerritoryUpdate', batchUpdateData);
         }
         
         player.isDrawing = false;
         player.activeTrail = [];
         io.emit('trailCleared', { id: socket.id });
+
     } catch (err) {
         await client.query('ROLLBACK');
         console.error('[DB] FATAL Error during territory claim:', err);
-        socket.emit('claimRejected', { reason: 'Server error during claim.' });
+        socket.emit('claimRejected', { reason: err.message || 'Server error during claim.' });
     } finally {
         client.release();
     }
