@@ -88,11 +88,9 @@ class GeofenceService {
         if (!polygonFeature) {
             throw new Error('No Polygon or MultiPolygon found in the KML file.');
         }
-        
-        // --- THIS IS THE FIX ---
-        // We wrap the geometry creation with ST_Force2D() to strip the Z (altitude) dimension.
+
+        // IMPORTANT: Use ST_Force2D to strip the Z (altitude) dimension from KML data.
         const geomWKT = `ST_SetSRID(ST_Force2D(ST_GeomFromGeoJSON('${JSON.stringify(polygonFeature.geometry)}')), 4326)`;
-        // --- END OF FIX ---
 
         const insertQuery = `
             INSERT INTO geofence_zones (name, zone_type, geom)
