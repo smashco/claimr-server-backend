@@ -14,28 +14,10 @@ const bcrypt = require('bcryptjs');
 const GeofenceService = require('./geofence_service'); 
 const { checkExpiredShields } = require('./game_logic/jobs/shield_expiry_job');
 
-// --- Require the Game and Service Logic Handlers ---
+// --- Require the TOP-LEVEL Game and Service Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
 const { updateQuestProgress, QUEST_TYPES } = require('./game_logic/quest_handler');
-
-// =========================================================
-// --- NEW: Require ALL interaction handlers at the root ---
-// =========================================================
-const { handleShieldHit } = require('./game_logic/interactions/shield_interaction');
-const { handlePartialTakeover } = require('./game_logic/interactions/unshielded_interaction');
-const { handleInfiltratorClaim } = require('./game_logic/interactions/infiltrator_interaction');
-const { handleCarveOut } = require('./game_logic/interactions/carve_interaction');
-
-// Create a single object to hold all interaction handlers for easy passing
-const interactions = {
-    handleShieldHit,
-    handlePartialTakeover,
-    handleInfiltratorClaim,
-    handleCarveOut
-};
-// =========================================================
-
 
 // --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -1016,7 +998,6 @@ io.on('connection', (socket) => {
     player.lastKnownPosition = data;
 
     if (player.isDrawing) {
-        // --- REAL-TIME QUEST LOGIC ---
         const lastPoint = player.activeTrail[player.activeTrail.length - 1];
         if (player.activeTrail.length > 0 && lastPoint) {
             const from = turf.point([lastPoint.lng, lastPoint.lat]);
@@ -1034,8 +1015,6 @@ io.on('connection', (socket) => {
                 }
             }
         }
-        // --- END REAL-TIME QUEST LOGIC ---
-
         player.activeTrail.push(data);
 
         if (!player.isGhostRunnerActive) {
@@ -1055,11 +1034,9 @@ io.on('connection', (socket) => {
                 for (const victimId in players) {
                     if (victimId === socket.id) continue; 
                     const victim = players[victimId];
-
                     if (player.gameMode === 'clan' && victim.gameMode === 'clan' && player.clanId === victim.clanId) {
                         continue; 
                     }
-
                     if (victim && victim.isDrawing && victim.activeTrail.length >= 2) {
                         const victimTrailWKT = 'LINESTRING(' + victim.activeTrail.map(p => `${p.lng} ${p.lat}`).join(', ') + ')';
                         const victimTrailGeom = `ST_SetSRID(ST_GeomFromText('${victimTrailWKT}'), 4326)`;
@@ -1171,25 +1148,19 @@ io.on('connection', (socket) => {
     try {
         await client.query('BEGIN');
         let result;
-        // ===============================================
-        // --- UPDATED: Pass handlers and context into the claim function ---
-        // ===============================================
-        const context = { io, socket, player, players };
+        // The call to the handler is now simplified, passing arguments directly.
         if (gameMode === 'solo') {
-            result = await handleSoloClaim(interactions, context, trail, baseClaim, client, geofenceService);
+            result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client);
         } else if (gameMode === 'clan') {
-            // Assuming handleClanClaim is updated similarly
-            result = await handleClanClaim(interactions, context, trail, baseClaim, client, geofenceService);
+            // Assuming handleClanClaim follows a similar argument pattern
+            result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client);
         }
-        // ===============================================
 
         if (!result) { 
             await client.query('ROLLBACK');
             return; 
         }
         
-        // --- The MAKE_TRAIL final calculation was removed from here. The real-time update is now the source of truth. ---
-
         await client.query('COMMIT');
         
         socket.emit('claimSuccessful', { newTotalArea: result.finalTotalArea, areaClaimed: result.areaClaimed });
