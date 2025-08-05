@@ -24,7 +24,6 @@ async function handleSoloClaim(interactions, context, trail, baseClaim, client, 
     // ============================
     if (isInfiltratorActive) {
         console.log('[DEBUG] Infiltrator mode active. Delegating...');
-        // Note: We pass all necessary context down to the sub-handler.
         return await handleInfiltratorClaim(io, socket, player, players, trail, baseClaim, client);
     }
 
@@ -141,14 +140,16 @@ async function handleSoloClaim(interactions, context, trail, baseClaim, client, 
         basesAttackedCount++;
 
         if (victim.is_shield_active) {
-            // Pass the attacker's 'player' object to handleShieldHit
             attackerNetGainGeom = await handleShieldHit(player, victim, attackerNetGainGeom, client, io, players);
         } else {
             if (isCarveModeActive) {
                 await handleCarveOut(victim, attackerNetGainGeom, client);
             } else {
-                // FIXED: Assign the return value and pass the correct geometry variable.
-                attackerNetGainGeom = await handlePartialTakeover(victim, attackerNetGainGeom, client);
+                // FIXED: Call the slicing function. It modifies the victim's territory in the database.
+                // We DO NOT assign the result to attackerNetGainGeom because the function returns nothing.
+                // The attacker's geometry (attackerNetGainGeom) is the full shape they drew,
+                // which they will gain, while the victim loses the overlapping part.
+                await handlePartialTakeover(victim, attackerNetGainGeom, client);
             }
         }
     }
