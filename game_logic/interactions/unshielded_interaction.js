@@ -5,8 +5,7 @@
 
 /**
  * Merges the victim's territory into the attacker's claim and then
- * erases the victim's territory from the database. This is used when an
- * attacker's claim completely envelops the victim's land.
+ * erases the victim's territory from the database.
  *
  * @param {object} victim - The victim player's data from the database { owner_id, username, area }.
  * @param {string} attackerNetGainGeom - The WKT representation of the attacker's claim geometry.
@@ -24,7 +23,7 @@ async function handleWipeout(victim, attackerNetGainGeom, client) {
 
     // Erase the victim's territory by setting it to an empty geometry
     await client.query(
-        `UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), area_sqm = 0 WHERE owner_id = $1`,
+        `UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1`,
         [victim.owner_id]
     );
     console.log(`[WIPEOUT] ${victim.username}'s territory has been wiped.`);
