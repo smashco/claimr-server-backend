@@ -1,6 +1,6 @@
 const turf = require('@turf/turf');
 const { handleShieldHit } = require('./interactions/shield_interaction');
-const { handleWipeout } = require('./interactions/unshielded_interaction');
+const { handlePartialTakeover } = require('./interactions/unshielded_interaction');
 const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
 const { handleCarveOut } = require('./interactions/carve_interaction');
 const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler');
@@ -139,7 +139,10 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             if (isCarveModeActive) {
                 await handleCarveOut(victim, attackerNetGainGeom, client);
             } else {
-                attackerNetGainGeom = await handleWipeout(victim, attackerNetGainGeom, client);
+                // Use the new partial takeover logic instead of the full wipeout.
+                // This function modifies the victim's territory in the database directly.
+                // It does not change the attacker's gain, which is what we want.
+                await handlePartialTakeover(victim, newAreaWKT, client);
             }
         }
     }
