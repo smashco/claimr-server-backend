@@ -1,55 +1,27 @@
-// game_logic/solo_handler.js
 const turf = require('@turf/turf');
-const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler');
+// All interaction handlers are now required here
+const { handleShieldHit } = require('./interactions/shield_interaction');
+const { handleWipeout } = require('./interactions/unshielded_interaction');
+const { handlePartialTakeover } = require('./interactions/partial_takeover_interaction'); // The new file
+const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
+const { handleCarveOut } = require('./interactions/carve_interaction');
 
-/**
- * Handles solo player's territory claim logic.
- * @param {object} interactions - An object containing all required interaction handlers.
- * @param {object} context - An object containing server context like io, socket, players, etc.
- * @param {Array} trail - The player's trail.
- * @param {object} baseClaim - The initial base claim data, if any.
- * @param {object} client - The PostgreSQL database client.
- * @param {object} geofenceService - The geofence service instance.
- */
-async function handleSoloClaim(interactions, context, trail, baseClaim, client, geofenceService) {
-    const { io, socket, player, players } = context;
-    const { handleShieldHit, handlePartialTakeover, handleInfiltratorClaim, handleCarveOut } = interactions;
-
+async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const { isInfiltratorActive, isCarveModeActive } = player;
+
+    if (isInfiltratorActive) {
+        console.log('[DEBUG] Delegating to Infiltrator handler.');
+        return await handleInfiltratorClaim(io, socket, player, players, trail, baseClaim, client);
+    }
+    
+    console.log(`\n\n[DEBUG] =================== NEW STANDARD CLAIM ===================`);
     const userId = player.googleId;
     const isInitialBaseClaim = !!baseClaim;
 
-    // ============================
-    // Handle Infiltrator Claim
-    // ============================
-    if (isInfiltratorActive) {
-        console.log('[DEBUG] Infiltrator mode active. Delegating...');
-        return await handleInfiltratorClaim(io, socket, player, players, trail, baseClaim, client);
-    }
-
-    console.log(`\n[DEBUG] =================== NEW STANDARD CLAIM ===================`);
     console.log(`[DEBUG] Claim Type: ${isInitialBaseClaim ? 'BASE' : 'EXPANSION'}`);
-
-    // ============================
-    // Geofence Validation
-    // ============================
-    const validationPoint = baseClaim ? baseClaim : (trail.length > 0 ? trail[0] : null);
-    if (!validationPoint) {
-        socket.emit('claimRejected', { reason: 'Invalid claim data. No starting point.' });
-        return null;
-    }
-
-    const isLocationValid = await geofenceService.isLocationValid(validationPoint.lat, validationPoint.lng);
-    if (!isLocationValid) {
-        socket.emit('claimRejected', { reason: 'You are outside the designated playable area.' });
-        return null;
-    }
 
     let newAreaPolygon, newAreaSqM;
 
-    // ============================
-    // Base Claim
-    // ============================
     if (isInitialBaseClaim) {
         console.log(`[DEBUG] Processing Initial Base Claim`);
         const center = [baseClaim.lng, baseClaim.lat];
@@ -64,17 +36,12 @@ async function handleSoloClaim(interactions, context, trail, baseClaim, client, 
 
         newAreaSqM = turf.area(newAreaPolygon);
         const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
-
         const check = await client.query(`SELECT 1 FROM territories WHERE ST_Intersects(area, ${newAreaWKT});`);
         if (check.rowCount > 0) {
             socket.emit('claimRejected', { reason: 'Base overlaps existing territory.' });
             return null;
         }
-
     } else {
-        // ============================
-        // Expansion Claim
-        // ============================
         console.log(`[DEBUG] Processing Expansion Claim`);
         if (trail.length < 3) {
             socket.emit('claimRejected', { reason: 'Need at least 3 points.' });
@@ -101,14 +68,7 @@ async function handleSoloClaim(interactions, context, trail, baseClaim, client, 
             return null;
         }
 
-        let existingArea;
-        try {
-            existingArea = JSON.parse(existingRes.rows[0].geojson_area);
-        } catch (e) {
-            socket.emit('claimRejected', { reason: 'Server error: Corrupted territory data.' });
-            return null;
-        }
-
+        const existingArea = JSON.parse(existingRes.rows[0].geojson_area);
         const intersects = await client.query(`
             SELECT ST_Intersects(ST_GeomFromGeoJSON($1), ST_GeomFromGeoJSON($2)) AS intersect;
         `, [JSON.stringify(newAreaPolygon.geometry), JSON.stringify(existingArea.geometry || existingArea)]);
@@ -119,9 +79,6 @@ async function handleSoloClaim(interactions, context, trail, baseClaim, client, 
         }
     }
 
-    // ============================
-    // Overlap Handling
-    // ============================
     const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
     const affectedOwnerIds = new Set([userId]);
 
@@ -133,45 +90,38 @@ async function handleSoloClaim(interactions, context, trail, baseClaim, client, 
         WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
     `, [userId]);
 
-    let basesAttackedCount = 0;
-
     for (const victim of victims.rows) {
         affectedOwnerIds.add(victim.owner_id);
-        basesAttackedCount++;
 
         if (victim.is_shield_active) {
-            attackerNetGainGeom = await handleShieldHit(player, victim, attackerNetGainGeom, client, io, players);
+            attackerNetGainGeom = await handleShieldHit(victim, attackerNetGainGeom, client, io, players);
         } else {
             if (isCarveModeActive) {
                 await handleCarveOut(victim, attackerNetGainGeom, client);
             } else {
-                // FIXED: Call the slicing function. It modifies the victim's territory in the database.
-                // We DO NOT assign the result to attackerNetGainGeom because the function returns nothing.
-                // The attacker's geometry (attackerNetGainGeom) is the full shape they drew,
-                // which they will gain, while the victim loses the overlapping part.
-                await handlePartialTakeover(victim, attackerNetGainGeom, client);
+                // *** NEW LOGIC TO DIFFERENTIATE WIPEOUT FROM PARTIAL TAKEOVER ***
+                const containmentCheck = await client.query(
+                    `SELECT ST_Contains($1::geometry, $2::geometry) AS is_contained;`,
+                    [attackerNetGainGeom, victim.area]
+                );
+                const isFullWipeout = containmentCheck.rows[0].is_contained;
+
+                if (isFullWipeout) {
+                    console.log(`[DEBUG] Attacker's claim FULLY CONTAINS ${victim.username}'s land. Performing full wipeout.`);
+                    attackerNetGainGeom = await handleWipeout(victim, attackerNetGainGeom, client);
+                } else {
+                    console.log(`[DEBUG] Attacker's claim PARTIALLY HITS ${victim.username}'s land. Slicing territory.`);
+                    await handlePartialTakeover(victim, attackerNetGainGeom, client);
+                }
             }
         }
     }
 
-    // ============================
-    // Quest Update for Attack
-    // ============================
-    if (basesAttackedCount > 0) {
-        await updateQuestProgress(userId, QUEST_TYPES.ATTACK_BASE, basesAttackedCount, client, io, players);
-    }
-
-    // ============================
-    // Carve Mode Deactivation
-    // ============================
     if (isCarveModeActive) {
         await client.query('UPDATE territories SET is_carve_mode_active = false WHERE owner_id = $1', [userId]);
         player.isCarveModeActive = false;
     }
 
-    // ============================
-    // Final Area Calculation
-    // ============================
     const userExisting = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
     let finalArea = attackerNetGainGeom;
 
@@ -194,9 +144,6 @@ async function handleSoloClaim(interactions, context, trail, baseClaim, client, 
         return null;
     }
 
-    // ============================
-    // Save to DB
-    // ============================
     await client.query(`
         INSERT INTO territories (owner_id, owner_name, username, area, area_sqm, original_base_point)
         VALUES ($1, $2, $2, ST_GeomFromGeoJSON($3), $4,
@@ -207,14 +154,7 @@ async function handleSoloClaim(interactions, context, trail, baseClaim, client, 
                                        ELSE territories.original_base_point END;
     `, [userId, player.name, finalAreaGeoJSON, finalAreaSqM, isInitialBaseClaim, baseClaim?.lng, baseClaim?.lat]);
 
-    // ============================
-    // Quest Update for Successful Run
-    // ============================
-    if (!isInitialBaseClaim) {
-        await updateQuestProgress(userId, QUEST_TYPES.COMPLETE_RUN, 1, client, io, players);
-    }
-
-    console.log(`[SUCCESS] Claim committed: +${newAreaSqM.toFixed(2)} sqm by ${player.name}`);
+    console.log(`[SUCCESS] Claim committed: +${newAreaSqM.toFixed(2)} sqm`);
     return {
         finalTotalArea: finalAreaSqM,
         areaClaimed: newAreaSqM,
