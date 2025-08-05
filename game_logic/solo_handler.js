@@ -1,6 +1,5 @@
+// game_logic/solo_handler.js
 const turf = require('@turf/turf');
-// REMOVED all individual interaction requires. They will be passed in.
-
 const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler');
 
 /**
@@ -142,7 +141,8 @@ async function handleSoloClaim(interactions, context, trail, baseClaim, client, 
         basesAttackedCount++;
 
         if (victim.is_shield_active) {
-            attackerNetGainGeom = await handleShieldHit(victim, attackerNetGainGeom, client, io, players);
+            // **THE FIX IS HERE**: Pass the attacker's 'player' object to handleShieldHit
+            attackerNetGainGeom = await handleShieldHit(player, victim, attackerNetGainGeom, client, io, players);
         } else {
             if (isCarveModeActive) {
                 await handleCarveOut(victim, attackerNetGainGeom, client);

@@ -1,70 +1,57 @@
-/**
- * @file unshielded_interaction.js
- * @description Handles interactions with unshielded victims, supporting partial takeovers.
- */
+// game_logic/interactions/shield_interaction.js
 
 /**
- * Completely removes a victim's territory from the database.
- * This is a helper function called only when a victim's land is fully absorbed or becomes invalid.
- * @param {object} victim - The victim player's data { owner_id, username }.
+ * @file shield_interaction.js
+ * @description Handles the logic for when a claim hits a shielded territory.
+ */
+const { updateQuestProgress, QUEST_TYPES } = require('../quest_handler');
+
+/**
+ * Processes the interaction when an attacker's claim hits a shielded victim's territory.
+ * The shield is destroyed, but the attacker does not gain the shielded land.
+ * @param {object} attacker - The attacker's player object from the `players` map.
+ * @param {object} victim - The victim player's data { owner_id, username, area }.
+ * @param {string} attackerNetGainGeom - The WKT representation of the attacker's current claim geometry.
  * @param {object} client - The PostgreSQL database client.
+ * @param {object} io - The Socket.IO server instance.
+ * @param {object} players - The in-memory players object.
+ * @returns {Promise<string>} The updated WKT geometry for the attacker's claim after the shielded area is subtracted.
  */
-async function wipeVictim(victim, client) {
-    console.log(`[WIPEOUT] ${victim.username}'s territory has been wiped completely.`);
-    await client.query('DELETE FROM territories WHERE owner_id = $1', [victim.owner_id]);
-}
+async function handleShieldHit(attacker, victim, attackerNetGainGeom, client, io, players) {
+    console.log(`[SHIELD HIT] ${attacker.name}'s claim on ${victim.username}'s territory was blocked by a shield.`);
 
-/**
- * Handles a partial takeover of an unshielded player's territory.
- * It subtracts the attacker's claim from the victim's land using the PostGIS ST_Difference function.
- * If the victim's remaining land becomes empty or invalid, it triggers a full wipeout.
- *
- * @param {object} victim - The victim player's data from the database.
- * @param {string} attackerClaimWKT - The WKT representation of the attacker's new claim polygon.
- * @param {object} client - The PostgreSQL database client.
- * @returns {Promise<void>} This function modifies the database directly and does not return a value.
- */
-async function handlePartialTakeover(victim, attackerClaimWKT, client) {
-    console.log(`[TAKEOVER] Attacker is carving a piece from ${victim.username}'s unshielded territory.`);
+    // 1. Destroy the victim's shield in the database
+    await client.query(
+        `UPDATE territories SET is_shield_active = false, has_shield = false, shield_activated_at = NULL WHERE owner_id = $1`,
+        [victim.owner_id]
+    );
 
-    // This query attempts to subtract the attacker's claim from the victim's area.
-    // - WITH updated_geom: A Common Table Expression (CTE) to calculate the new geometry once.
-    // - ST_Difference: The core operation. Subtracts the attacker's geometry from the victim's.
-    // - ST_CollectionExtract(..., 3): Ensures the result is a (Multi)Polygon, discarding any lines or points.
-    // - RETURNING area_sqm: Allows us to check if any meaningful territory remains.
-    const updateQuery = `
-        WITH updated_geom AS (
-            SELECT ST_CollectionExtract(ST_Difference(area, ${attackerClaimWKT}), 3) AS new_geom
-            FROM territories
-            WHERE owner_id = $1
-        )
-        UPDATE territories
-        SET
-            area = (SELECT new_geom FROM updated_geom),
-            area_sqm = ST_Area((SELECT new_geom FROM updated_geom)::geography)
-        WHERE owner_id = $1
-        RETURNING area_sqm;
-    `;
-
-    try {
-        const result = await client.query(updateQuery, [victim.owner_id]);
-
-        // Check if the victim has any meaningful territory left after the subtraction.
-        if (result.rowCount === 0 || !result.rows[0].area_sqm || result.rows[0].area_sqm < 1) {
-            // The difference resulted in an empty or negligibly small geometry, so the victim is wiped out.
-            console.log(`[TAKEOVER] Victim ${victim.username} has no territory left after the attack.`);
-            await wipeVictim(victim, client);
-        } else {
-            console.log(`[TAKEOVER] ${victim.username} now has ${result.rows[0].area_sqm.toFixed(2)} sqm remaining.`);
-        }
-    } catch (error) {
-        console.error(`[ERROR] Failed to process partial takeover for victim ${victim.username}:`, error);
-        // As a fallback, if the geometry operation fails (e.g., results in an invalid shape),
-        // we will wipe the victim to prevent a corrupted state in the database.
-        console.error(`[FALLBACK] Wiping victim ${victim.username} due to a geometry processing error.`);
-        await wipeVictim(victim, client);
+    // 2. Notify the victim that their shield was broken
+    const victimSocketId = Object.keys(players).find(id => players[id].googleId === victim.owner_id);
+    if (victimSocketId) {
+        io.to(victimSocketId).emit('shieldBroken', { attackerName: attacker.name });
+        io.to(victimSocketId).emit('notification', { type: 'error', message: 'Your shield has been broken!' });
     }
+    
+    // 3. Notify the attacker
+    io.to(attacker.id).emit('notification', { type: 'info', message: `You broke ${victim.username}'s shield!` });
+
+    // 4. Update quest progress for the attacker
+    await updateQuestProgress(attacker.googleId, QUEST_TYPES.BREAK_SHIELD, 1, client, io, players);
+
+    // 5. Subtract the victim's entire territory from the attacker's gain
+    // This ensures the attacker gains no land from the shielded player.
+    const differenceResult = await client.query(
+        `SELECT ST_Difference($1::geometry, $2::geometry) AS remaining_geom`,
+        [attackerNetGainGeom, victim.area]
+    );
+
+    const remainingGeom = differenceResult.rows[0].remaining_geom;
+
+    console.log(`[SHIELD HIT] Attacker's gain was reduced to prevent taking shielded land.`);
+    
+    // Return the new, smaller geometry for the attacker's claim.
+    return remainingGeom;
 }
 
-// Export the new function. The old handleWipeout is no longer needed in this context.
-module.exports = { handlePartialTakeover };
+module.exports = { handleShieldHit };
