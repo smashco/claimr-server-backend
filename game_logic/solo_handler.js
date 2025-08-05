@@ -1,14 +1,21 @@
 const turf = require('@turf/turf');
-const { handleShieldHit } = require('./interactions/shield_interaction');
-const { handlePartialTakeover } = require('./interactions/unshielded_interaction');
-const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
-const { handleCarveOut } = require('./interactions/carve_interaction');
+// REMOVED all individual interaction requires. They will be passed in.
+
 const { updateQuestProgress, QUEST_TYPES } = require('./quest_handler');
 
 /**
  * Handles solo player's territory claim logic.
+ * @param {object} interactions - An object containing all required interaction handlers.
+ * @param {object} context - An object containing server context like io, socket, players, etc.
+ * @param {Array} trail - The player's trail.
+ * @param {object} baseClaim - The initial base claim data, if any.
+ * @param {object} client - The PostgreSQL database client.
+ * @param {object} geofenceService - The geofence service instance.
  */
-async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client, geofenceService) {
+async function handleSoloClaim(interactions, context, trail, baseClaim, client, geofenceService) {
+    const { io, socket, player, players } = context;
+    const { handleShieldHit, handlePartialTakeover, handleInfiltratorClaim, handleCarveOut } = interactions;
+
     const { isInfiltratorActive, isCarveModeActive } = player;
     const userId = player.googleId;
     const isInitialBaseClaim = !!baseClaim;
@@ -18,6 +25,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     // ============================
     if (isInfiltratorActive) {
         console.log('[DEBUG] Infiltrator mode active. Delegating...');
+        // Note: We pass all necessary context down to the sub-handler.
         return await handleInfiltratorClaim(io, socket, player, players, trail, baseClaim, client);
     }
 
@@ -139,9 +147,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
             if (isCarveModeActive) {
                 await handleCarveOut(victim, attackerNetGainGeom, client);
             } else {
-                // Use the new partial takeover logic instead of the full wipeout.
-                // This function modifies the victim's territory in the database directly.
-                // It does not change the attacker's gain, which is what we want.
                 await handlePartialTakeover(victim, newAreaWKT, client);
             }
         }

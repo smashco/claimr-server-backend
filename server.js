@@ -20,6 +20,23 @@ const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
 const { updateQuestProgress, QUEST_TYPES } = require('./game_logic/quest_handler');
 
+// =========================================================
+// --- NEW: Require ALL interaction handlers at the root ---
+// =========================================================
+const { handleShieldHit } = require('./game_logic/interactions/shield_interaction');
+const { handlePartialTakeover } = require('./game_logic/interactions/unshielded_interaction');
+const { handleInfiltratorClaim } = require('./game_logic/interactions/infiltrator_interaction');
+const { handleCarveOut } = require('./game_logic/interactions/carve_interaction');
+
+// Create a single object to hold all interaction handlers for easy passing
+const interactions = {
+    handleShieldHit,
+    handlePartialTakeover,
+    handleInfiltratorClaim,
+    handleCarveOut
+};
+// =========================================================
+
 
 // --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -1155,11 +1172,18 @@ io.on('connection', (socket) => {
     try {
         await client.query('BEGIN');
         let result;
+        // ===============================================
+        // --- UPDATED: Pass handlers and context into the claim function ---
+        // ===============================================
+        const context = { io, socket, player, players };
         if (gameMode === 'solo') {
-            result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client, geofenceService);
+            result = await handleSoloClaim(interactions, context, trail, baseClaim, client, geofenceService);
         } else if (gameMode === 'clan') {
-            result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client, geofenceService);
+            // Assuming handleClanClaim is updated similarly
+            result = await handleClanClaim(interactions, context, trail, baseClaim, client, geofenceService);
         }
+        // ===============================================
+
         if (!result) { 
             await client.query('ROLLBACK');
             return; 
