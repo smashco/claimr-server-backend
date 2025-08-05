@@ -8,7 +8,6 @@ const { handleCarveOut } = require('./interactions/carve_interaction');
 
 /**
  * Handles solo player's territory claim logic.
- * This function now uses the simpler, direct argument passing.
  * @param {object} io - The Socket.IO server instance.
  * @param {object} socket - The player's socket connection.
  * @param {object} player - The player object from the server's `players` map.
@@ -40,7 +39,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         try {
             newAreaPolygon = turf.circle(center, radius, { units: 'meters' });
         } catch (err) {
-            // The `socket` variable is now correctly defined and this will work.
             socket.emit('claimRejected', { reason: 'Invalid base location.' });
             return null;
         }
@@ -108,30 +106,29 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
         affectedOwnerIds.add(victim.owner_id);
 
         if (victim.is_shield_active) {
-            // Note: handleShieldHit now needs the `player` object passed directly
             attackerNetGainGeom = await handleShieldHit(player, victim, attackerNetGainGeom, client, io, players);
         } else if (isCarveModeActive) {
             await handleCarveOut(victim, attackerNetGainGeom, client);
         } else {
-            // NEW LOGIC TO DIFFERENTIATE WIPEOUT FROM PARTIAL TAKEOVER
-            const containmentCheck = await client.query(
-                `SELECT ST_Contains($1::geometry, $2::geometry) AS is_contained;`,
+            // *** ROBUST LOGIC TO DIFFERENTIATE WIPEOUT FROM PARTIAL TAKEOVER ***
+            const wipeoutCheck = await client.query(
+                `SELECT ST_IsEmpty(ST_Difference($2::geometry, $1::geometry)) AS is_fully_covered;`,
                 [attackerNetGainGeom, victim.area]
             );
-            const isFullWipeout = containmentCheck.rows[0].is_contained;
+            const isFullWipeout = wipeoutCheck.rows[0].is_fully_covered;
 
             if (isFullWipeout) {
-                // The attacker's claim fully contains the victim's territory.
-                console.log(`[DEBUG] Attacker's claim FULLY CONTAINS ${victim.username}'s land. Performing full wipeout.`);
+                // The victim's territory has NO area left outside the attacker's claim. It's a full wipeout.
+                console.log(`[DEBUG] Victim ${victim.username} is fully covered by claim. Performing full wipeout.`);
                 attackerNetGainGeom = await handleWipeout(victim, attackerNetGainGeom, client);
             } else {
-                // The attacker's claim only partially hits the victim.
-                console.log(`[PARTIAL TAKEOVER] Slicing territory from ${victim.username}.`);
+                // The victim has territory remaining. Perform a partial takeover (slice).
+                console.log(`[DEBUG] Victim ${victim.username} is partially hit. Slicing territory.`);
                 await client.query(
                     `UPDATE territories SET area = ST_Difference(area, $1::geometry), area_sqm = ST_Area(ST_Difference(area, $1::geometry)::geography) WHERE owner_id = $2;`,
                     [attackerNetGainGeom, victim.owner_id]
                 );
-                console.log(`[PARTIAL TAKEOVER] ${victim.username}'s territory has been sliced.`);
+                console.log(`[DEBUG] ${victim.username}'s territory has been sliced.`);
             }
         }
     }
