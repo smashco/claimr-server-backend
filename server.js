@@ -1000,6 +1000,26 @@ io.on('connection', (socket) => {
     player.lastKnownPosition = data;
 
     if (player.isDrawing) {
+        // --- REAL-TIME QUEST LOGIC ---
+        const lastPoint = player.activeTrail[player.activeTrail.length - 1];
+        if (player.activeTrail.length > 0 && lastPoint) {
+            const from = turf.point([lastPoint.lng, lastPoint.lat]);
+            const to = turf.point([data.lng, data.lat]);
+            const distanceIncrement = turf.distance(from, to, { units: 'meters' });
+
+            if (distanceIncrement > 0) {
+                const client = await pool.connect();
+                try {
+                    await updateQuestProgress(player.googleId, QUEST_TYPES.MAKE_TRAIL, distanceIncrement, client, io, players);
+                } catch(err) {
+                    console.error("[QUEST] Real-time trail distance update failed:", err);
+                } finally {
+                    client.release();
+                }
+            }
+        }
+        // --- END REAL-TIME QUEST LOGIC ---
+
         player.activeTrail.push(data);
 
         if (!player.isGhostRunnerActive) {
@@ -1007,11 +1027,10 @@ io.on('connection', (socket) => {
         }
 
         if (player.activeTrail.length >= 2) { 
-            const lastPoint = player.activeTrail[player.activeTrail.length - 1];
             const secondLastPoint = player.activeTrail[player.activeTrail.length - 2];
-            const attackerSegmentWKT = (secondLastPoint.lng === lastPoint.lng && secondLastPoint.lat === lastPoint.lat) 
-                ? `POINT(${lastPoint.lng} ${lastPoint.lat})` 
-                : `LINESTRING(${secondLastPoint.lng} ${secondLastPoint.lat}, ${lastPoint.lng} ${lastPoint.lat})`;
+            const attackerSegmentWKT = (secondLastPoint.lng === data.lng && secondLastPoint.lat === data.lat) 
+                ? `POINT(${data.lng} ${data.lat})` 
+                : `LINESTRING(${secondLastPoint.lng} ${secondLastPoint.lat}, ${data.lng} ${data.lat})`;
             
             const attackerSegmentGeom = `ST_SetSRID(ST_GeomFromText('${attackerSegmentWKT}'), 4326)`;
 
@@ -1067,23 +1086,6 @@ io.on('connection', (socket) => {
     const player = players[socket.id];
     if (!player) return;
     console.log(`[Socket] Player ${player.name} (${socket.id}) stopped drawing trail (run ended).`);
-    
-    // NOTE: This is now the secondary path for MAKE_TRAIL quests. The primary is in 'claimTerritory'.
-    if (player.isDrawing && player.activeTrail.length > 1) {
-        const trailLineString = turf.lineString(player.activeTrail.map(p => [p.lng, p.lat]));
-        const distanceMeters = turf.length(trailLineString, { units: 'meters' });
-        
-        console.log(`[QUEST] Player ${player.name} manually stopped a trail of ${distanceMeters.toFixed(2)} meters.`);
-        
-        const client = await pool.connect();
-        try {
-            await updateQuestProgress(player.googleId, QUEST_TYPES.MAKE_TRAIL, distanceMeters, client, io, players);
-        } catch(err) {
-            console.error("[QUEST] Error updating trail distance quest on manual stop:", err);
-        } finally {
-            client.release();
-        }
-    }
     
     player.isDrawing = false;
     player.activeTrail = [];
@@ -1162,18 +1164,9 @@ io.on('connection', (socket) => {
             await client.query('ROLLBACK');
             return; 
         }
-
-        // --- FIX: CONSOLIDATE QUEST LOGIC HERE ---
-        // This is the definitive end of a successful run.
-        if (trail.length > 1) { // Only count trails, not initial base claims
-            const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
-            const distanceMeters = turf.length(trailLineString, { units: 'meters' });
-            
-            console.log(`[QUEST] Player ${player.name} is having a successful claim for a trail of ${distanceMeters.toFixed(2)} meters.`);
-            await updateQuestProgress(player.googleId, QUEST_TYPES.MAKE_TRAIL, distanceMeters, client, io, players);
-        }
-        // --- END OF FIX ---
         
+        // --- The MAKE_TRAIL final calculation was removed from here. The real-time update is now the source of truth. ---
+
         await client.query('COMMIT');
         
         socket.emit('claimSuccessful', { newTotalArea: result.finalTotalArea, areaClaimed: result.areaClaimed });
