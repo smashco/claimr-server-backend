@@ -3,6 +3,7 @@ const { handleShieldHit } = require('./interactions/shield_interaction');
 const { handleWipeout } = require('./interactions/unshielded_interaction');
 const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
 const { handleCarveOut } = require('./interactions/carve_interaction');
+const { handlePartialHit } = require('./interactions/partial_hit_interaction'); // <-- NEW IMPORT
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const { isInfiltratorActive, isCarveModeActive } = player;
@@ -110,8 +111,12 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 console.log('[DEBUG] Carve Mode is active. Calling handleCarveOut.');
                 await handleCarveOut(victim, attackerNetGainGeom, client);
             } else {
-                console.log('[DEBUG] Standard mode. Calling handleWipeout.');
-                attackerNetGainGeom = await handleWipeout(victim, attackerNetGainGeom, client);
+                // --- MODIFIED LOGIC ---
+                // Instead of wiping out the player, we now just take the part of their land we overlapped.
+                console.log('[DEBUG] Standard mode. Calling handlePartialHit.');
+                await handlePartialHit(victim, attackerNetGainGeom, client);
+                // The attacker's geometry (attackerNetGainGeom) is NOT modified by this interaction.
+                // It remains the polygon they drew.
             }
         }
     }

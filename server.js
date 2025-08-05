@@ -11,108 +11,13 @@ const multer = require('multer');
 const bcrypt = require('bcryptjs');
 
 // --- Require the Geofence Service and Shield Expiry Job ---
-// NOTE: For a single file script, these would be defined within this file.
-// For now, we assume they are external dependencies or their logic is simple.
-
-class GeofenceService {
-    constructor(pool, io) {
-        this.pool = pool;
-        this.io = io;
-        console.log('[GeoFence] Service Initialized.');
-    }
-
-    async getGeofencePolygons() {
-        try {
-            const result = await this.pool.query(`
-                SELECT id, name, zone_type, ST_AsGeoJSON(geom) as geojson 
-                FROM geofence_zones
-            `);
-            return result.rows.map(row => ({
-                id: row.id,
-                name: row.name,
-                type: row.zone_type,
-                geometry: JSON.parse(row.geojson)
-            }));
-        } catch (error) {
-            console.error('[GeoFence] Error fetching geofence zones:', error);
-            return [];
-        }
-    }
-
-    async addZoneFromKML(kmlString, name, zoneType) {
-        // This is a simplified parser. A robust solution would use an XML parsing library.
-        const kml = require('kml-geojson');
-        const geoJson = await kml.toGeoJson(kmlString);
-
-        if (!geoJson || !geoJson.features || geoJson.features.length === 0) {
-            throw new Error('No valid geometry found in KML file.');
-        }
-        
-        // Combine all features into one MultiPolygon or GeometryCollection
-        const geometries = geoJson.features.map(f => f.geometry);
-        const combinedGeometry = turf.union(...geoJson.features);
-
-        const geoJsonString = JSON.stringify(combinedGeometry.geometry);
-        
-        await this.pool.query(
-            `INSERT INTO geofence_zones (name, zone_type, geom) VALUES ($1, $2, ST_GeomFromGeoJSON($3))`,
-            [name, zoneType, geoJsonString]
-        );
-        this.broadcastUpdates();
-    }
-
-    async deleteZone(id) {
-        await this.pool.query(`DELETE FROM geofence_zones WHERE id = $1`, [id]);
-        this.broadcastUpdates();
-    }
-
-    async broadcastUpdates() {
-        const zones = await this.getGeofencePolygons();
-        this.io.emit('geofenceUpdate', zones);
-    }
-}
-
-
-const { checkExpiredShields } = require('./game_logic/jobs/shield_expiry_job'); // Assuming this exists as required
+const GeofenceService = require('./geofence_service'); 
+const { checkExpiredShields } = require('./game_logic/jobs/shield_expiry_job');
 
 // --- Require the TOP-LEVEL Game and Service Logic Handlers ---
-// ** These are now defined directly in this file below **
-// const handleSoloClaim = require('./game_logic/solo_handler');
-// const handleClanClaim = require('./game_logic/clan_handler');
-
-// --- Quest Handler (Simplified for inclusion) ---
-const QUEST_TYPES = {
-    MAKE_TRAIL: 'MAKE_TRAIL',
-    CUT_TRAIL: 'CUT_TRAIL',
-    SPONSOR_CHECKIN: 'SPONSOR_CHECKIN',
-};
-
-async function updateQuestProgress(userId, questType, value, client, io, players) {
-    try {
-        const activeQuestsRes = await client.query(`
-            SELECT id FROM quests 
-            WHERE quest_type = $1 AND is_active = true AND expires_at > NOW() AND winner_id IS NULL
-        `, [questType]);
-
-        if (activeQuestsRes.rowCount === 0) return;
-
-        for (const quest of activeQuestsRes.rows) {
-            const progressRes = await client.query(`
-                INSERT INTO quest_progress (quest_id, user_id, current_value) VALUES ($1, $2, $3)
-                ON CONFLICT (quest_id, user_id) DO UPDATE SET current_value = quest_progress.current_value + $3
-                RETURNING current_value;
-            `, [quest.id, userId, value]);
-            
-            const userSocketId = Object.keys(players).find(sockId => players[sockId].googleId === userId);
-            if(userSocketId) {
-                io.to(userSocketId).emit('questProgressUpdate', { questId: quest.id, newProgress: progressRes.rows[0].current_value });
-            }
-        }
-    } catch (err) {
-        console.error(`[QUEST] Error updating progress for ${userId}:`, err);
-    }
-}
-
+const handleSoloClaim = require('./game_logic/solo_handler');
+const handleClanClaim = require('./game_logic/clan_handler');
+const { updateQuestProgress, QUEST_TYPES } = require('./game_logic/quest_handler');
 
 // --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -294,279 +199,6 @@ const setupDatabase = async () => {
   }
 };
 
-// =======================================================================
-// --- GAME LOGIC AND INTERACTION HANDLERS ---
-// =======================================================================
-
-/**
- * @file shield_interaction.js
- * Handles the interaction when an attacker's claim hits a shielded player.
- */
-async function handleShieldHit(victim, attackerNetGainGeom, client, io, players) {
-    console.log(`[SHIELD] Attacker hit a shield owned by ${victim.username}.`);
-    await client.query(`UPDATE territories SET is_shield_active = false WHERE owner_id = $1`, [victim.owner_id]);
-    console.log(`[SHIELD] Shield for ${victim.username} has been broken.`);
-    const victimSocketId = Object.keys(players).find(id => players[id]?.googleId === victim.owner_id);
-    if (victimSocketId) {
-        io.to(victimSocketId).emit('lastStandActivated', { chargesLeft: 0 });
-        console.log(`[SHIELD] Notified ${victim.username} of shield break.`);
-    }
-    const diffResult = await client.query(
-        `SELECT ST_Difference($1::geometry, $2::geometry) AS final_geom`,
-        [attackerNetGainGeom, victim.area]
-    );
-    return diffResult.rows[0].final_geom;
-}
-
-/**
- * @file unshielded_interaction.js (ORIGINAL WIPEOUT LOGIC)
- * Handles the complete wipeout of an unshielded victim.
- */
-async function handleWipeout(victim, attackerNetGainGeom, client) {
-    console.log(`[WIPEOUT] Absorbing territory from ${victim.username}.`);
-    const mergeResult = await client.query(
-        `SELECT ST_Union($1::geometry, $2::geometry) AS final_geom`,
-        [attackerNetGainGeom, victim.area]
-    );
-    await client.query(
-        `UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1`,
-        [victim.owner_id]
-    );
-    console.log(`[WIPEOUT] ${victim.username}'s territory has been wiped.`);
-    return mergeResult.rows[0].final_geom;
-}
-
-/**
- * @file partial_hit_interaction.js (NEW LOGIC)
- * Handles partially stealing territory from an unshielded player.
- */
-async function handlePartialHit(victim, attackerClaimGeom, client) {
-    console.log(`[PARTIAL_HIT] Attacker is partially claiming territory from ${victim.username}.`);
-
-    const updateVictimResult = await client.query(`
-        WITH new_geom AS (
-            SELECT ST_Difference(
-                ST_MakeValid($1::geometry), 
-                ST_MakeValid($2::geometry)
-            ) as geom
-        )
-        UPDATE territories t
-        SET 
-            area = ST_CollectionExtract(ST_Multi(ST_RemoveRepeatedPoints(new_geom.geom)), 3),
-            area_sqm = COALESCE(ST_Area(ST_MakeValid(new_geom.geom)::geography), 0)
-        FROM new_geom
-        WHERE t.owner_id = $3
-        RETURNING area_sqm;
-    `, [victim.area, attackerClaimGeom, victim.owner_id]);
-
-    const newVictimArea = updateVictimResult.rows.length > 0 ? updateVictimResult.rows[0].area_sqm : 0;
-    console.log(`[PARTIAL_HIT] ${victim.username}'s territory reduced. New area: ${newVictimArea.toFixed(2)} sqm.`);
-}
-
-
-/**
- * Placeholder for Carve Interaction
- */
-async function handleCarveOut(victim, attackerClaimGeom, client) {
-    console.log(`[CARVE] Carving out territory from ${victim.username}.`);
-    const updateVictimResult = await client.query(`
-        UPDATE territories SET
-        area = ST_Difference(ST_MakeValid(area), ST_MakeValid($1::geometry)),
-        area_sqm = ST_Area(ST_Difference(ST_MakeValid(area), ST_MakeValid($1::geometry))::geography)
-        WHERE owner_id = $2 RETURNING area_sqm;
-    `, [attackerClaimGeom, victim.owner_id]);
-    console.log(`[CARVE] ${victim.username}'s territory carved. New area: ${updateVictimResult.rows[0]?.area_sqm || 0}`);
-}
-
-/**
- * Placeholder for Infiltrator Interaction
- */
-async function handleInfiltratorClaim(io, socket, player, players, trail, baseClaim, client) {
-    console.log('[INFILTRATOR] Handling infiltrator claim (placeholder).');
-    socket.emit('claimRejected', { reason: 'Infiltrator mode is not fully implemented.' });
-    return null; 
-}
-
-/**
- * Placeholder for Clan Claim Handler
- */
-async function handleClanClaim(io, socket, player, players, trail, baseClaim, client) {
-    console.log('[CLAN_CLAIM] Handling clan claim (placeholder).');
-    socket.emit('claimRejected', { reason: 'Clan claim mode is not fully implemented.' });
-    return null;
-}
-
-/**
- * Main handler for a player's solo territory claim.
- * THIS FUNCTION IS MODIFIED TO USE THE NEW PARTIAL HIT LOGIC.
- */
-async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
-    const { isInfiltratorActive, isCarveModeActive } = player;
-
-    if (isInfiltratorActive) {
-        console.log('[DEBUG] Delegating to Infiltrator handler for base claim.');
-        return await handleInfiltratorClaim(io, socket, player, players, trail, baseClaim, client);
-    }
-    
-    console.log(`\n\n[DEBUG] =================== NEW STANDARD CLAIM ===================`);
-    const userId = player.googleId;
-    const isInitialBaseClaim = !!baseClaim;
-
-    console.log(`[DEBUG] Claim Type: ${isInitialBaseClaim ? 'BASE' : 'EXPANSION'}`);
-
-    let newAreaPolygon, newAreaSqM;
-
-    if (isInitialBaseClaim) {
-        console.log(`[DEBUG] Processing Initial Base Claim`);
-        const center = [baseClaim.lng, baseClaim.lat];
-        const radius = baseClaim.radius || 30;
-
-        try {
-            newAreaPolygon = turf.circle(center, radius, { units: 'meters' });
-        } catch (err) {
-            console.log(`[ERROR] Failed to generate base circle: ${err.message}`);
-            socket.emit('claimRejected', { reason: 'Invalid base location.' });
-            return null;
-        }
-
-        newAreaSqM = turf.area(newAreaPolygon);
-        console.log(`[DEBUG] Base circle area: ${newAreaSqM.toFixed(2)} sqm`);
-
-        const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
-        const check = await client.query(`SELECT 1 FROM territories WHERE ST_Intersects(area, ${newAreaWKT});`);
-        if (check.rowCount > 0) {
-            console.log(`[REJECTED] Base overlaps existing territory`);
-            socket.emit('claimRejected', { reason: 'Base overlaps existing territory.' });
-            return null;
-        }
-    } else {
-        console.log(`[DEBUG] Processing Expansion Claim`);
-        if (trail.length < 3) {
-            console.log(`[REJECTED] Trail too short`);
-            socket.emit('claimRejected', { reason: 'Need at least 3 points.' });
-            return null;
-        }
-
-        const points = [...trail.map(p => [p.lng, p.lat]), [trail[0].lng, trail[0].lat]];
-        try {
-            newAreaPolygon = turf.polygon([points]);
-        } catch (err) {
-            console.log(`[ERROR] Invalid polygon: ${err.message}`);
-            socket.emit('claimRejected', { reason: 'Invalid polygon geometry.' });
-            return null;
-        }
-
-        newAreaSqM = turf.area(newAreaPolygon);
-        console.log(`[DEBUG] Expansion Area: ${newAreaSqM.toFixed(2)} sqm`);
-
-        if (newAreaSqM < 100) {
-            socket.emit('claimRejected', { reason: 'Area too small.' });
-            return null;
-        }
-
-        const existingRes = await client.query(`SELECT ST_AsGeoJSON(area) as geojson_area FROM territories WHERE owner_id = $1`, [userId]);
-        if (existingRes.rowCount === 0) {
-            socket.emit('claimRejected', { reason: 'You must claim a base before expanding.' });
-            return null;
-        }
-
-        const existingArea = JSON.parse(existingRes.rows[0].geojson_area);
-        const intersects = await client.query(`
-            SELECT ST_Intersects(ST_GeomFromGeoJSON($1), ST_GeomFromGeoJSON($2)) AS intersect;
-        `, [JSON.stringify(newAreaPolygon.geometry), JSON.stringify(existingArea.geometry || existingArea)]);
-
-        if (!intersects.rows[0].intersect) {
-            console.log(`[REJECTED] Expansion does not connect`);
-            socket.emit('claimRejected', { reason: 'Your expansion must connect to your existing land.' });
-            return null;
-        }
-    }
-
-    console.log(`[DEBUG] Calculating geometry overlaps and adjustments...`);
-    const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
-    const affectedOwnerIds = new Set([userId]);
-
-    let attackerNetGainGeomRes = await client.query(`SELECT ${newAreaWKT} AS geom`);
-    let attackerNetGainGeom = attackerNetGainGeomRes.rows[0].geom;
-
-    const victims = await client.query(`
-        SELECT owner_id, username, area, is_shield_active FROM territories
-        WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
-    `, [userId]);
-
-    console.log(`[DEBUG] Overlapping enemies found: ${victims.rowCount}`);
-
-    for (const victim of victims.rows) {
-        affectedOwnerIds.add(victim.owner_id);
-
-        if (victim.is_shield_active) {
-            attackerNetGainGeom = await handleShieldHit(victim, attackerNetGainGeom, client, io, players);
-        } else {
-            if (isCarveModeActive) {
-                console.log('[DEBUG] Carve Mode is active. Calling handleCarveOut.');
-                await handleCarveOut(victim, attackerNetGainGeom, client);
-            } else {
-                // *** CHANGE IMPLEMENTED HERE ***
-                // Instead of wiping out the victim, we now perform a partial hit.
-                console.log('[DEBUG] Standard mode. Calling handlePartialHit.');
-                await handlePartialHit(victim, attackerNetGainGeom, client);
-                // Note: We no longer update `attackerNetGainGeom` here, because a partial
-                // hit doesn't add the victim's *entire* territory to the attacker's claim.
-            }
-        }
-    }
-
-    if (isCarveModeActive) {
-        console.log('[DEBUG] Carve mode expansion complete. Deactivating carve mode in DB.');
-        await client.query('UPDATE territories SET is_carve_mode_active = false WHERE owner_id = $1', [userId]);
-        player.isCarveModeActive = false;
-    }
-
-    const userExisting = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
-    let finalArea = attackerNetGainGeom;
-
-    if (userExisting.rowCount > 0 && userExisting.rows[0].area) {
-        console.log(`[DEBUG] Merging with existing area`);
-        const unionRes = await client.query(`SELECT ST_Union($1::geometry, $2::geometry) AS final_area`, [userExisting.rows[0].area, attackerNetGainGeom]);
-        finalArea = unionRes.rows[0].final_area;
-    }
-
-    const patched = await client.query(`
-        SELECT
-            ST_AsGeoJSON(
-                ST_CollectionExtract(ST_Multi(ST_RemoveRepeatedPoints(ST_MakeValid($1))), 3)
-            ) AS geojson,
-            ST_Area(ST_MakeValid($1)::geography) AS area_sqm;
-    `, [finalArea]);
-
-    const finalAreaGeoJSON = patched.rows[0].geojson;
-    const finalAreaSqM = patched.rows[0].area_sqm || 0;
-    console.log(`[DEBUG] Final total area: ${finalAreaSqM.toFixed(2)} sqm`);
-
-    if (!finalAreaGeoJSON || finalAreaSqM < 1) {
-        socket.emit('claimRejected', { reason: 'Final area is invalid.' });
-        return null;
-    }
-
-    await client.query(`
-        INSERT INTO territories (owner_id, owner_name, username, area, area_sqm, original_base_point)
-        VALUES ($1, $2, $2, ST_GeomFromGeoJSON($3), $4,
-            CASE WHEN $5 THEN ST_SetSRID(ST_Point($6, $7), 4326) ELSE NULL END)
-        ON CONFLICT (owner_id) DO UPDATE
-        SET area = ST_GeomFromGeoJSON($3), area_sqm = $4,
-            original_base_point = CASE WHEN $5 THEN ST_SetSRID(ST_Point($6, $7), 4326)
-                                       ELSE territories.original_base_point END;
-    `, [userId, player.name, finalAreaGeoJSON, finalAreaSqM, isInitialBaseClaim, baseClaim?.lng, baseClaim?.lat]);
-
-    console.log(`[SUCCESS] Claim committed: +${newAreaSqM.toFixed(2)} sqm`);
-    return {
-        finalTotalArea: finalAreaSqM,
-        areaClaimed: newAreaSqM,
-        ownerIdsToUpdate: Array.from(affectedOwnerIds)
-    };
-}
-
-
 // --- Middleware ---
 const authenticate = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -619,6 +251,7 @@ const checkSponsorAuth = (req, res, next) => {
 app.use('/admin', adminRouter);
 app.use('/sponsor', sponsorRouter);
 
+// Admin Panel Routes
 adminRouter.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 adminRouter.post('/login', (req, res) => {
     const { password } = req.body;
@@ -630,6 +263,8 @@ adminRouter.post('/login', (req, res) => {
     }
 });
 adminRouter.get('/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
+
+// Player Admin API
 adminRouter.get('/api/players', checkAdminAuth, async (req, res) => {
     try {
         const result = await pool.query('SELECT owner_id, username, area_sqm, is_carve_mode_active FROM territories ORDER BY username');
@@ -658,6 +293,8 @@ adminRouter.post('/api/player/:id/:action', checkAdminAuth, async (req, res) => 
         res.status(500).json({ message: 'Server error' });
     }
 });
+
+// Admin Quest Management API
 adminRouter.get('/api/quests', checkAdminAuth, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -671,6 +308,7 @@ adminRouter.get('/api/quests', checkAdminAuth, async (req, res) => {
         res.status(500).json({ message: 'Server error' }); 
     }
 });
+
 adminRouter.post('/api/quests', checkAdminAuth, async (req, res) => {
     const { title, description, quest_type, target_value, reward_description, expires_at, sponsor_name } = req.body;
     const type = sponsor_name ? 'sponsor' : 'admin';
@@ -687,6 +325,7 @@ adminRouter.post('/api/quests', checkAdminAuth, async (req, res) => {
         res.status(500).json({ message: 'Server error' }); 
     }
 });
+
 adminRouter.delete('/api/quests/:id', checkAdminAuth, async (req, res) => {
     try {
         await pool.query('DELETE FROM quests WHERE id = $1', [req.params.id]);
@@ -694,6 +333,8 @@ adminRouter.delete('/api/quests/:id', checkAdminAuth, async (req, res) => {
         res.json({ message: 'Quest deleted successfully.' });
     } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
+
+// Admin Geofence Management API
 adminRouter.get('/api/geofence-zones', checkAdminAuth, async (req, res) => {
     try {
         const zones = await geofenceService.getGeofencePolygons();
@@ -702,6 +343,7 @@ adminRouter.get('/api/geofence-zones', checkAdminAuth, async (req, res) => {
         res.status(500).json({ message: 'Server error while fetching zones.' });
     }
 });
+
 adminRouter.post('/api/geofence-zones', checkAdminAuth, upload.single('kmlFile'), async (req, res) => {
     const { name, zoneType } = req.body;
     if (!req.file || !name || !zoneType) {
@@ -716,6 +358,7 @@ adminRouter.post('/api/geofence-zones', checkAdminAuth, upload.single('kmlFile')
         res.status(500).json({ message: error.message || 'Failed to process KML file.' });
     }
 });
+
 adminRouter.delete('/api/geofence-zones/:id', checkAdminAuth, async (req, res) => {
     try {
         await geofenceService.deleteZone(req.params.id);
@@ -724,8 +367,12 @@ adminRouter.delete('/api/geofence-zones/:id', checkAdminAuth, async (req, res) =
         res.status(500).json({ message: 'Server error while deleting zone.' });
     }
 });
+
+
+// Sponsor Panel Routes
 sponsorRouter.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'sponsor.html')));
 sponsorRouter.get('/dashboard', checkSponsorAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'sponsor_dashboard.html')));
+
 sponsorRouter.post('/login', async (req, res) => {
     const { name, password } = req.body;
     try {
@@ -746,6 +393,7 @@ sponsorRouter.post('/login', async (req, res) => {
         res.status(500).send('Server error during login.'); 
     }
 });
+
 sponsorRouter.get('/api/registrations', checkSponsorAuth, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -762,6 +410,7 @@ sponsorRouter.get('/api/registrations', checkSponsorAuth, async (req, res) => {
         res.status(500).json({ message: 'Server error' });
     }
 });
+
 sponsorRouter.post('/api/verify', checkSponsorAuth, async (req, res) => {
     const { unique_code } = req.body;
     const client = await pool.connect();
@@ -1186,6 +835,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     }
 });
 
+// --- Public Quest API for the App ---
 app.get('/api/quests/active', authenticate, async (req, res) => {
     try {
         const questsRes = await pool.query(`
@@ -1498,10 +1148,11 @@ io.on('connection', (socket) => {
     try {
         await client.query('BEGIN');
         let result;
-
+        // The call to the handler is now simplified, passing arguments directly.
         if (gameMode === 'solo') {
             result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client);
         } else if (gameMode === 'clan') {
+            // Assuming handleClanClaim follows a similar argument pattern
             result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client);
         }
 
@@ -1588,31 +1239,7 @@ const main = async () => {
         process.exit(1); 
     });
     
-    // Placeholder shield check job
     const SHIELD_CHECK_INTERVAL_MS = 15 * 60 * 1000;
-    const checkExpiredShields = async (pool, io, players) => {
-        console.log('[JOBS] Checking for expired shields...');
-        try {
-            const result = await pool.query(
-                `UPDATE territories 
-                 SET is_shield_active = false 
-                 WHERE is_shield_active = true AND shield_activated_at < NOW() - INTERVAL '1 hour'
-                 RETURNING owner_id;`
-            );
-            if (result.rowCount > 0) {
-                console.log(`[JOBS] Deactivated ${result.rowCount} expired shields.`);
-                result.rows.forEach(row => {
-                    const victimSocketId = Object.keys(players).find(id => players[id]?.googleId === row.owner_id);
-                    if (victimSocketId) {
-                        io.to(victimSocketId).emit('shieldExpired');
-                    }
-                });
-            }
-        } catch (error) {
-            console.error('[JOBS] Error checking for expired shields:', error);
-        }
-    };
-
     console.log(`[JOBS] Scheduling shield expiry check every ${SHIELD_CHECK_INTERVAL_MS / 60000} minutes.`);
     checkExpiredShields(pool, io, players);
     setInterval(() => checkExpiredShields(pool, io, players), SHIELD_CHECK_INTERVAL_MS);
