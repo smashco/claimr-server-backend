@@ -1,6 +1,6 @@
 /**
  * @file unshielded_interaction.js
- * @description Handles the complete wipeout of an unshielded victim.
+ * @description Handles the partial or complete takeover of an unshielded victim's territory.
  */
 
 /**
@@ -12,8 +12,8 @@
  * @param {object} client - The PostgreSQL database client.
  * @returns {Promise<string>} The updated WKT geometry for the attacker's claim after absorbing the victim's land.
  */
-async function handleWipeout(victim, attackerNetGainGeom, client) {
-    console.log(`[WIPEOUT] Absorbing territory from ${victim.username}.`);
+async function handlePartialTakeover(victim, attackerNetGainGeom, client) {
+    console.log(`[TAKEOVER] Absorbing territory from ${victim.username}.`);
 
     // Merge the victim's area into the attacker's gain
     const mergeResult = await client.query(
@@ -23,13 +23,13 @@ async function handleWipeout(victim, attackerNetGainGeom, client) {
 
     // Erase the victim's territory by setting it to an empty geometry
     await client.query(
-        `UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0 WHERE owner_id = $1`,
+        `UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), area_sqm = 0 WHERE owner_id = $1`,
         [victim.owner_id]
     );
-    console.log(`[WIPEOUT] ${victim.username}'s territory has been wiped.`);
+    console.log(`[TAKEOVER] ${victim.username}'s territory has been wiped.`);
 
     // Return the new, larger geometry
     return mergeResult.rows[0].final_geom;
 }
 
-module.exports = { handleWipeout };
+module.exports = { handlePartialTakeover };

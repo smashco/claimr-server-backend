@@ -141,13 +141,14 @@ async function handleSoloClaim(interactions, context, trail, baseClaim, client, 
         basesAttackedCount++;
 
         if (victim.is_shield_active) {
-            // **THE FIX IS HERE**: Pass the attacker's 'player' object to handleShieldHit
+            // Pass the attacker's 'player' object to handleShieldHit
             attackerNetGainGeom = await handleShieldHit(player, victim, attackerNetGainGeom, client, io, players);
         } else {
             if (isCarveModeActive) {
                 await handleCarveOut(victim, attackerNetGainGeom, client);
             } else {
-                await handlePartialTakeover(victim, newAreaWKT, client);
+                // FIXED: Assign the return value and pass the correct geometry variable.
+                attackerNetGainGeom = await handlePartialTakeover(victim, attackerNetGainGeom, client);
             }
         }
     }
