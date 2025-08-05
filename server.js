@@ -11,7 +11,7 @@ const turf = require('@turf/turf');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
 
-// --- NEW --- Require the Geofence Service and Shield Expiry Job ---
+// --- Require the Geofence Service and Shield Expiry Job ---
 const GeofenceService = require('./geofence_service'); 
 const { checkExpiredShields } = require('./game_logic/jobs/shield_expiry_job');
 
@@ -74,7 +74,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// --- NEW --- Initialize the GeofenceService
+// --- Initialize the GeofenceService
 const geofenceService = new GeofenceService(pool, io);
 const players = {}; 
 
@@ -99,14 +99,14 @@ const setupDatabase = async () => {
         original_base_point GEOMETRY(POINT, 4326), 
         has_shield BOOLEAN DEFAULT FALSE, 
         is_shield_active BOOLEAN DEFAULT FALSE,
-        shield_activated_at TIMESTAMP WITH TIME ZONE, -- MODIFIED: Changed default to NULL
+        shield_activated_at TIMESTAMP WITH TIME ZONE,
         is_carve_mode_active BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
     console.log('[DB] "territories" table is ready.');
     
-    // --- NEW --- Geofence Zones Table
+    // Geofence Zones Table
     await client.query(`
         CREATE TABLE IF NOT EXISTS geofence_zones (
             id SERIAL PRIMARY KEY,
@@ -156,7 +156,7 @@ const setupDatabase = async () => {
     `);
     console.log('[DB] "clan_territories" table is ready.');
     
-    // --- QUESTS AND SPONSOR TABLES ---
+    // QUESTS AND SPONSOR TABLES
     await client.query(`
         CREATE TABLE IF NOT EXISTS quests (
             id SERIAL PRIMARY KEY, title VARCHAR(100) NOT NULL, description TEXT, type VARCHAR(20) NOT NULL CHECK (type IN ('admin', 'sponsor')), quest_type VARCHAR(50) NOT NULL,
@@ -214,7 +214,7 @@ const authenticate = async (req, res, next) => {
     if (decodedToken.firebase.identities && decodedToken.firebase.identities['google.com']) {
         req.user.googleId = decodedToken.firebase.identities['google.com'][0];
     } else {
-        req.user.googleId = decodedToken.uid; // Fallback
+        req.user.googleId = decodedToken.uid;
     }
     next();
   } catch (error) {
@@ -336,7 +336,7 @@ adminRouter.delete('/api/quests/:id', checkAdminAuth, async (req, res) => {
     } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
 
-// --- NEW --- Admin Geofence Management API
+// Admin Geofence Management API
 adminRouter.get('/api/geofence-zones', checkAdminAuth, async (req, res) => {
     try {
         const zones = await geofenceService.getGeofencePolygons();
@@ -353,7 +353,7 @@ adminRouter.post('/api/geofence-zones', checkAdminAuth, upload.single('kmlFile')
     }
     try {
         const kmlString = req.file.buffer.toString('utf8');
-        await geofenceService.addZoneFromKML(kmlString, name, zoneType); // This now broadcasts
+        await geofenceService.addZoneFromKML(kmlString, name, zoneType);
         res.status(201).json({ message: 'Geofence zone added successfully.' });
     } catch (error) {
         console.error('[ADMIN] Error adding geofence zone:', error);
@@ -363,7 +363,7 @@ adminRouter.post('/api/geofence-zones', checkAdminAuth, upload.single('kmlFile')
 
 adminRouter.delete('/api/geofence-zones/:id', checkAdminAuth, async (req, res) => {
     try {
-        await geofenceService.deleteZone(req.params.id); // This now broadcasts
+        await geofenceService.deleteZone(req.params.id);
         res.json({ message: 'Geofence zone deleted successfully.' });
     } catch (error) {
         res.status(500).json({ message: 'Server error while deleting zone.' });
@@ -384,7 +384,7 @@ sponsorRouter.post('/login', async (req, res) => {
         const isMatch = await bcrypt.compare(password, sponsor.password_hash);
         if (isMatch) {
             const cookieOptions = { httpOnly: true, secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000, path: '/sponsor' };
-            res.cookie('sponsor_session', 'your_secure_random_token_here', cookieOptions); // Use a real token in production
+            res.cookie('sponsor_session', 'your_secure_random_token_here', cookieOptions);
             res.cookie('sponsor_name', sponsor.name, cookieOptions);
             res.redirect('/sponsor/dashboard');
         } else {
@@ -942,12 +942,10 @@ io.on('connection', (socket) => {
             id: socket.id, name, googleId, clanId, role, gameMode, lastKnownPosition: null, isDrawing: false, activeTrail: [], hasShield, disconnectTimer: null, lastStandCharges: 1, infiltratorCharges: 1, ghostRunnerCharges: 1, isGhostRunnerActive: false, isLastStandActive: isShieldActive, isInfiltratorActive: false, isCarveModeActive,
         };
         
-        // --- NEW --- If shield is active, send its activation time to client
         if (isShieldActive && shieldActivatedAt) {
             socket.emit('initialShieldState', { isActive: true, activatedAt: shieldActivatedAt });
         }
 
-        // --- NEW --- Send geofence data on join
         const geofencePolygons = await geofenceService.getGeofencePolygons();
         socket.emit('geofenceUpdate', geofencePolygons);
     
@@ -1070,17 +1068,18 @@ io.on('connection', (socket) => {
     if (!player) return;
     console.log(`[Socket] Player ${player.name} (${socket.id}) stopped drawing trail (run ended).`);
     
+    // NOTE: This is now the secondary path for MAKE_TRAIL quests. The primary is in 'claimTerritory'.
     if (player.isDrawing && player.activeTrail.length > 1) {
         const trailLineString = turf.lineString(player.activeTrail.map(p => [p.lng, p.lat]));
         const distanceMeters = turf.length(trailLineString, { units: 'meters' });
         
-        console.log(`[QUEST] Player ${player.name} finished a trail of ${distanceMeters.toFixed(2)} meters.`);
+        console.log(`[QUEST] Player ${player.name} manually stopped a trail of ${distanceMeters.toFixed(2)} meters.`);
         
         const client = await pool.connect();
         try {
             await updateQuestProgress(player.googleId, QUEST_TYPES.MAKE_TRAIL, distanceMeters, client, io, players);
         } catch(err) {
-            console.error("[QUEST] Error updating trail distance quest:", err);
+            console.error("[QUEST] Error updating trail distance quest on manual stop:", err);
         } finally {
             client.release();
         }
@@ -1118,7 +1117,6 @@ io.on('connection', (socket) => {
       if (player && player.lastStandCharges > 0) {
           player.lastStandCharges--;
           try {
-              // --- MODIFIED --- Set the activation timestamp
               const result = await pool.query(
                   'UPDATE territories SET is_shield_active = true, shield_activated_at = CURRENT_TIMESTAMP WHERE owner_id = $1 RETURNING shield_activated_at', 
                   [player.googleId]
@@ -1128,7 +1126,7 @@ io.on('connection', (socket) => {
               socket.emit('superpowerAcknowledged', { 
                   power: 'lastStand', 
                   chargesLeft: player.lastStandCharges,
-                  activatedAt: result.rows[0].shield_activated_at // Send timestamp to client
+                  activatedAt: result.rows[0].shield_activated_at
               });
           } catch(e) {
               console.error(`[DB] Error activating shield for ${player.googleId}`, e);
@@ -1155,17 +1153,26 @@ io.on('connection', (socket) => {
     try {
         await client.query('BEGIN');
         let result;
-        // --- NEW --- Pass geofenceService to handlers
         if (gameMode === 'solo') {
             result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client, geofenceService);
         } else if (gameMode === 'clan') {
             result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client, geofenceService);
         }
-        
         if (!result) { 
             await client.query('ROLLBACK');
             return; 
         }
+
+        // --- FIX: CONSOLIDATE QUEST LOGIC HERE ---
+        // This is the definitive end of a successful run.
+        if (trail.length > 1) { // Only count trails, not initial base claims
+            const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
+            const distanceMeters = turf.length(trailLineString, { units: 'meters' });
+            
+            console.log(`[QUEST] Player ${player.name} is having a successful claim for a trail of ${distanceMeters.toFixed(2)} meters.`);
+            await updateQuestProgress(player.googleId, QUEST_TYPES.MAKE_TRAIL, distanceMeters, client, io, players);
+        }
+        // --- END OF FIX ---
         
         await client.query('COMMIT');
         
@@ -1245,10 +1252,9 @@ const main = async () => {
         process.exit(1); 
     });
     
-    // --- NEW --- Start the periodic shield check
-    const SHIELD_CHECK_INTERVAL_MS = 15 * 60 * 1000; // Check every 15 minutes
+    const SHIELD_CHECK_INTERVAL_MS = 15 * 60 * 1000;
     console.log(`[JOBS] Scheduling shield expiry check every ${SHIELD_CHECK_INTERVAL_MS / 60000} minutes.`);
-    checkExpiredShields(pool, io, players); // Initial check on start
+    checkExpiredShields(pool, io, players);
     setInterval(() => checkExpiredShields(pool, io, players), SHIELD_CHECK_INTERVAL_MS);
   });
 };
