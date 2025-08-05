@@ -5,7 +5,8 @@
 
 /**
  * Merges the victim's territory into the attacker's claim and then
- * erases the victim's territory from the database.
+ * erases the victim's territory from the database. This is used when an
+ * attacker's claim completely envelops the victim's land.
  *
  * @param {object} victim - The victim player's data from the database { owner_id, username, area }.
  * @param {string} attackerNetGainGeom - The WKT representation of the attacker's claim geometry.
