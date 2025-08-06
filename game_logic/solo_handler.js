@@ -3,7 +3,7 @@ const { handleShieldHit } = require('./interactions/shield_interaction');
 const { handleWipeout } = require('./interactions/unshielded_interaction');
 const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
 const { handleCarveOut } = require('./interactions/carve_interaction');
-// Add the import for the new interaction handler
+// FIX: Import the function using destructuring to match the export style.
 const { handlePartialWipeout } = require('./interactions/partial_wipeout_interaction');
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
@@ -112,7 +112,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                 console.log('[DEBUG] Carve Mode is active. Calling handleCarveOut.');
                 await handleCarveOut(victim, attackerNetGainGeom, client);
             } else {
-                // === MODIFICATION START ===
                 // This is the new logic for standard (non-carve) unshielded interactions
                 console.log(`[DEBUG] Standard interaction with ${victim.username}. Checking for full vs. partial wipeout.`);
 
@@ -132,7 +131,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                     console.log(`[DEBUG] Attacker's claim partially intersects ${victim.username}. Calling handlePartialWipeout.`);
                     await handlePartialWipeout(victim, attackerNetGainGeom, client);
                 }
-                // === MODIFICATION END ===
             }
         }
     }
