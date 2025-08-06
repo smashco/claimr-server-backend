@@ -18,7 +18,7 @@ const { checkExpiredShields } = require('./game_logic/jobs/shield_expiry_job');
 const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
 const { updateQuestProgress, QUEST_TYPES } = require('./game_logic/quest_handler');
-const { incrementPlayerStats } = require('./game_logic/stats_handler'); // <-- ADDED: Import new stats handler
+const { incrementPlayerStats } = require('./game_logic/stats_handler');
 
 // --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -100,16 +100,26 @@ const setupDatabase = async () => {
         is_shield_active BOOLEAN DEFAULT FALSE,
         shield_activated_at TIMESTAMP WITH TIME ZONE,
         is_carve_mode_active BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        
-        -- ADDED: New columns for lifetime stats --
-        lifetime_area_claimed REAL DEFAULT 0,
-        lifetime_trail_cuts INTEGER DEFAULT 0,
-        lifetime_distance_run REAL DEFAULT 0,
-        lifetime_attacks_made INTEGER DEFAULT 0
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        -- Note: New columns are added via ALTER TABLE below for safety
       );
     `);
     console.log('[DB] "territories" table is ready.');
+
+    // Safely add new columns if they don't exist
+    const columnsToAdd = [
+        { name: 'lifetime_area_claimed', type: 'REAL', default: 0 },
+        { name: 'lifetime_trail_cuts', type: 'INTEGER', default: 0 },
+        { name: 'lifetime_distance_run', type: 'REAL', default: 0 },
+        { name: 'lifetime_attacks_made', type: 'INTEGER', default: 0 }
+    ];
+    for (const col of columnsToAdd) {
+        await client.query(`
+            ALTER TABLE territories 
+            ADD COLUMN IF NOT EXISTS ${col.name} ${col.type} DEFAULT ${col.default};
+        `);
+        console.log(`[DB] Ensured column "${col.name}" exists in "territories".`);
+    }
     
     // Geofence Zones Table
     await client.query(`
@@ -274,11 +284,18 @@ adminRouter.get('/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.jo
 // Player Admin API
 adminRouter.get('/api/players', checkAdminAuth, async (req, res) => {
     try {
-        // ADDED lifetime stats to the query
+        // --- THIS IS THE FIX ---
+        // Using COALESCE to provide a default value of 0 if a lifetime stat column is NULL.
         const result = await pool.query(`
             SELECT 
-                owner_id, username, area_sqm, is_carve_mode_active,
-                lifetime_area_claimed, lifetime_trail_cuts, lifetime_distance_run, lifetime_attacks_made
+                owner_id, 
+                username, 
+                area_sqm, 
+                is_carve_mode_active,
+                COALESCE(lifetime_area_claimed, 0) as lifetime_area_claimed,
+                COALESCE(lifetime_trail_cuts, 0) as lifetime_trail_cuts,
+                COALESCE(lifetime_distance_run, 0) as lifetime_distance_run,
+                COALESCE(lifetime_attacks_made, 0) as lifetime_attacks_made
             FROM territories 
             ORDER BY username
         `);
@@ -290,7 +307,7 @@ adminRouter.get('/api/players', checkAdminAuth, async (req, res) => {
         res.json(enhancedPlayers);
     } catch (err) { 
         console.error('[ADMIN] Error fetching players:', err);
-        res.status(500).json({ message: 'Server error' }); 
+        res.status(500).json({ message: `Server error fetching players: ${err.message}` }); 
     }
 });
 
@@ -311,7 +328,7 @@ adminRouter.post('/api/player/:id/:action', checkAdminAuth, async (req, res) => 
     }
 });
 
-// Admin Quest Management API (No changes needed)
+// Admin Quest Management API
 adminRouter.get('/api/quests', checkAdminAuth, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -325,6 +342,7 @@ adminRouter.get('/api/quests', checkAdminAuth, async (req, res) => {
         res.status(500).json({ message: 'Server error' }); 
     }
 });
+
 adminRouter.post('/api/quests', checkAdminAuth, async (req, res) => {
     const { title, description, quest_type, target_value, reward_description, expires_at, sponsor_name } = req.body;
     const type = sponsor_name ? 'sponsor' : 'admin';
@@ -341,6 +359,7 @@ adminRouter.post('/api/quests', checkAdminAuth, async (req, res) => {
         res.status(500).json({ message: 'Server error' }); 
     }
 });
+
 adminRouter.delete('/api/quests/:id', checkAdminAuth, async (req, res) => {
     try {
         await pool.query('DELETE FROM quests WHERE id = $1', [req.params.id]);
@@ -349,7 +368,7 @@ adminRouter.delete('/api/quests/:id', checkAdminAuth, async (req, res) => {
     } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
 
-// Admin Geofence Management API (No changes needed)
+// Admin Geofence Management API
 adminRouter.get('/api/geofence-zones', checkAdminAuth, async (req, res) => {
     try {
         const zones = await geofenceService.getGeofencePolygons();
@@ -358,6 +377,7 @@ adminRouter.get('/api/geofence-zones', checkAdminAuth, async (req, res) => {
         res.status(500).json({ message: 'Server error while fetching zones.' });
     }
 });
+
 adminRouter.post('/api/geofence-zones', checkAdminAuth, upload.single('kmlFile'), async (req, res) => {
     const { name, zoneType } = req.body;
     if (!req.file || !name || !zoneType) {
@@ -372,6 +392,7 @@ adminRouter.post('/api/geofence-zones', checkAdminAuth, upload.single('kmlFile')
         res.status(500).json({ message: error.message || 'Failed to process KML file.' });
     }
 });
+
 adminRouter.delete('/api/geofence-zones/:id', checkAdminAuth, async (req, res) => {
     try {
         await geofenceService.deleteZone(req.params.id);
@@ -382,7 +403,7 @@ adminRouter.delete('/api/geofence-zones/:id', checkAdminAuth, async (req, res) =
 });
 
 
-// Sponsor Panel Routes (No changes needed)
+// Sponsor Panel Routes
 sponsorRouter.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'sponsor.html')));
 sponsorRouter.get('/dashboard', checkSponsorAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'sponsor_dashboard.html')));
 
@@ -406,6 +427,7 @@ sponsorRouter.post('/login', async (req, res) => {
         res.status(500).send('Server error during login.'); 
     }
 });
+
 sponsorRouter.get('/api/registrations', checkSponsorAuth, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -422,6 +444,7 @@ sponsorRouter.get('/api/registrations', checkSponsorAuth, async (req, res) => {
         res.status(500).json({ message: 'Server error' });
     }
 });
+
 sponsorRouter.post('/api/verify', checkSponsorAuth, async (req, res) => {
     const { unique_code } = req.body;
     const client = await pool.connect();
@@ -479,13 +502,10 @@ app.get('/check-profile', async (req, res) => {
         const query = `
             SELECT 
                 t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, 
-                
-                -- ADDED: Select new lifetime stats --
-                t.lifetime_area_claimed,
-                t.lifetime_trail_cuts,
-                t.lifetime_distance_run,
-                t.lifetime_attacks_made,
-                
+                COALESCE(t.lifetime_area_claimed, 0) as lifetime_area_claimed,
+                COALESCE(t.lifetime_trail_cuts, 0) as lifetime_trail_cuts,
+                COALESCE(t.lifetime_distance_run, 0) as lifetime_distance_run,
+                COALESCE(t.lifetime_attacks_made, 0) as lifetime_attacks_made,
                 c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
                 (c.base_location IS NOT NULL) as base_is_set
             FROM territories t
@@ -504,12 +524,10 @@ app.get('/check-profile', async (req, res) => {
                 area_sqm: row.area_sqm || 0,
                 has_shield: row.has_shield, 
                 clan_info: null,
-                
-                // ADDED: Include new lifetime stats in the response
-                lifetimeAreaClaimed: row.lifetime_area_claimed || 0,
-                lifetimeTrailCuts: row.lifetime_trail_cuts || 0,
-                lifetimeDistanceRun: row.lifetime_distance_run || 0,
-                lifetimeAttacksMade: row.lifetime_attacks_made || 0,
+                lifetimeAreaClaimed: row.lifetime_area_claimed,
+                lifetimeTrailCuts: row.lifetime_trail_cuts,
+                lifetimeDistanceRun: row.lifetime_distance_run,
+                lifetimeAttacksMade: row.lifetime_attacks_made,
             };
             if (row.clan_id) {
                 response.clan_info = { id: row.clan_id.toString(), name: row.clan_name, tag: row.clan_tag, role: row.clan_role, base_is_set: row.base_is_set };
@@ -859,7 +877,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     }
 });
 
-// --- Public Quest API for the App (no changes needed) ---
+// --- Public Quest API for the App ---
 app.get('/api/quests/active', authenticate, async (req, res) => {
     try {
         const questsRes = await pool.query(`
@@ -883,6 +901,7 @@ app.get('/api/quests/active', authenticate, async (req, res) => {
         res.status(500).json({ message: 'Server error' });
     }
 });
+
 app.post('/api/quests/:id/register', authenticate, async (req, res) => {
     const { id: questId } = req.params;
     const { googleId } = req.user;
@@ -1034,7 +1053,6 @@ io.on('connection', (socket) => {
         if (distanceIncrement > 0) {
             const client = await pool.connect();
             try {
-                // ADDED: Update lifetime distance run stat alongside quest progress
                 await updateQuestProgress(player.googleId, QUEST_TYPES.MAKE_TRAIL, distanceIncrement, client, io, players);
                 await incrementPlayerStats(client, player.googleId, { lifetime_distance_run: distanceIncrement });
             } catch(err) {
@@ -1074,7 +1092,6 @@ io.on('connection', (socket) => {
                             console.log(`[GAME] TRAIL CUT! Attacker ${player.name} cut Victim ${victim.name}`);
                             io.to(victimId).emit('runTerminated', { reason: `Your trail was cut by ${player.name}!` });
                             
-                            // ADDED: Update lifetime trail cut stat alongside quest progress
                             await updateQuestProgress(player.googleId, QUEST_TYPES.CUT_TRAIL, 1, client, io, players);
                             await incrementPlayerStats(client, player.googleId, { lifetime_trail_cuts: 1 });
 
@@ -1179,19 +1196,16 @@ io.on('connection', (socket) => {
     try {
         await client.query('BEGIN');
         
-        // ADDED: Track if an attack occurs
         let attackOccurred = false;
         
         let result;
         if (gameMode === 'solo') {
             result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client);
-            // Check if any victims were found, indicating an attack
             if (result && result.ownerIdsToUpdate.length > 1) {
                 attackOccurred = true;
             }
         } else if (gameMode === 'clan') {
             result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client);
-            // Logic for clan attack detection would go here if needed
         }
 
         if (!result) { 
@@ -1199,7 +1213,6 @@ io.on('connection', (socket) => {
             return; 
         }
         
-        // ADDED: Update lifetime stats after a successful claim transaction
         if (result.areaClaimed > 0) {
             await incrementPlayerStats(client, player.googleId, { lifetime_area_claimed: result.areaClaimed });
         }
