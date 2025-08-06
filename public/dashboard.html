@@ -8,17 +8,29 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
         body { background-color: #212529; color: #dee2e6; }
-        .table { color: #dee2e6; }
-        .nav-tabs .nav-link { color: #dee2e6; }
-        .nav-tabs .nav-link.active { color: #212529; background-color: #dee2e6; }
-        .card { background-color: #343a40; }
-        .container-fluid { max-width: 1600px; }
-        #map { height: 400px; background-color: #343a40; border-radius: 8px; margin-bottom: 20px; }
+        .table { color: #dee2e6; vertical-align: middle; }
+        .nav-tabs .nav-link { color: #dee2e6; border-color: #495057; }
+        .nav-tabs .nav-link.active { color: #212529; background-color: #dee2e6; border-color: #dee2e6; }
+        .card { background-color: #343a40; border: 1px solid #495057; }
+        .container-fluid { max-width: 1800px; }
+        #map { height: 400px; background-color: #343a40; border-radius: 8px; margin-bottom: 20px; border: 1px solid #495057; }
+        .stat-value { font-weight: bold; color: #39FF14; }
+
+        /* Responsive table columns */
+        @media (max-width: 1200px) {
+            .d-none-xl { display: none; }
+        }
+        @media (max-width: 992px) {
+            .d-none-lg { display: none; }
+        }
+        @media (max-width: 768px) {
+            .d-none-md { display: none; }
+        }
     </style>
 </head>
 <body>
     <div class="container-fluid py-4">
-        <div class="d-flex justify-content-between align-items-center mb-4">
+        <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
             <h1>Admin Dashboard</h1>
             <button class="btn btn-secondary" onclick="fetchAllData()">Refresh All Data</button>
         </div>
@@ -27,62 +39,71 @@
 
         <ul class="nav nav-tabs mb-3" id="adminTab" role="tablist">
             <li class="nav-item" role="presentation">
-                <button class="nav-link active" id="players-tab" data-bs-toggle="tab" data-bs-target="#players" type="button" role="tab">Players</button>
+                <button class="nav-link active" id="players-tab" data-bs-toggle="tab" data-bs-target="#players-panel" type="button" role="tab" aria-controls="players-panel" aria-selected="true">Players</button>
             </li>
             <li class="nav-item" role="presentation">
-                <button class="nav-link" id="quests-tab" data-bs-toggle="tab" data-bs-target="#quests" type="button" role="tab">Quests</button>
+                <button class="nav-link" id="quests-tab" data-bs-toggle="tab" data-bs-target="#quests-panel" type="button" role="tab" aria-controls="quests-panel" aria-selected="false">Quests</button>
             </li>
             <li class="nav-item" role="presentation">
-                <button class="nav-link" id="geofence-tab" data-bs-toggle="tab" data-bs-target="#geofence" type="button" role="tab">Geofence</button>
+                <button class="nav-link" id="geofence-tab" data-bs-toggle="tab" data-bs-target="#geofence-panel" type="button" role="tab" aria-controls="geofence-panel" aria-selected="false">Geofence</button>
             </li>
         </ul>
 
         <div class="tab-content" id="adminTabContent">
             <!-- Players Tab -->
-            <div class="tab-pane fade show active" id="players" role="tabpanel">
-                <h2>Players Overview</h2>
+            <div class="tab-pane fade show active" id="players-panel" role="tabpanel" aria-labelledby="players-tab">
+                <h2 class="h4">Players Overview</h2>
                 <div class="table-responsive">
                     <table class="table table-dark table-striped table-hover">
                         <thead>
                             <tr>
-                                <th>Status</th><th>Username</th><th>Territory (km²)</th><th>Actions</th>
+                                <th>Status</th>
+                                <th>Username</th>
+                                <th>Current Territory (km²)</th>
+                                <th class="d-none-md">Lifetime Area (km²)</th>
+                                <th class="d-none-lg">Lifetime Distance (km)</th>
+                                <th class="d-none-md">Trail Cuts</th>
+                                <th class="d-none-xl">Attacks</th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
-                        <tbody id="player-table-body"></tbody>
+                        <tbody id="player-table-body">
+                            <!-- Player data will be inserted here by JavaScript -->
+                        </tbody>
                     </table>
                 </div>
             </div>
 
             <!-- Quests Tab -->
-            <div class="tab-pane fade" id="quests" role="tabpanel">
-                <div class="row">
-                    <div class="col-md-4">
-                        <div class="card">
+            <div class="tab-pane fade" id="quests-panel" role="tabpanel" aria-labelledby="quests-tab">
+                <div class="row g-4">
+                    <div class="col-lg-4">
+                        <div class="card h-100">
                             <div class="card-body">
                                 <h5 class="card-title">Create New Quest</h5>
                                 <form id="createQuestForm">
-                                    <div class="mb-3">
+                                    <div class="mb-2">
                                         <label for="questTitle" class="form-label">Title</label>
                                         <input type="text" class="form-control" id="questTitle" required>
                                     </div>
-                                    <div class="mb-3">
+                                    <div class="mb-2">
                                         <label for="questDescription" class="form-label">Description</label>
                                         <textarea class="form-control" id="questDescription" rows="2"></textarea>
                                     </div>
-                                    <div class="mb-3">
+                                    <div class="mb-2">
                                         <label for="questType" class="form-label">Quest Type</label>
                                         <select class="form-select" id="questType" required>
-                                            <option value="MAKE_TRAIL">Make Trail (Distance)</option>
+                                            <option value="MAKE_TRAIL">Make Trail (Distance in Meters)</option>
                                             <option value="ATTACK_BASE">Attack Bases (Count)</option>
                                             <option value="CUT_TRAIL">Cut Trails (Count)</option>
                                             <option value="COMPLETE_RUN">Complete Runs (Count)</option>
                                         </select>
                                     </div>
-                                    <div class="mb-3">
+                                    <div class="mb-2">
                                         <label for="questTarget" class="form-label">Target Value</label>
                                         <input type="number" class="form-control" id="questTarget" required placeholder="e.g., 2000 for 2km trail">
                                     </div>
-                                    <div class="mb-3">
+                                    <div class="mb-2">
                                         <label for="questReward" class="form-label">Reward</label>
                                         <input type="text" class="form-control" id="questReward" placeholder="e.g., 500 in-game credits">
                                     </div>
@@ -90,19 +111,21 @@
                                         <label for="questExpiry" class="form-label">Expires At</label>
                                         <input type="datetime-local" class="form-control" id="questExpiry" required>
                                     </div>
-                                    <button type="submit" class="btn btn-primary">Create Quest</button>
+                                    <button type="submit" class="btn btn-primary w-100">Create Quest</button>
                                 </form>
                             </div>
                         </div>
                     </div>
-                    <div class="col-md-8">
-                        <h2>Active & Past Quests</h2>
+                    <div class="col-lg-8">
+                        <h2 class="h4">Active & Past Quests</h2>
                         <div class="table-responsive">
                             <table class="table table-dark table-striped">
                                 <thead>
                                     <tr><th>Title</th><th>Type</th><th>Target</th><th>Status</th><th>Winner</th><th>Expires</th><th>Actions</th></tr>
                                 </thead>
-                                <tbody id="quest-table-body"></tbody>
+                                <tbody id="quest-table-body">
+                                    <!-- Quest data will be inserted here -->
+                                </tbody>
                             </table>
                         </div>
                     </div>
@@ -110,10 +133,10 @@
             </div>
 
             <!-- Geofence Tab -->
-            <div class="tab-pane fade" id="geofence" role="tabpanel">
-                <div class="row">
-                    <div class="col-md-4">
-                        <div class="card">
+            <div class="tab-pane fade" id="geofence-panel" role="tabpanel" aria-labelledby="geofence-tab">
+                <div class="row g-4">
+                    <div class="col-lg-4">
+                        <div class="card h-100">
                             <div class="card-body">
                                 <h5 class="card-title">Add New Geofence Zone</h5>
                                 <form id="geofenceForm">
@@ -132,19 +155,21 @@
                                         <label for="kmlFile" class="form-label">KML File</label>
                                         <input class="form-control" type="file" id="kmlFile" accept=".kml" required>
                                     </div>
-                                    <button type="submit" class="btn btn-primary">Upload Zone</button>
+                                    <button type="submit" class="btn btn-primary w-100">Upload Zone</button>
                                 </form>
                             </div>
                         </div>
                     </div>
-                    <div class="col-md-8">
-                        <h2>Current Geofence Zones</h2>
+                    <div class="col-lg-8">
+                        <h2 class="h4">Current Geofence Zones</h2>
                         <div class="table-responsive">
                             <table class="table table-dark table-striped">
                                 <thead>
                                     <tr><th>Name</th><th>Type</th><th>Actions</th></tr>
                                 </thead>
-                                <tbody id="geofence-table-body"></tbody>
+                                <tbody id="geofence-table-body">
+                                    <!-- Geofence data will be inserted here -->
+                                </tbody>
                             </table>
                         </div>
                     </div>
@@ -161,87 +186,137 @@
         let geofenceLayers = L.layerGroup();
 
         function initMap() {
-            map = L.map('map').setView([19.0760, 72.8777], 10);
+            map = L.map('map').setView([19.0760, 72.8777], 10); // Default view, will be adjusted
             L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-                attribution: '© OpenStreetMap © CARTO',
+                attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors © <a href="https://carto.com/attributions">CARTO</a>',
+                subdomains: 'abcd',
+                maxZoom: 20
             }).addTo(map);
             geofenceLayers.addTo(map);
         }
 
         async function apiFetch(url, options = {}) {
-            const response = await fetch(url, options);
-            if (response.status === 401) window.location.href = '/admin/login';
-            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-            return response.json();
+            try {
+                const response = await fetch(url, options);
+                if (response.status === 401) {
+                    alert('Session expired. Please log in again.');
+                    window.location.href = '/admin/login';
+                    return null;
+                }
+                if (!response.ok) {
+                    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+                }
+                // Handle cases with no JSON body, like a successful DELETE
+                const contentType = response.headers.get("content-type");
+                if (contentType && contentType.indexOf("application/json") !== -1) {
+                    return response.json();
+                } else {
+                    return { success: true, message: "Action completed successfully." }; // Mock success object
+                }
+            } catch (error) {
+                console.error('API Fetch Error:', error);
+                alert(`An error occurred: ${error.message}`);
+                return null;
+            }
         }
 
         // --- Player Functions ---
         async function fetchPlayers() {
-            try {
-                const players = await apiFetch('/admin/api/players');
-                renderPlayers(players);
-            } catch (error) { console.error('Error fetching players:', error); }
+            const players = await apiFetch('/admin/api/players');
+            if (players) renderPlayers(players);
         }
+        
         function renderPlayers(players) {
             const tableBody = document.getElementById('player-table-body');
             tableBody.innerHTML = '';
+            
             Object.values(playerMarkers).forEach(marker => marker.remove());
             playerMarkers = {};
 
+            if (!players || players.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="8" class="text-center">No players found.</td></tr>';
+                return;
+            }
+
             players.forEach(player => {
                 const row = document.createElement('tr');
-                const areaKm2 = (player.area_sqm / 1000000).toFixed(6);
+                const areaKm2 = (player.area_sqm / 1000000).toFixed(4);
+                const lifetimeAreaKm2 = (player.lifetime_area_claimed / 1000000).toFixed(4);
+                const lifetimeDistanceKm = (player.lifetime_distance_run / 1000).toFixed(2);
+                
                 row.innerHTML = `
                     <td><span class="badge ${player.isOnline ? 'bg-success' : 'bg-secondary'}">${player.isOnline ? 'Online' : 'Offline'}</span></td>
                     <td>${player.username || 'N/A'}</td>
-                    <td>${areaKm2}</td>
+                    <td><span class="stat-value">${areaKm2}</span></td>
+                    <td class="d-none-md"><span class="stat-value">${lifetimeAreaKm2}</span></td>
+                    <td class="d-none-lg"><span class="stat-value">${lifetimeDistanceKm}</span></td>
+                    <td class="d-none-md"><span class="stat-value">${player.lifetime_trail_cuts || 0}</span></td>
+                    <td class="d-none-xl"><span class="stat-value">${player.lifetime_attacks_made || 0}</span></td>
                     <td>
-                        <button class="btn btn-sm btn-warning" onclick="performPlayerAction('${player.owner_id}', 'reset-territory', '${player.username}')">Reset Territory</button>
-                        <button class="btn btn-sm btn-danger" onclick="performPlayerAction('${player.owner_id}', 'delete', '${player.username}')">Delete Player</button>
+                        <button class="btn btn-sm btn-warning" onclick="performPlayerAction('${player.owner_id}', 'reset-territory', '${player.username}')">Reset</button>
+                        <button class="btn btn-sm btn-danger" onclick="performPlayerAction('${player.owner_id}', 'delete', '${player.username}')">Delete</button>
                     </td>
                 `;
                 tableBody.appendChild(row);
+
                 if (player.isOnline && player.lastKnownPosition) {
                     const { lat, lng } = player.lastKnownPosition;
-                    playerMarkers[player.owner_id] = L.marker([lat, lng]).addTo(map).bindPopup(`<b>${player.username}</b>`);
+                    playerMarkers[player.owner_id] = L.marker([lat, lng]).addTo(map)
+                        .bindPopup(`<b>${player.username}</b><br>Online`);
                 }
             });
         }
+
         async function performPlayerAction(playerId, action, username) {
-            if (!confirm(`Are you sure you want to ${action.replace('-', ' ')} for ${username}?`)) return;
-            try {
-                const result = await apiFetch(`/admin/api/player/${playerId}/${action}`, { method: 'POST' });
+            const message = action === 'delete'
+                ? `DANGER: This will PERMANENTLY DELETE player ${username} and all their data. This cannot be undone. Proceed?`
+                : `Are you sure you want to ${action.replace('-', ' ')} for ${username}?`;
+
+            if (!confirm(message)) return;
+
+            const result = await apiFetch(`/admin/api/player/${playerId}/${action}`, { method: 'POST' });
+            if (result) {
                 alert(result.message);
                 fetchPlayers();
-            } catch (error) { alert('Action failed.'); }
+            }
         }
 
         // --- Quest Functions ---
         async function fetchQuests() {
-            try {
-                const quests = await apiFetch('/admin/api/quests');
-                renderQuests(quests);
-            } catch (error) { console.error('Error fetching quests:', error); }
+            const quests = await apiFetch('/admin/api/quests');
+            if (quests) renderQuests(quests);
         }
+
         function renderQuests(quests) {
             const tableBody = document.getElementById('quest-table-body');
             tableBody.innerHTML = '';
+            
+            if (!quests || quests.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="7" class="text-center">No quests found.</td></tr>';
+                return;
+            }
+
             quests.forEach(quest => {
                 const row = document.createElement('tr');
-                const status = quest.winner_id ? 'Won' : (new Date(quest.expires_at) < new Date() ? 'Expired' : 'Active');
-                const statusClass = quest.winner_id ? 'bg-success' : (status === 'Expired' ? 'bg-secondary' : 'bg-primary');
+                const isExpired = new Date(quest.expires_at) < new Date();
+                const status = quest.winner_id ? 'Won' : (isExpired ? 'Expired' : 'Active');
+                const statusClass = quest.winner_id ? 'bg-success' : (isExpired ? 'bg-secondary' : 'bg-primary');
+                
                 row.innerHTML = `
                     <td>${quest.title}</td>
-                    <td><span class="badge bg-info">${quest.quest_type}</span></td>
+                    <td><span class="badge bg-info text-dark">${quest.quest_type}</span></td>
                     <td>${quest.target_value}</td>
                     <td><span class="badge ${statusClass}">${status}</span></td>
                     <td>${quest.winner_username || 'N/A'}</td>
                     <td>${new Date(quest.expires_at).toLocaleString()}</td>
-                    <td><button class="btn btn-sm btn-danger" onclick="deleteQuest(${quest.id})">Delete</button></td>
+                    <td>
+                        <button class="btn btn-sm btn-danger" onclick="deleteQuest(${quest.id})">Delete</button>
+                    </td>
                 `;
                 tableBody.appendChild(row);
             });
         }
+        
         document.getElementById('createQuestForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             const questData = {
@@ -252,31 +327,45 @@
                 reward_description: document.getElementById('questReward').value,
                 expires_at: new Date(document.getElementById('questExpiry').value).toISOString(),
             };
-            try {
-                await apiFetch('/admin/api/quests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(questData) });
+            
+            const result = await apiFetch('/admin/api/quests', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify(questData) 
+            });
+
+            if (result) {
+                alert('Quest created successfully!');
                 this.reset();
                 fetchQuests();
-            } catch (error) { alert('Failed to create quest.'); }
+            }
         });
+
         async function deleteQuest(id) {
-            if (!confirm('Are you sure you want to delete this quest?')) return;
-            try {
-                await apiFetch(`/admin/api/quests/${id}`, { method: 'DELETE' });
+            if (!confirm('Are you sure you want to delete this quest? This is permanent.')) return;
+            const result = await apiFetch(`/admin/api/quests/${id}`, { method: 'DELETE' });
+            if (result) {
+                alert('Quest deleted.');
                 fetchQuests();
-            } catch (error) { alert('Failed to delete quest.'); }
+            }
         }
 
         // --- Geofence Functions ---
         async function fetchGeofences() {
-            try {
-                const zones = await apiFetch('/admin/api/geofence-zones');
-                renderGeofences(zones);
-            } catch (error) { console.error('Error fetching geofences:', error); }
+            const zones = await apiFetch('/admin/api/geofence-zones');
+            if (zones) renderGeofences(zones);
         }
+
         function renderGeofences(zones) {
             const tableBody = document.getElementById('geofence-table-body');
             tableBody.innerHTML = '';
             geofenceLayers.clearLayers();
+            
+            if (!zones || zones.length === 0) {
+                 tableBody.innerHTML = '<tr><td colspan="3" class="text-center">No geofence zones defined.</td></tr>';
+                return;
+            }
+
             zones.forEach(zone => {
                 const row = document.createElement('tr');
                 const typeClass = zone.zone_type === 'allowed' ? 'bg-success' : 'bg-danger';
@@ -286,28 +375,53 @@
                     <td><button class="btn btn-sm btn-danger" onclick="deleteGeofence(${zone.id})">Delete</button></td>
                 `;
                 tableBody.appendChild(row);
-                L.geoJSON(zone.geojson, { style: { color: zone.zone_type === 'allowed' ? 'green' : 'red' } }).addTo(geofenceLayers);
+
+                L.geoJSON(zone.geojson, { 
+                    style: { 
+                        color: zone.zone_type === 'allowed' ? '#28a745' : '#dc3545',
+                        weight: 2,
+                        opacity: 0.8
+                    }
+                }).addTo(geofenceLayers).bindPopup(`<b>${zone.name}</b><br>Type: ${zone.zone_type}`);
             });
-            if (zones.length > 0) map.fitBounds(geofenceLayers.getBounds());
+
+            if (geofenceLayers.getLayers().length > 0) {
+                map.fitBounds(geofenceLayers.getBounds(), { padding: [50, 50] });
+            }
         }
+
         document.getElementById('geofenceForm').addEventListener('submit', async function(e) {
             e.preventDefault();
+            const fileInput = document.getElementById('kmlFile');
+            if (!fileInput.files || fileInput.files.length === 0) {
+                alert('Please select a KML file.');
+                return;
+            }
+
             const formData = new FormData();
             formData.append('name', document.getElementById('zoneName').value);
             formData.append('zoneType', document.getElementById('zoneType').value);
-            formData.append('kmlFile', document.getElementById('kmlFile').files[0]);
-            try {
-                await apiFetch('/admin/api/geofence-zones', { method: 'POST', body: formData });
+            formData.append('kmlFile', fileInput.files[0]);
+            
+            const result = await apiFetch('/admin/api/geofence-zones', { 
+                method: 'POST', 
+                body: formData // No Content-Type header needed, browser sets it for FormData
+            });
+
+            if (result) {
+                alert('Geofence zone uploaded successfully.');
                 this.reset();
                 fetchGeofences();
-            } catch (error) { alert('Failed to upload KML file.'); console.error(error); }
+            }
         });
+
         async function deleteGeofence(id) {
-            if (!confirm('Are you sure you want to delete this zone?')) return;
-            try {
-                await apiFetch(`/admin/api/geofence-zones/${id}`, { method: 'DELETE' });
+            if (!confirm('Are you sure you want to delete this geofence zone?')) return;
+            const result = await apiFetch(`/admin/api/geofence-zones/${id}`, { method: 'DELETE' });
+            if (result) {
+                alert('Zone deleted.');
                 fetchGeofences();
-            } catch (error) { alert('Failed to delete zone.'); }
+            }
         }
 
         // --- Initial Load ---
@@ -320,6 +434,8 @@
         window.onload = () => {
             initMap();
             fetchAllData();
+            // Optional: Auto-refresh data every 30 seconds
+            // setInterval(fetchAllData, 30000); 
         };
     </script>
 </body>

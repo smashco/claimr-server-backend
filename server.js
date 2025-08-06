@@ -18,6 +18,7 @@ const { checkExpiredShields } = require('./game_logic/jobs/shield_expiry_job');
 const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
 const { updateQuestProgress, QUEST_TYPES } = require('./game_logic/quest_handler');
+const { incrementPlayerStats } = require('./game_logic/stats_handler'); // <-- ADDED: Import new stats handler
 
 // --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -99,7 +100,13 @@ const setupDatabase = async () => {
         is_shield_active BOOLEAN DEFAULT FALSE,
         shield_activated_at TIMESTAMP WITH TIME ZONE,
         is_carve_mode_active BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        
+        -- ADDED: New columns for lifetime stats --
+        lifetime_area_claimed REAL DEFAULT 0,
+        lifetime_trail_cuts INTEGER DEFAULT 0,
+        lifetime_distance_run REAL DEFAULT 0,
+        lifetime_attacks_made INTEGER DEFAULT 0
       );
     `);
     console.log('[DB] "territories" table is ready.');
@@ -267,14 +274,24 @@ adminRouter.get('/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.jo
 // Player Admin API
 adminRouter.get('/api/players', checkAdminAuth, async (req, res) => {
     try {
-        const result = await pool.query('SELECT owner_id, username, area_sqm, is_carve_mode_active FROM territories ORDER BY username');
+        // ADDED lifetime stats to the query
+        const result = await pool.query(`
+            SELECT 
+                owner_id, username, area_sqm, is_carve_mode_active,
+                lifetime_area_claimed, lifetime_trail_cuts, lifetime_distance_run, lifetime_attacks_made
+            FROM territories 
+            ORDER BY username
+        `);
         const dbPlayers = result.rows;
         const enhancedPlayers = dbPlayers.map(dbPlayer => {
             const onlinePlayer = Object.values(players).find(p => p.googleId === dbPlayer.owner_id);
             return { ...dbPlayer, isOnline: !!onlinePlayer, lastKnownPosition: onlinePlayer?.lastKnownPosition };
         });
         res.json(enhancedPlayers);
-    } catch (err) { res.status(500).json({ message: 'Server error' }); }
+    } catch (err) { 
+        console.error('[ADMIN] Error fetching players:', err);
+        res.status(500).json({ message: 'Server error' }); 
+    }
 });
 
 adminRouter.post('/api/player/:id/:action', checkAdminAuth, async (req, res) => {
@@ -294,7 +311,7 @@ adminRouter.post('/api/player/:id/:action', checkAdminAuth, async (req, res) => 
     }
 });
 
-// Admin Quest Management API
+// Admin Quest Management API (No changes needed)
 adminRouter.get('/api/quests', checkAdminAuth, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -308,7 +325,6 @@ adminRouter.get('/api/quests', checkAdminAuth, async (req, res) => {
         res.status(500).json({ message: 'Server error' }); 
     }
 });
-
 adminRouter.post('/api/quests', checkAdminAuth, async (req, res) => {
     const { title, description, quest_type, target_value, reward_description, expires_at, sponsor_name } = req.body;
     const type = sponsor_name ? 'sponsor' : 'admin';
@@ -325,7 +341,6 @@ adminRouter.post('/api/quests', checkAdminAuth, async (req, res) => {
         res.status(500).json({ message: 'Server error' }); 
     }
 });
-
 adminRouter.delete('/api/quests/:id', checkAdminAuth, async (req, res) => {
     try {
         await pool.query('DELETE FROM quests WHERE id = $1', [req.params.id]);
@@ -334,7 +349,7 @@ adminRouter.delete('/api/quests/:id', checkAdminAuth, async (req, res) => {
     } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
 
-// Admin Geofence Management API
+// Admin Geofence Management API (No changes needed)
 adminRouter.get('/api/geofence-zones', checkAdminAuth, async (req, res) => {
     try {
         const zones = await geofenceService.getGeofencePolygons();
@@ -343,7 +358,6 @@ adminRouter.get('/api/geofence-zones', checkAdminAuth, async (req, res) => {
         res.status(500).json({ message: 'Server error while fetching zones.' });
     }
 });
-
 adminRouter.post('/api/geofence-zones', checkAdminAuth, upload.single('kmlFile'), async (req, res) => {
     const { name, zoneType } = req.body;
     if (!req.file || !name || !zoneType) {
@@ -358,7 +372,6 @@ adminRouter.post('/api/geofence-zones', checkAdminAuth, upload.single('kmlFile')
         res.status(500).json({ message: error.message || 'Failed to process KML file.' });
     }
 });
-
 adminRouter.delete('/api/geofence-zones/:id', checkAdminAuth, async (req, res) => {
     try {
         await geofenceService.deleteZone(req.params.id);
@@ -369,7 +382,7 @@ adminRouter.delete('/api/geofence-zones/:id', checkAdminAuth, async (req, res) =
 });
 
 
-// Sponsor Panel Routes
+// Sponsor Panel Routes (No changes needed)
 sponsorRouter.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'sponsor.html')));
 sponsorRouter.get('/dashboard', checkSponsorAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'sponsor_dashboard.html')));
 
@@ -393,7 +406,6 @@ sponsorRouter.post('/login', async (req, res) => {
         res.status(500).send('Server error during login.'); 
     }
 });
-
 sponsorRouter.get('/api/registrations', checkSponsorAuth, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -410,7 +422,6 @@ sponsorRouter.get('/api/registrations', checkSponsorAuth, async (req, res) => {
         res.status(500).json({ message: 'Server error' });
     }
 });
-
 sponsorRouter.post('/api/verify', checkSponsorAuth, async (req, res) => {
     const { unique_code } = req.body;
     const client = await pool.connect();
@@ -468,6 +479,13 @@ app.get('/check-profile', async (req, res) => {
         const query = `
             SELECT 
                 t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, 
+                
+                -- ADDED: Select new lifetime stats --
+                t.lifetime_area_claimed,
+                t.lifetime_trail_cuts,
+                t.lifetime_distance_run,
+                t.lifetime_attacks_made,
+                
                 c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
                 (c.base_location IS NOT NULL) as base_is_set
             FROM territories t
@@ -485,7 +503,13 @@ app.get('/check-profile', async (req, res) => {
                 identityColor: row.identity_color,
                 area_sqm: row.area_sqm || 0,
                 has_shield: row.has_shield, 
-                clan_info: null
+                clan_info: null,
+                
+                // ADDED: Include new lifetime stats in the response
+                lifetimeAreaClaimed: row.lifetime_area_claimed || 0,
+                lifetimeTrailCuts: row.lifetime_trail_cuts || 0,
+                lifetimeDistanceRun: row.lifetime_distance_run || 0,
+                lifetimeAttacksMade: row.lifetime_attacks_made || 0,
             };
             if (row.clan_id) {
                 response.clan_info = { id: row.clan_id.toString(), name: row.clan_name, tag: row.clan_tag, role: row.clan_role, base_is_set: row.base_is_set };
@@ -835,7 +859,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     }
 });
 
-// --- Public Quest API for the App ---
+// --- Public Quest API for the App (no changes needed) ---
 app.get('/api/quests/active', authenticate, async (req, res) => {
     try {
         const questsRes = await pool.query(`
@@ -859,7 +883,6 @@ app.get('/api/quests/active', authenticate, async (req, res) => {
         res.status(500).json({ message: 'Server error' });
     }
 });
-
 app.post('/api/quests/:id/register', authenticate, async (req, res) => {
     const { id: questId } = req.params;
     const { googleId } = req.user;
@@ -999,24 +1022,28 @@ io.on('connection', (socket) => {
 
     if (player.isDrawing) {
         const lastPoint = player.activeTrail[player.activeTrail.length - 1];
+        let distanceIncrement = 0;
         if (player.activeTrail.length > 0 && lastPoint) {
             const from = turf.point([lastPoint.lng, lastPoint.lat]);
             const to = turf.point([data.lng, data.lat]);
-            const distanceIncrement = turf.distance(from, to, { units: 'meters' });
-
-            if (distanceIncrement > 0) {
-                const client = await pool.connect();
-                try {
-                    await updateQuestProgress(player.googleId, QUEST_TYPES.MAKE_TRAIL, distanceIncrement, client, io, players);
-                } catch(err) {
-                    console.error("[QUEST] Real-time trail distance update failed:", err);
-                } finally {
-                    client.release();
-                }
-            }
+            distanceIncrement = turf.distance(from, to, { units: 'meters' });
         }
+        
         player.activeTrail.push(data);
 
+        if (distanceIncrement > 0) {
+            const client = await pool.connect();
+            try {
+                // ADDED: Update lifetime distance run stat alongside quest progress
+                await updateQuestProgress(player.googleId, QUEST_TYPES.MAKE_TRAIL, distanceIncrement, client, io, players);
+                await incrementPlayerStats(client, player.googleId, { lifetime_distance_run: distanceIncrement });
+            } catch(err) {
+                console.error("[QUEST/STATS] Real-time trail distance update failed:", err);
+            } finally {
+                client.release();
+            }
+        }
+        
         if (!player.isGhostRunnerActive) {
           socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data }); 
         }
@@ -1046,7 +1073,11 @@ io.on('connection', (socket) => {
                         if (result.rows[0].intersects) {
                             console.log(`[GAME] TRAIL CUT! Attacker ${player.name} cut Victim ${victim.name}`);
                             io.to(victimId).emit('runTerminated', { reason: `Your trail was cut by ${player.name}!` });
-                            updateQuestProgress(player.googleId, QUEST_TYPES.CUT_TRAIL, 1, client, io, players);
+                            
+                            // ADDED: Update lifetime trail cut stat alongside quest progress
+                            await updateQuestProgress(player.googleId, QUEST_TYPES.CUT_TRAIL, 1, client, io, players);
+                            await incrementPlayerStats(client, player.googleId, { lifetime_trail_cuts: 1 });
+
                             victim.isDrawing = false;
                             victim.activeTrail = [];
                             io.emit('trailCleared', { id: victimId }); 
@@ -1147,18 +1178,33 @@ io.on('connection', (socket) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
+        
+        // ADDED: Track if an attack occurs
+        let attackOccurred = false;
+        
         let result;
-        // The call to the handler is now simplified, passing arguments directly.
         if (gameMode === 'solo') {
             result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client);
+            // Check if any victims were found, indicating an attack
+            if (result && result.ownerIdsToUpdate.length > 1) {
+                attackOccurred = true;
+            }
         } else if (gameMode === 'clan') {
-            // Assuming handleClanClaim follows a similar argument pattern
             result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client);
+            // Logic for clan attack detection would go here if needed
         }
 
         if (!result) { 
             await client.query('ROLLBACK');
             return; 
+        }
+        
+        // ADDED: Update lifetime stats after a successful claim transaction
+        if (result.areaClaimed > 0) {
+            await incrementPlayerStats(client, player.googleId, { lifetime_area_claimed: result.areaClaimed });
+        }
+        if (attackOccurred) {
+            await incrementPlayerStats(client, player.googleId, { lifetime_attacks_made: 1 });
         }
         
         await client.query('COMMIT');
