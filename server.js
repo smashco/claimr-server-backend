@@ -4,6 +4,7 @@ const http = require('http');
 const path = require('path');
 const cookieParser = require('cookie-parser');
 const { Server } = require("socket.io");
+const bcrypt = require('bcryptjs'); // --- ADDED for sponsor security
 const { Pool } = require('pg');
 const admin = require('firebase-admin');
 const turf = require('@turf/turf');
@@ -165,6 +166,50 @@ const setupDatabase = async () => {
 
     await client.query('CREATE INDEX IF NOT EXISTS geofence_geom_idx ON geofence_zones USING GIST (geom);');
     console.log('[DB] Spatial index for "geofence_zones" is ensured.');
+    
+    // --- NEW QUEST & SPONSOR TABLES ---
+    
+    // Sponsors Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sponsors (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        login_id VARCHAR(50) NOT NULL UNIQUE,
+        passcode_hash TEXT NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[DB] "sponsors" table is ready.');
+
+    // Quests Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS quests (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(150) NOT NULL,
+        description TEXT,
+        quest_type VARCHAR(20) NOT NULL DEFAULT 'admin', -- 'admin' or 'sponsor'
+        sponsor_id INTEGER REFERENCES sponsors(id) ON DELETE SET NULL,
+        google_form_url TEXT,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending', -- 'pending', 'active', 'completed'
+        winner_user_id VARCHAR(255) REFERENCES territories(owner_id),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[DB] "quests" table is ready.');
+
+    // Quest Entries Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS quest_entries (
+        id SERIAL PRIMARY KEY,
+        quest_id INTEGER NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
+        user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
+        submission_details TEXT, -- Could store form entry ID or confirmation
+        status VARCHAR(20) NOT NULL DEFAULT 'submitted', -- 'submitted', 'winner_selected', 'winner_confirmed'
+        submitted_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(quest_id, user_id)
+      );
+    `);
+    console.log('[DB] "quest_entries" table is ready.');
 
 
   } catch (err) {
@@ -355,7 +400,238 @@ adminRouter.delete('/api/geofence-zones/:id', checkAdminAuth, async (req, res) =
     }
 });
 
+// --- Sponsor Account Management ---
+adminRouter.post('/api/sponsors', checkAdminAuth, async (req, res) => {
+    const { name, login_id, passcode } = req.body;
+    if (!name || !login_id || !passcode) {
+        return res.status(400).json({ message: 'Name, Login ID, and Passcode are required.' });
+    }
+    try {
+        const salt = await bcrypt.genSalt(10);
+        const passcode_hash = await bcrypt.hash(passcode, salt);
+        await pool.query(
+            'INSERT INTO sponsors (name, login_id, passcode_hash) VALUES ($1, $2, $3)',
+            [name, login_id, passcode_hash]
+        );
+        res.status(201).json({ message: 'Sponsor account created successfully.' });
+    } catch (err) {
+        if (err.code === '23505') { // Unique constraint violation
+            return res.status(409).json({ message: 'Sponsor Login ID already exists.' });
+        }
+        console.error('[ADMIN] Error creating sponsor:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// --- Quest Management ---
+adminRouter.get('/api/quests', checkAdminAuth, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT q.id, q.title, q.status, q.quest_type, s.name as sponsor_name
+             FROM quests q
+             LEFT JOIN sponsors s ON q.sponsor_id = s.id
+             ORDER BY q.created_at DESC`
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('[ADMIN] Error fetching quests:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+adminRouter.put('/api/quests/:id/approve', checkAdminAuth, async (req, res) => {
+    const { id: questId } = req.params;
+    try {
+        const result = await pool.query(
+            "UPDATE quests SET status = 'active' WHERE id = $1 AND status = 'pending' RETURNING id, title",
+            [questId]
+        );
+        
+        if (result.rowCount > 0) {
+            // NOTIFY ALL PLAYERS THAT A NEW QUEST IS LIVE!
+            io.emit('newQuestLaunched', {
+                id: result.rows[0].id,
+                title: result.rows[0].title
+            });
+            console.log(`[QUESTS] Quest ${questId} approved and launched.`);
+            res.json({ message: 'Quest approved and launched successfully.' });
+        } else {
+            res.status(404).json({ message: 'Quest not found or already approved.' });
+        }
+    } catch (err) {
+        console.error('[ADMIN] Error approving quest:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+adminRouter.put('/api/quests/:questId/winner/approve', checkAdminAuth, async (req, res) => {
+    const { questId } = req.params;
+    const { entryId } = req.body; // Admin must specify which entry is the winner
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        // Find the user ID from the winning entry
+        const entryRes = await client.query("SELECT user_id FROM quest_entries WHERE id = $1 AND quest_id = $2 AND status = 'winner_selected'", [entryId, questId]);
+        if (entryRes.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ message: 'Winning entry not found or not in correct status.' });
+        }
+        const winnerUserId = entryRes.rows[0].user_id;
+
+        // Update the quest itself
+        await client.query("UPDATE quests SET status = 'completed', winner_user_id = $1 WHERE id = $2", [winnerUserId, questId]);
+
+        // Update the winning entry
+        await client.query("UPDATE quest_entries SET status = 'winner_confirmed' WHERE id = $1", [entryId]);
+        
+        await client.query('COMMIT');
+        
+        // Optionally, notify the winner via socket
+        const winnerSocket = Object.values(players).find(p => p.googleId === winnerUserId);
+        if (winnerSocket) {
+            io.to(winnerSocket.id).emit('questWinner', { message: 'Congratulations! You have won a quest!' });
+        }
+        
+        res.json({ message: `Winner approved for quest ${questId}.`});
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('[ADMIN] Error approving winner:', err);
+        res.status(500).json({ message: 'Server error' });
+    } finally {
+        client.release();
+    }
+});
+
 app.get('/admin', (req, res) => res.redirect('/admin/login'));
+
+// =======================================================================
+// --- SPONSOR PANEL LOGIC ---
+// =======================================================================
+const sponsorRouter = express.Router();
+
+const checkSponsorAuth = (req, res, next) => {
+    if (req.cookies.sponsor_session) { // We'll set this cookie on login
+        return next();
+    }
+    // For API requests, return JSON. Otherwise, redirect to login.
+    if (req.originalUrl.startsWith('/sponsor/api')) {
+        return res.status(401).json({ message: 'Unauthorized: Please log in.' });
+    }
+    res.redirect('/sponsor/login');
+};
+
+app.use('/sponsor', sponsorRouter);
+
+sponsorRouter.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'sponsor.html')));
+
+sponsorRouter.post('/login', async (req, res) => {
+    const { login_id, passcode } = req.body;
+    if (!login_id || !passcode) {
+        return res.status(400).send('Sponsor ID and Passcode are required.');
+    }
+
+    try {
+        const result = await pool.query('SELECT id, name, passcode_hash FROM sponsors WHERE login_id = $1', [login_id]);
+        if (result.rowCount === 0) {
+            return res.status(401).send('Invalid Sponsor ID or Passcode. <a href="/sponsor/login">Try again</a>');
+        }
+
+        const sponsor = result.rows[0];
+        const isMatch = await bcrypt.compare(passcode, sponsor.passcode_hash);
+
+        if (isMatch) {
+            res.cookie('sponsor_session', sponsor.id, {
+                httpOnly: true,
+                secure: process.env.NODE_ENV === 'production',
+                maxAge: 24 * 60 * 60 * 1000, // 24 hours
+                path: '/sponsor'
+            });
+            res.send('Login Successful! <a href="/sponsor/dashboard">Go to Dashboard</a>');
+        } else {
+            res.status(401).send('Invalid Sponsor ID or Passcode. <a href="/sponsor/login">Try again</a>');
+        }
+    } catch (err) {
+        console.error('[SPONSOR] Login error:', err);
+        res.status(500).send('Server error during login.');
+    }
+});
+
+sponsorRouter.get('/dashboard', checkSponsorAuth, (req, res) => {
+    res.send(`<h1>Welcome, Sponsor!</h1><p>Your Sponsor ID: ${req.cookies.sponsor_session}</p><p>Here you can create quests and view winners.</p>`);
+});
+
+sponsorRouter.post('/api/quests', checkSponsorAuth, async (req, res) => {
+    const sponsorId = req.cookies.sponsor_session;
+    const { title, description, google_form_url } = req.body;
+
+    if (!title || !description || !google_form_url) {
+        return res.status(400).json({ message: 'Title, Description, and Google Form URL are required.' });
+    }
+
+    try {
+        const result = await pool.query(
+            'INSERT INTO quests (title, description, quest_type, sponsor_id, google_form_url, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+            [title, description, 'sponsor', sponsorId, google_form_url, 'pending']
+        );
+        res.status(201).json({ message: 'Quest submitted for admin approval.', questId: result.rows[0].id });
+    } catch (err) {
+        console.error('[SPONSOR] Error creating quest:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+sponsorRouter.get('/api/quests/:id/entries', checkSponsorAuth, async (req, res) => {
+    const sponsorId = req.cookies.sponsor_session;
+    const { id: questId } = req.params;
+
+    try {
+        const questCheck = await pool.query('SELECT id FROM quests WHERE id = $1 AND sponsor_id = $2', [questId, sponsorId]);
+        if (questCheck.rowCount === 0) {
+            return res.status(403).json({ message: 'You are not authorized to view entries for this quest.' });
+        }
+
+        const entries = await pool.query(
+            `SELECT qe.id, qe.user_id, t.username, qe.status, qe.submitted_at
+             FROM quest_entries qe
+             JOIN territories t ON qe.user_id = t.owner_id
+             WHERE qe.quest_id = $1
+             ORDER BY qe.submitted_at ASC`,
+            [questId]
+        );
+        res.json(entries.rows);
+    } catch (err) {
+        console.error('[SPONSOR] Error fetching quest entries:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+sponsorRouter.put('/api/quests/entries/:entryId/select-winner', checkSponsorAuth, async (req, res) => {
+    const sponsorId = req.cookies.sponsor_session;
+    const { entryId } = req.params;
+
+    try {
+        const entryCheck = await pool.query(
+            `SELECT q.id FROM quest_entries qe
+             JOIN quests q ON qe.quest_id = q.id
+             WHERE qe.id = $1 AND q.sponsor_id = $2`,
+            [entryId, sponsorId]
+        );
+
+        if (entryCheck.rowCount === 0) {
+            return res.status(403).json({ message: 'You are not authorized to select a winner for this entry.' });
+        }
+
+        await pool.query("UPDATE quest_entries SET status = 'winner_selected' WHERE id = $1", [entryId]);
+        res.json({ message: 'Winner selected. Awaiting final admin approval.' });
+    } catch (err) {
+        console.error('[SPONSOR] Error selecting winner:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+app.get('/sponsor', (req, res) => res.redirect('/sponsor/login'));
 
 // =======================================================================
 // --- MAIN GAME LOGIC (API & SOCKETS) ---
@@ -477,6 +753,42 @@ app.get('/leaderboard/clans', async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch clan leaderboard.' });
     }
 });
+
+// --- PUBLIC QUEST APIS ---
+app.get('/api/quests/active', async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT q.id, q.title, q.description, q.quest_type, q.google_form_url, s.name as sponsor_name
+             FROM quests q
+             LEFT JOIN sponsors s ON q.sponsor_id = s.id
+             WHERE q.status = 'active'
+             ORDER BY q.created_at DESC`
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('[API] Error fetching active quests:', err);
+        res.status(500).json({ error: 'Failed to fetch active quests.' });
+    }
+});
+
+app.post('/api/quests/:id/register', authenticate, async (req, res) => {
+    const { id: questId } = req.params;
+    const { googleId: userId } = req.user;
+
+    try {
+        await pool.query(
+            `INSERT INTO quest_entries (quest_id, user_id) VALUES ($1, $2)
+             ON CONFLICT (quest_id, user_id) DO NOTHING`,
+            [questId, userId]
+        );
+        res.status(200).json({ message: 'Successfully registered for quest.' });
+    } catch (err) {
+        console.error('[API] Error registering for quest:', err);
+        res.status(500).json({ message: 'Server error while registering for quest.' });
+    }
+});
+
+// --- END PUBLIC QUEST APIS ---
 
 app.post('/clans', authenticate, async (req, res) => {
     const { name, tag, description } = req.body;
