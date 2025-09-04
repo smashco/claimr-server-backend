@@ -3,14 +3,12 @@ const express = require('express');
 const http = require('http');
 const path = require('path');
 const cookieParser = require('cookie-parser');
-const path = require('path');
-const cookieParser = require('cookie-parser');
 const { Server } = require("socket.io");
-const bcrypt = require('bcryptjs'); // --- ADDED for sponsor security
+const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
 const admin = require('firebase-admin');
 const turf = require('@turf/turf');
-const multer = require('multer'); // For KML file uploads
+const multer = require('multer');
 
 // --- Require the Game and Service Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
@@ -32,7 +30,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
-const upload = multer({ storage: multer.memoryStorage() }); // For KML file uploads
+const upload = multer({ storage: multer.memoryStorage() });
 
 const server = http.createServer(app);
 
@@ -70,7 +68,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-const geofenceService = new GeofenceService(pool); // Initialize the service
+const geofenceService = new GeofenceService(pool);
 const players = {};
 
 // --- Database Schema Setup ---
@@ -80,8 +78,6 @@ const setupDatabase = async () => {
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
     console.log('[DB] PostGIS extension is enabled.');
 
-    // Territories Table
-    // Territories Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
@@ -97,14 +93,12 @@ const setupDatabase = async () => {
         is_shield_active BOOLEAN DEFAULT FALSE,
         is_carve_mode_active BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        -- Note: New columns are added via ALTER TABLE below for safety
       );
     `);
     console.log('[DB] "territories" table is ready.');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_shield_active BOOLEAN DEFAULT FALSE;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_carve_mode_active BOOLEAN DEFAULT FALSE;');
 
-    // Clans Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
         id SERIAL PRIMARY KEY,
@@ -120,8 +114,6 @@ const setupDatabase = async () => {
     `);
     console.log('[DB] "clans" table is ready.');
 
-    // Clan Members Table
-    // Clan Members Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS clan_members (
         clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE, user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
@@ -130,8 +122,6 @@ const setupDatabase = async () => {
     `);
     console.log('[DB] "clan_members" table is ready.');
 
-    // Clan Join Requests Table
-    // Clan Join Requests Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS clan_join_requests (
         id SERIAL PRIMARY KEY, clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE, user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
@@ -140,7 +130,6 @@ const setupDatabase = async () => {
     `);
     console.log('[DB] "clan_join_requests" table is ready.');
 
-    // Clan Territories Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS clan_territories (
         clan_id INTEGER NOT NULL PRIMARY KEY REFERENCES clans(id) ON DELETE CASCADE, area GEOMETRY(GEOMETRY, 4326), area_sqm REAL,
@@ -149,7 +138,6 @@ const setupDatabase = async () => {
     `);
     console.log('[DB] "clan_territories" table is ready.');
 
-    // Geofence Zones Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS geofence_zones (
         id SERIAL PRIMARY KEY,
@@ -164,9 +152,6 @@ const setupDatabase = async () => {
     await client.query('CREATE INDEX IF NOT EXISTS geofence_geom_idx ON geofence_zones USING GIST (geom);');
     console.log('[DB] Spatial index for "geofence_zones" is ensured.');
     
-    // --- NEW QUEST & SPONSOR TABLES ---
-    
-    // Sponsors Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS sponsors (
         id SERIAL PRIMARY KEY,
@@ -178,36 +163,33 @@ const setupDatabase = async () => {
     `);
     console.log('[DB] "sponsors" table is ready.');
 
-    // Quests Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS quests (
         id SERIAL PRIMARY KEY,
         title VARCHAR(150) NOT NULL,
         description TEXT,
-        quest_type VARCHAR(20) NOT NULL DEFAULT 'admin', -- 'admin' or 'sponsor'
+        quest_type VARCHAR(20) NOT NULL DEFAULT 'admin',
         sponsor_id INTEGER REFERENCES sponsors(id) ON DELETE SET NULL,
         google_form_url TEXT,
-        status VARCHAR(20) NOT NULL DEFAULT 'pending', -- 'pending', 'active', 'completed'
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
         winner_user_id VARCHAR(255) REFERENCES territories(owner_id),
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
     console.log('[DB] "quests" table is ready.');
 
-    // Quest Entries Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS quest_entries (
         id SERIAL PRIMARY KEY,
         quest_id INTEGER NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
         user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-        submission_details TEXT, -- Could store form entry ID or confirmation
-        status VARCHAR(20) NOT NULL DEFAULT 'submitted', -- 'submitted', 'winner_selected', 'winner_confirmed'
+        submission_details TEXT,
+        status VARCHAR(20) NOT NULL DEFAULT 'submitted',
         submitted_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(quest_id, user_id)
       );
     `);
     console.log('[DB] "quest_entries" table is ready.');
-
 
   } catch (err) {
     console.error('[DB] FATAL ERROR during database setup:', err);
@@ -414,7 +396,7 @@ adminRouter.post('/api/sponsors', checkAdminAuth, async (req, res) => {
         );
         res.status(201).json({ message: 'Sponsor account created successfully.' });
     } catch (err) {
-        if (err.code === '23505') { // Unique constraint violation
+        if (err.code === '23505') { 
             return res.status(409).json({ message: 'Sponsor Login ID already exists.' });
         }
         console.error('[ADMIN] Error creating sponsor:', err);
@@ -447,7 +429,6 @@ adminRouter.put('/api/quests/:id/approve', checkAdminAuth, async (req, res) => {
         );
         
         if (result.rowCount > 0) {
-            // NOTIFY ALL PLAYERS THAT A NEW QUEST IS LIVE!
             io.emit('newQuestLaunched', {
                 id: result.rows[0].id,
                 title: result.rows[0].title
@@ -465,13 +446,12 @@ adminRouter.put('/api/quests/:id/approve', checkAdminAuth, async (req, res) => {
 
 adminRouter.put('/api/quests/:questId/winner/approve', checkAdminAuth, async (req, res) => {
     const { questId } = req.params;
-    const { entryId } = req.body; // Admin must specify which entry is the winner
+    const { entryId } = req.body; 
 
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         
-        // Find the user ID from the winning entry
         const entryRes = await client.query("SELECT user_id FROM quest_entries WHERE id = $1 AND quest_id = $2 AND status = 'winner_selected'", [entryId, questId]);
         if (entryRes.rowCount === 0) {
             await client.query('ROLLBACK');
@@ -479,15 +459,10 @@ adminRouter.put('/api/quests/:questId/winner/approve', checkAdminAuth, async (re
         }
         const winnerUserId = entryRes.rows[0].user_id;
 
-        // Update the quest itself
         await client.query("UPDATE quests SET status = 'completed', winner_user_id = $1 WHERE id = $2", [winnerUserId, questId]);
-
-        // Update the winning entry
         await client.query("UPDATE quest_entries SET status = 'winner_confirmed' WHERE id = $1", [entryId]);
-        
         await client.query('COMMIT');
         
-        // Optionally, notify the winner via socket
         const winnerSocket = Object.values(players).find(p => p.googleId === winnerUserId);
         if (winnerSocket) {
             io.to(winnerSocket.id).emit('questWinner', { message: 'Congratulations! You have won a quest!' });
@@ -511,10 +486,9 @@ app.get('/admin', (req, res) => res.redirect('/admin/login'));
 const sponsorRouter = express.Router();
 
 const checkSponsorAuth = (req, res, next) => {
-    if (req.cookies.sponsor_session) { // We'll set this cookie on login
+    if (req.cookies.sponsor_session) {
         return next();
     }
-    // For API requests, return JSON. Otherwise, redirect to login.
     if (req.originalUrl.startsWith('/sponsor/api')) {
         return res.status(401).json({ message: 'Unauthorized: Please log in.' });
     }
@@ -544,7 +518,7 @@ sponsorRouter.post('/login', async (req, res) => {
             res.cookie('sponsor_session', sponsor.id, {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === 'production',
-                maxAge: 24 * 60 * 60 * 1000, // 24 hours
+                maxAge: 24 * 60 * 60 * 1000, 
                 path: '/sponsor'
             });
             res.send('Login Successful! <a href="/sponsor/dashboard">Go to Dashboard</a>');
@@ -754,7 +728,6 @@ app.get('/leaderboard/clans', async (req, res) => {
     }
 });
 
-// --- PUBLIC QUEST APIS ---
 app.get('/api/quests/active', async (req, res) => {
     try {
         const result = await pool.query(
@@ -787,8 +760,6 @@ app.post('/api/quests/:id/register', authenticate, async (req, res) => {
         res.status(500).json({ message: 'Server error while registering for quest.' });
     }
 });
-
-// --- END PUBLIC QUEST APIS ---
 
 app.post('/clans', authenticate, async (req, res) => {
     const { name, tag, description } = req.body;
@@ -1115,8 +1086,6 @@ io.on('connection', (socket) => {
 
         const playerProfileRes = await client.query('SELECT has_shield, is_carve_mode_active, username IS NOT NULL as has_record FROM territories WHERE owner_id = $1', [googleId]);
         const hasShield = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_shield : false;
-        const isShieldActive = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].is_shield_active : false;
-        const shieldActivatedAt = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].shield_activated_at : null;
         const isCarveModeActive = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].is_carve_mode_active : false;
         const playerHasRecord = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_record : false;
 
@@ -1146,6 +1115,7 @@ io.on('connection', (socket) => {
         console.log(`[Socket] Sent ${geofencePolygons.length} geofence zones to ${socket.id}`);
 
         let activeTerritories = [];
+
         if (gameMode === 'clan') {
             const query = `
                 SELECT
@@ -1161,6 +1131,7 @@ io.on('connection', (socket) => {
             `;
             const territoryResult = await client.query(query);
             activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
+
             if (clanId) {
                 const clanBaseRes = await client.query('SELECT base_location FROM clans WHERE id = $1', [clanId]);
                 if (clanBaseRes.rows.length > 0 && clanBaseRes.rows[0].base_location) {
@@ -1213,28 +1184,8 @@ io.on('connection', (socket) => {
     player.lastKnownPosition = data;
 
     if (player.isDrawing) {
-        const lastPoint = player.activeTrail[player.activeTrail.length - 1];
-        let distanceIncrement = 0;
-        if (player.activeTrail.length > 0 && lastPoint) {
-            const from = turf.point([lastPoint.lng, lastPoint.lat]);
-            const to = turf.point([data.lng, data.lat]);
-            distanceIncrement = turf.distance(from, to, { units: 'meters' });
-        }
-        
         player.activeTrail.push(data);
 
-        if (distanceIncrement > 0) {
-            const client = await pool.connect();
-            try {
-                await updateQuestProgress(player.googleId, QUEST_TYPES.MAKE_TRAIL, distanceIncrement, client, io, players);
-                await incrementPlayerStats(client, player.googleId, { lifetime_distance_run: distanceIncrement });
-            } catch(err) {
-                console.error("[QUEST/STATS] Real-time trail distance update failed:", err);
-            } finally {
-                client.release();
-            }
-        }
-        
         if (!player.isGhostRunnerActive) {
           socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data });
         }
@@ -1253,9 +1204,11 @@ io.on('connection', (socket) => {
                 for (const victimId in players) {
                     if (victimId === socket.id) continue;
                     const victim = players[victimId];
+
                     if (player.gameMode === 'clan' && victim.gameMode === 'clan' && player.clanId === victim.clanId) {
                         continue;
                     }
+
                     if (victim && victim.isDrawing && victim.activeTrail.length >= 2) {
                         const victimTrailWKT = 'LINESTRING(' + victim.activeTrail.map(p => `${p.lng} ${p.lat}`).join(', ') + ')';
                         const victimTrailGeom = `ST_SetSRID(ST_GeomFromText('${victimTrailWKT}'), 4326)`;
@@ -1331,21 +1284,16 @@ io.on('connection', (socket) => {
       const player = players[socket.id];
       if (player && player.lastStandCharges > 0) {
           player.lastStandCharges--;
+          player.isLastStandActive = true;
+
           try {
-              const result = await pool.query(
-                  'UPDATE territories SET is_shield_active = true, shield_activated_at = CURRENT_TIMESTAMP WHERE owner_id = $1 RETURNING shield_activated_at', 
-                  [player.googleId]
-              );
-              player.isLastStandActive = true;
+              await pool.query('UPDATE territories SET is_shield_active = true WHERE owner_id = $1', [player.googleId]);
               console.log(`[GAME] ${player.name} activated LAST STAND. Charges left: ${player.lastStandCharges}`);
-              socket.emit('superpowerAcknowledged', { 
-                  power: 'lastStand', 
-                  chargesLeft: player.lastStandCharges,
-                  activatedAt: result.rows[0].shield_activated_at
-              });
+              socket.emit('superpowerAcknowledged', { power: 'lastStand', chargesLeft: player.lastStandCharges });
           } catch(e) {
               console.error(`[DB] Error activating shield for ${player.googleId}`, e);
               player.lastStandCharges++;
+              player.isLastStandActive = false;
           }
       }
   });
@@ -1353,12 +1301,12 @@ io.on('connection', (socket) => {
   socket.on('claimTerritory', async (req) => {
     const player = players[socket.id];
     if (!player || !player.googleId || !req.gameMode) {
+      console.warn(`[Claim] Invalid claimTerritory request from ${socket.id}`);
       return;
     }
 
     const { gameMode, trail, baseClaim } = req;
 
-    // --- GEOFENCE VALIDATION ---
     let locationToCheck;
     if (baseClaim) {
         locationToCheck = { lat: baseClaim.lat, lng: baseClaim.lng };
@@ -1369,9 +1317,8 @@ io.on('connection', (socket) => {
     if (!locationToCheck || !(await geofenceService.isLocationValid(locationToCheck.lat, locationToCheck.lng))) {
         console.warn(`[Claim Rejected] Player ${player.name} sent a claim from an invalid location.`);
         socket.emit('claimRejected', { reason: 'You are outside the playable area.' });
-        return; // Halt execution
+        return;
     }
-    // --- END GEOFENCE VALIDATION ---
 
     if (trail.length < 1 && !baseClaim) {
         console.warn(`[Claim] Invalid trail length for claim by ${player.name}. Trail length: ${trail.length}, BaseClaim: ${!!baseClaim}`);
@@ -1384,7 +1331,7 @@ io.on('connection', (socket) => {
         socket.emit('claimRejected', { reason: 'Please wait a moment before claiming again.' });
         return;
     }
-    player.lastClaimAttempt = { timestamp: Date.now() };
+    player.lastClaimAttempt = { timestamp: Date.now(), type: baseClaim ? 'base' : 'expansion' };
 
     const client = await pool.connect();
     try {
@@ -1422,7 +1369,7 @@ io.on('connection', (socket) => {
                 }
             }
         }
-        
+
         let batchUpdateData = [];
         if (soloOwnersToUpdate.length > 0) {
             const soloQueryResult = await client.query(`
@@ -1436,18 +1383,20 @@ io.on('connection', (socket) => {
                 FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id WHERE ct.clan_id = ANY($1::int[]);`, [clanOwnersToUpdate]);
             batchUpdateData = batchUpdateData.concat(clanQueryResult.rows.map(r => ({...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
         }
-        
+
         if (batchUpdateData.length > 0) {
+            console.log(`[GAME] Broadcasting territory updates for ${batchUpdateData.length} entities.`);
             io.emit('batchTerritoryUpdate', batchUpdateData);
         }
 
         player.isDrawing = false;
         player.activeTrail = [];
         io.emit('trailCleared', { id: socket.id });
+
     } catch (err) {
         await client.query('ROLLBACK');
         console.error('[DB] FATAL Error during territory claim:', err);
-        socket.emit('claimRejected', { reason: 'Server error during claim.' });
+        socket.emit('claimRejected', { reason: err.message || 'Server error during claim.' });
     } finally {
         client.release();
     }
@@ -1486,11 +1435,6 @@ const main = async () => {
         console.error("[SERVER] Failed to setup database after server start:", err);
         process.exit(1);
     });
-    
-    const SHIELD_CHECK_INTERVAL_MS = 15 * 60 * 1000;
-    console.log(`[JOBS] Scheduling shield expiry check every ${SHIELD_CHECK_INTERVAL_MS / 60000} minutes.`);
-    checkExpiredShields(pool, io, players);
-    setInterval(() => checkExpiredShields(pool, io, players), SHIELD_CHECK_INTERVAL_MS);
   });
 };
 
