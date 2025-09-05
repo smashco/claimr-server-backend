@@ -383,8 +383,6 @@ adminRouter.delete('/api/geofence-zones/:id', checkAdminAuth, async (req, res) =
 
 // --- Sponsor Account Management ---
 adminRouter.post('/api/sponsors', checkAdminAuth, async (req, res) => {
-        // Final fix check
-
     const { name, login_id, passcode } = req.body;
     if (!name || !login_id || !passcode) {
         return res.status(400).json({ message: 'Name, Login ID, and Passcode are required.' });
