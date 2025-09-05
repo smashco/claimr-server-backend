@@ -8,107 +8,216 @@
     <style>
         body { background-color: #212529; color: #dee2e6; }
         .table { color: #dee2e6; }
+        .container-fluid { max-width: 1600px; }
         .card { background-color: #343a40; }
+        .modal-content { background-color: #343a40; color: #dee2e6; }
     </style>
 </head>
 <body>
-    <div class="container py-4">
-        <h1 class="mb-4">Sponsor Dashboard</h1>
-        
+    <div class="container-fluid py-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1>Sponsor Dashboard</h1>
+            <button class="btn btn-secondary" onclick="fetchMyQuests()">Refresh Quests</button>
+        </div>
+
         <div class="row">
-            <div class="col-md-4 mb-4">
+            <!-- Create Quest Section -->
+            <div class="col-lg-4 mb-4">
                 <div class="card">
                     <div class="card-body">
-                        <h5 class="card-title">Verify Player</h5>
-                        <form id="verifyForm">
+                        <h5 class="card-title">Create New Quest (1 per week)</h5>
+                        <form id="createQuestForm">
                             <div class="mb-3">
-                                <label for="unique_code" class="form-label">Player's Unique Code</label>
-                                <input type="text" class="form-control" id="unique_code" required>
+                                <label for="questTitle" class="form-label">Quest Title</label>
+                                <input type="text" class="form-control" id="questTitle" placeholder="e.g., The Weekend Warrior Challenge" required>
                             </div>
-                            <button type="submit" class="btn btn-success">Verify & Complete</button>
+                            <div class="mb-3">
+                                <label for="questDescription" class="form-label">Description</label>
+                                <textarea class="form-control" id="questDescription" rows="3" placeholder="Explain the objective of the quest for the players." required></textarea>
+                            </div>
+                            <div class="mb-3">
+                                <label for="googleFormUrl" class="form-label">Google Form URL for Registration</label>
+                                <input type="url" class="form-control" id="googleFormUrl" placeholder="https://forms.gle/..." required>
+                            </div>
+                            <button type="submit" class="btn btn-primary">Submit for Approval</button>
                         </form>
                     </div>
                 </div>
             </div>
-            <div class="col-md-8">
-                <h2>Quest Registrations</h2>
+
+            <!-- My Quests Section -->
+            <div class="col-lg-8">
+                <h2>My Quests</h2>
                 <div class="table-responsive">
-                    <table class="table table-dark table-striped">
+                    <table class="table table-dark table-striped table-hover">
                         <thead>
-                            <tr><th>Player</th><th>Unique Code</th><th>Status</th></tr>
+                            <tr>
+                                <th>Title</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
                         </thead>
-                        <tbody id="registrations-table-body"></tbody>
+                        <tbody id="quest-table-body"></tbody>
                     </table>
                 </div>
             </div>
         </div>
     </div>
 
+    <!-- Entries Modal -->
+    <div class="modal fade" id="entriesModal" tabindex="-1">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="entriesModalLabel">Quest Entries</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p>Select a winner from the list of registered players below. This selection will be sent to the admin for final approval.</p>
+                    <div class="table-responsive">
+                         <table class="table table-dark table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Username</th>
+                                    <th>Submitted At</th>
+                                    <th>Status</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="entries-table-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        let entriesModal;
+
         async function apiFetch(url, options = {}) {
             options.credentials = 'include';
+            if (options.body && typeof options.body !== 'string') {
+                options.headers = { ...options.headers, 'Content-Type': 'application/json' };
+                options.body = JSON.stringify(options.body);
+            }
+            
             const response = await fetch(url, options);
-            if (response.status === 401) {
+            if (response.status === 401 || response.status === 403) {
+                alert('Session expired. Please log in again.');
                 window.location.href = '/sponsor/login';
                 throw new Error('Unauthorized');
             }
             if (!response.ok) {
-                const errorData = await response.json().catch(() => ({ message: `HTTP error!` }));
-                throw new Error(errorData.message);
+                const errorData = await response.json().catch(() => ({ message: `HTTP error! status: ${response.status}` }));
+                throw new Error(errorData.message || 'An unknown error occurred.');
             }
             return response.json();
         }
 
-        async function fetchRegistrations() {
+        async function fetchMyQuests() {
             try {
-                const registrations = await apiFetch('/sponsor/api/registrations');
-                renderRegistrations(registrations);
+                // This assumes an endpoint that gets quests for the logged-in sponsor. We need to add this.
+                const quests = await apiFetch('/sponsor/api/quests');
+                renderQuests(quests);
             } catch (error) {
-                console.error('Error fetching registrations:', error);
-                document.getElementById('registrations-table-body').innerHTML = `<tr><td colspan="3" class="text-danger">${error.message}</td></tr>`;
+                console.error('Error fetching quests:', error);
+                document.getElementById('quest-table-body').innerHTML = `<tr><td colspan="3" class="text-danger text-center">${error.message}</td></tr>`;
             }
         }
 
-        function renderRegistrations(registrations) {
-            const tableBody = document.getElementById('registrations-table-body');
+        function renderQuests(quests) {
+            const tableBody = document.getElementById('quest-table-body');
             tableBody.innerHTML = '';
-            if (registrations.length === 0) {
-                tableBody.innerHTML = '<tr><td colspan="3" class="text-center">No players have registered for your quest yet.</td></tr>';
+            if (quests.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="3" class="text-center">You have not created any quests.</td></tr>';
                 return;
             }
-            registrations.forEach(reg => {
+            quests.forEach(quest => {
                 const row = document.createElement('tr');
-                const statusClass = reg.status === 'verified' ? 'text-success' : 'text-warning';
+                const statusBadge = {
+                    'pending': 'bg-warning text-dark',
+                    'active': 'bg-success',
+                    'completed': 'bg-secondary'
+                }[quest.status] || 'bg-light text-dark';
+                
                 row.innerHTML = `
+                    <td>${quest.title}</td>
+                    <td><span class="badge ${statusBadge}">${quest.status}</span></td>
                     <td>
-                        <img src="${reg.profile_image_url}" width="30" height="30" class="rounded-circle me-2">
-                        ${reg.username}
+                        <button class="btn btn-sm btn-info" onclick="viewEntries(${quest.id})">View Entries</button>
                     </td>
-                    <td><code>${reg.unique_code}</code></td>
-                    <td class="${statusClass}">${reg.status.toUpperCase()}</td>
                 `;
                 tableBody.appendChild(row);
             });
         }
 
-        document.getElementById('verifyForm').addEventListener('submit', async function(e) {
+        document.getElementById('createQuestForm').addEventListener('submit', async function(e) {
             e.preventDefault();
-            const code = document.getElementById('unique_code').value;
+            const body = {
+                title: document.getElementById('questTitle').value,
+                description: document.getElementById('questDescription').value,
+                google_form_url: document.getElementById('googleFormUrl').value,
+            };
+
             try {
-                const result = await apiFetch('/sponsor/api/verify', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ unique_code: code })
-                });
+                const result = await apiFetch('/sponsor/api/quests', { method: 'POST', body });
                 alert(result.message);
                 this.reset();
-                fetchRegistrations();
-            } catch (error) {
+                fetchMyQuests();
+            } catch(error) {
                 alert(`Error: ${error.message}`);
             }
         });
+        
+        async function viewEntries(questId) {
+            const tableBody = document.getElementById('entries-table-body');
+            tableBody.innerHTML = '<tr><td colspan="4" class="text-center">Loading entries...</td></tr>';
+            entriesModal.show();
+            try {
+                const entries = await apiFetch(`/sponsor/api/quests/${questId}/entries`);
+                if (entries.length === 0) {
+                     tableBody.innerHTML = '<tr><td colspan="4" class="text-center">No players have registered for this quest yet.</td></tr>';
+                     return;
+                }
+                tableBody.innerHTML = '';
+                entries.forEach(entry => {
+                    const row = document.createElement('tr');
+                    const isSelected = entry.status === 'winner_selected' || entry.status === 'winner_confirmed';
+                    row.innerHTML = `
+                        <td>${entry.username}</td>
+                        <td>${new Date(entry.submitted_at).toLocaleString()}</td>
+                        <td>${entry.status}</td>
+                        <td>
+                            ${!isSelected ? `<button class="btn btn-sm btn-success" onclick="selectWinner(${entry.id}, ${questId})">Select as Winner</button>` : 'Selected'}
+                        </td>
+                    `;
+                    tableBody.appendChild(row);
+                });
+            } catch (error) {
+                 tableBody.innerHTML = `<tr><td colspan="4" class="text-center text-danger">${error.message}</td></tr>`;
+            }
+        }
 
-        window.onload = fetchRegistrations;
+        async function selectWinner(entryId, questId) {
+            if (!confirm('Are you sure you want to select this player as the winner? This will be sent to the admin for final approval.')) return;
+            try {
+                const result = await apiFetch(`/sponsor/api/quests/entries/${entryId}/select-winner`, { method: 'PUT' });
+                alert(result.message);
+                viewEntries(questId); // Refresh the modal
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
+        
+        window.onload = () => {
+            entriesModal = new bootstrap.Modal(document.getElementById('entriesModal'));
+            fetchMyQuests();
+        };
     </script>
 </body>
 </html>

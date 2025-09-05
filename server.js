@@ -532,7 +532,22 @@ sponsorRouter.post('/login', async (req, res) => {
 });
 
 sponsorRouter.get('/dashboard', checkSponsorAuth, (req, res) => {
-    res.send(`<h1>Welcome, Sponsor!</h1><p>Your Sponsor ID: ${req.cookies.sponsor_session}</p><p>Here you can create quests and view winners.</p>`);
+    res.sendFile(path.join(__dirname, 'public', 'sponsor_dashboard.html'));
+});
+
+// --- Sponsor API to get ONLY THEIR quests ---
+sponsorRouter.get('/api/quests', checkSponsorAuth, async (req, res) => {
+    const sponsorId = req.cookies.sponsor_session;
+    try {
+        const result = await pool.query(
+            `SELECT id, title, status FROM quests WHERE sponsor_id = $1 ORDER BY created_at DESC`,
+            [sponsorId]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('[SPONSOR] Error fetching quests:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
 });
 
 sponsorRouter.post('/api/quests', checkSponsorAuth, async (req, res) => {
