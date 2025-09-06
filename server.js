@@ -742,7 +742,7 @@ app.post('/create-order', async (req, res) => {
     }
     try {
       // Amount in the smallest currency unit. E.g., 49900 paise = ₹499.00
-      const amount = 49900; 
+      const amount = 5900; 
       const currency = 'INR';
   
       const options = {
