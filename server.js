@@ -236,20 +236,11 @@ const checkAdminAuth = (req, res, next) => {
     res.redirect('/admin/login');
 };
 
-// All API routes will be checked for authentication
-app.use('/admin/api', checkAdminAuth, adminRouter);
-
-// The dashboard page is protected
-app.get('/admin/dashboard', checkAdminAuth, (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
-});
-
-// The login page is public
+// --- PUBLIC ADMIN ROUTES (NO AUTH) ---
 app.get('/admin/login', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
-// The login form submission route
 app.post('/admin/login', (req, res) => {
     const { password } = req.body;
     if (password === process.env.ADMIN_SECRET_KEY) {
@@ -265,7 +256,15 @@ app.post('/admin/login', (req, res) => {
     }
 });
 
-// The main /admin route should redirect to the login page
+// --- PROTECTED ADMIN ROUTES (AUTH REQUIRED) ---
+app.get('/admin/dashboard', checkAdminAuth, (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
+// Use the adminRouter for all /admin/api routes, and protect them
+app.use('/admin/api', checkAdminAuth, adminRouter);
+
+// The main /admin root path should redirect to login
 app.get('/admin', (req, res) => {
     res.redirect('/admin/login');
 });
@@ -360,13 +359,10 @@ adminRouter.post('/geofence-zones/upload', upload.single('kmlFile'), async (req,
         if (!name || !zoneType || !kmlFile) {
             return res.status(400).json({ message: 'Name, Zone Type, and KML file are required.' });
         }
-
         const kmlString = kmlFile.buffer.toString('utf8');
         await geofenceService.addZoneFromKML(kmlString, name, zoneType);
-
         const updatedZones = await geofenceService.getGeofencePolygons();
         io.emit('geofenceUpdate', updatedZones);
-
         res.json({ message: 'Geofence zone uploaded successfully!' });
 
     } catch (err) {
@@ -379,10 +375,8 @@ adminRouter.delete('/geofence-zones/:id', async (req, res) => {
     try {
         const { id } = req.params;
         await geofenceService.deleteZone(id);
-
         const updatedZones = await geofenceService.getGeofencePolygons();
         io.emit('geofenceUpdate', updatedZones);
-
         res.json({ message: 'Zone deleted successfully.' });
     } catch (err) {
         console.error('[ADMIN] Error deleting zone:', err);
