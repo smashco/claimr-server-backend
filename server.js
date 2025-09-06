@@ -236,11 +236,20 @@ const checkAdminAuth = (req, res, next) => {
     res.redirect('/admin/login');
 };
 
-// --- PUBLIC ADMIN ROUTES (NO AUTH) ---
+// All API routes will be checked for authentication
+app.use('/admin/api', checkAdminAuth, adminRouter);
+
+// The dashboard page is protected
+app.get('/admin/dashboard', checkAdminAuth, (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
+// The login page is public
 app.get('/admin/login', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
+// The login form submission route
 app.post('/admin/login', (req, res) => {
     const { password } = req.body;
     if (password === process.env.ADMIN_SECRET_KEY) {
@@ -256,21 +265,12 @@ app.post('/admin/login', (req, res) => {
     }
 });
 
-// --- PROTECTED ADMIN ROUTES (AUTH REQUIRED) ---
-app.get('/admin/dashboard', checkAdminAuth, (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
-});
-
-// Use the adminRouter for all /admin/api routes, and protect them
-app.use('/admin/api', checkAdminAuth, adminRouter);
-
-// The main /admin root path should redirect to login
+// The main /admin route should redirect to the login page
 app.get('/admin', (req, res) => {
     res.redirect('/admin/login');
 });
 
 // --- Player Admin API ---
-// Note: The paths are now relative to /admin/api
 adminRouter.get('/players', async (req, res) => {
     try {
         const result = await pool.query('SELECT owner_id, username, area_sqm, is_carve_mode_active FROM territories ORDER BY username');
