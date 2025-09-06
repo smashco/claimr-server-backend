@@ -227,23 +227,35 @@ const authenticate = async (req, res, next) => {
 const adminRouter = express.Router();
 
 const checkAdminAuth = (req, res, next) => {
+    console.log(`[DEBUG: AUTH] checkAdminAuth triggered for URL: ${req.originalUrl}`);
+    console.log(`[DEBUG: AUTH] Cookies received:`, req.cookies);
+
     if (req.cookies.admin_session === process.env.ADMIN_SECRET_KEY) {
+        console.log(`[DEBUG: AUTH] Authentication successful. Proceeding...`);
         return next();
     }
+    
+    console.log(`[DEBUG: AUTH] Authentication failed.`);
     if (req.originalUrl.startsWith('/admin/api')) {
+        console.log(`[DEBUG: AUTH] API request unauthorized. Sending 401 JSON response.`);
         return res.status(401).json({ message: 'Unauthorized: Please log in.' });
     }
+    
+    console.log(`[DEBUG: AUTH] Page request unauthorized. Redirecting to /admin/login.`);
     res.redirect('/admin/login');
 };
 
 // --- PUBLIC ADMIN ROUTES (NO AUTH) ---
 app.get('/admin/login', (req, res) => {
+    console.log('[DEBUG: ROUTE] Serving /admin/login page.');
     res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
 app.post('/admin/login', (req, res) => {
+    console.log('[DEBUG: ROUTE] POST to /admin/login received.');
     const { password } = req.body;
     if (password === process.env.ADMIN_SECRET_KEY) {
+        console.log('[DEBUG: ROUTE] Correct password. Setting cookie and redirecting to dashboard.');
         res.cookie('admin_session', password, {
             httpOnly: true,
             secure: process.env.NODE_ENV === 'production',
@@ -252,12 +264,14 @@ app.post('/admin/login', (req, res) => {
         });
         res.redirect('/admin/dashboard');
     } else {
+        console.log('[DEBUG: ROUTE] Incorrect password.');
         res.status(401).send('Invalid Password. <a href="/admin/login">Try again</a>');
     }
 });
 
 // --- PROTECTED ADMIN ROUTES (AUTH REQUIRED) ---
 app.get('/admin/dashboard', checkAdminAuth, (req, res) => {
+    console.log('[DEBUG: ROUTE] Serving protected /admin/dashboard page.');
     res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
 
@@ -266,6 +280,7 @@ app.use('/admin/api', checkAdminAuth, adminRouter);
 
 // The main /admin root path should redirect to login
 app.get('/admin', (req, res) => {
+    console.log('[DEBUG: ROUTE] Redirecting from /admin to /admin/login.');
     res.redirect('/admin/login');
 });
 
@@ -273,16 +288,7 @@ app.get('/admin', (req, res) => {
 adminRouter.get('/players', async (req, res) => {
     try {
         const result = await pool.query('SELECT owner_id, username, area_sqm, is_carve_mode_active FROM territories ORDER BY username');
-        const dbPlayers = result.rows;
-        const enhancedPlayers = dbPlayers.map(dbPlayer => {
-            const onlinePlayer = Object.values(players).find(p => p.googleId === dbPlayer.owner_id);
-            return {
-                ...dbPlayer,
-                isOnline: !!onlinePlayer,
-                lastKnownPosition: onlinePlayer ? onlinePlayer.lastKnownPosition : null,
-            };
-        });
-        res.json(enhancedPlayers);
+        res.json(result.rows);
     } catch (err) {
         console.error('[ADMIN] Error fetching players:', err);
         res.status(500).json({ message: 'Server error' });
@@ -484,6 +490,7 @@ adminRouter.put('/quests/:questId/winner/approve', async (req, res) => {
 // =======================================================================
 // --- SPONSOR PANEL LOGIC ---
 // =======================================================================
+// ... (Your sponsor panel logic remains unchanged) ...
 const sponsorRouter = express.Router();
 
 const checkSponsorAuth = (req, res, next) => {
@@ -621,6 +628,8 @@ sponsorRouter.put('/api/quests/entries/:entryId/select-winner', checkSponsorAuth
 
 app.get('/sponsor', (req, res) => res.redirect('/sponsor/login'));
 
+
+// --- The rest of your file from MAIN GAME LOGIC to the end remains the same ---
 // =======================================================================
 // --- MAIN GAME LOGIC (API & SOCKETS) ---
 // =======================================================================
@@ -1452,5 +1461,5 @@ const main = async () => {
     });
   });
 };
-// hehheg
+
 main();
