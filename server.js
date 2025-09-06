@@ -236,21 +236,11 @@ const checkAdminAuth = (req, res, next) => {
     res.redirect('/admin/login');
 };
 
-// --- CORRECTED ROUTING LOGIC ---
-// All API routes will be checked for authentication
-app.use('/admin/api', checkAdminAuth, adminRouter);
-
-// The dashboard page is protected
-app.get('/admin/dashboard', checkAdminAuth, (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
-});
-
-// The login page is public
+// --- PUBLIC ADMIN ROUTES (NO AUTH) ---
 app.get('/admin/login', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
-// The login form submission route
 app.post('/admin/login', (req, res) => {
     const { password } = req.body;
     if (password === process.env.ADMIN_SECRET_KEY) {
@@ -266,15 +256,22 @@ app.post('/admin/login', (req, res) => {
     }
 });
 
-// The main /admin route should redirect to the login page
+// --- PROTECTED ADMIN ROUTES (AUTH REQUIRED) ---
+app.get('/admin/dashboard', checkAdminAuth, (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
+// Use the adminRouter for all /admin/api routes, and protect them
+app.use('/admin/api', checkAdminAuth, adminRouter);
+
+// The main /admin root path should redirect to login
 app.get('/admin', (req, res) => {
     res.redirect('/admin/login');
 });
-// --- END CORRECTED ROUTING LOGIC ---
-
 
 // --- Player Admin API ---
-adminRouter.get('/api/players', async (req, res) => {
+// Note: The paths are now relative to /admin/api
+adminRouter.get('/players', async (req, res) => {
     try {
         const result = await pool.query('SELECT owner_id, username, area_sqm, is_carve_mode_active FROM territories ORDER BY username');
         const dbPlayers = result.rows;
@@ -293,7 +290,7 @@ adminRouter.get('/api/players', async (req, res) => {
     }
 });
 
-adminRouter.post('/api/player/:id/:action', async (req, res) => {
+adminRouter.post('/player/:id/:action', async (req, res) => {
     const { id, action } = req.params;
     const playerSocket = Object.values(players).find(p => p.googleId === id);
     try {
@@ -331,7 +328,7 @@ adminRouter.post('/api/player/:id/:action', async (req, res) => {
     }
 });
 
-adminRouter.delete('/api/player/:id/delete', async (req, res) => {
+adminRouter.delete('/player/:id/delete', async (req, res) => {
     const { id } = req.params;
      try {
         const playerSocket = Object.values(players).find(p => p.googleId === id);
@@ -345,7 +342,7 @@ adminRouter.delete('/api/player/:id/delete', async (req, res) => {
 });
 
 // --- Geofence Admin API ---
-adminRouter.get('/api/geofence-zones', async (req, res) => {
+adminRouter.get('/geofence-zones', async (req, res) => {
     try {
         const zones = await geofenceService.getGeofencePolygons();
         res.json(zones);
@@ -355,7 +352,7 @@ adminRouter.get('/api/geofence-zones', async (req, res) => {
     }
 });
 
-adminRouter.post('/api/geofence-zones/upload', upload.single('kmlFile'), async (req, res) => {
+adminRouter.post('/geofence-zones/upload', upload.single('kmlFile'), async (req, res) => {
     try {
         const { name, zoneType } = req.body;
         const kmlFile = req.file;
@@ -378,7 +375,7 @@ adminRouter.post('/api/geofence-zones/upload', upload.single('kmlFile'), async (
     }
 });
 
-adminRouter.delete('/api/geofence-zones/:id', async (req, res) => {
+adminRouter.delete('/geofence-zones/:id', async (req, res) => {
     try {
         const { id } = req.params;
         await geofenceService.deleteZone(id);
@@ -394,7 +391,7 @@ adminRouter.delete('/api/geofence-zones/:id', async (req, res) => {
 });
 
 // --- Sponsor Account Management ---
-adminRouter.post('/api/sponsors', async (req, res) => {
+adminRouter.post('/sponsors', async (req, res) => {
     const { name, login_id, passcode } = req.body;
     if (!name || !login_id || !passcode) {
         return res.status(400).json({ message: 'Name, Login ID, and Passcode are required.' });
@@ -417,7 +414,7 @@ adminRouter.post('/api/sponsors', async (req, res) => {
 });
 
 // --- Quest Management ---
-adminRouter.get('/api/quests', async (req, res) => {
+adminRouter.get('/quests', async (req, res) => {
     try {
         const result = await pool.query(
             `SELECT q.id, q.title, q.status, q.quest_type, s.name as sponsor_name
@@ -432,7 +429,7 @@ adminRouter.get('/api/quests', async (req, res) => {
     }
 });
 
-adminRouter.put('/api/quests/:id/approve', async (req, res) => {
+adminRouter.put('/quests/:id/approve', async (req, res) => {
     const { id: questId } = req.params;
     try {
         const result = await pool.query(
@@ -456,7 +453,7 @@ adminRouter.put('/api/quests/:id/approve', async (req, res) => {
     }
 });
 
-adminRouter.put('/api/quests/:questId/winner/approve', async (req, res) => {
+adminRouter.put('/quests/:questId/winner/approve', async (req, res) => {
     const { questId } = req.params;
     const { entryId } = req.body; 
 
@@ -635,8 +632,6 @@ app.get('/sponsor', (req, res) => res.redirect('/sponsor/login'));
 // =======================================================================
 app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
-
-// ... (The rest of your existing file from app.put('/users/me/preferences', ...) to the end)
 
 app.put('/users/me/preferences', authenticate, async (req, res) => {
     const { googleId } = req.user;
