@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -9,6 +10,10 @@ const { Pool } = require('pg');
 const admin = require('firebase-admin');
 const turf = require('@turf/turf');
 const multer = require('multer');
+
+// --- NEW RAZORPAY & CRYPTO REQUIREMENTS ---
+const Razorpay = require('razorpay');
+const crypto = require('crypto');
 
 // --- Require the Game and Service Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
@@ -57,6 +62,18 @@ try {
   console.error('[Firebase Admin] FATAL: Failed to initialize Firebase Admin.', error.message);
 }
 
+// --- NEW RAZORPAY INITIALIZATION ---
+let razorpay;
+if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
+  razorpay = new Razorpay({
+    key_id: process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET,
+  });
+  console.log('[Razorpay] Initialized successfully.');
+} else {
+  console.warn('[Razorpay] Skipping initialization (RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET not set in env).');
+}
+
 // --- Constants & Database Pool ---
 const PORT = process.env.PORT || 10000;
 const SERVER_TICK_RATE_MS = 500;
@@ -78,6 +95,7 @@ const setupDatabase = async () => {
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
     console.log('[DB] PostGIS extension is enabled.');
 
+    // --- MODIFIED TERRITORIES TABLE SCHEMA ---
     await client.query(`
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
@@ -92,12 +110,14 @@ const setupDatabase = async () => {
         has_shield BOOLEAN DEFAULT FALSE,
         is_shield_active BOOLEAN DEFAULT FALSE,
         is_carve_mode_active BOOLEAN DEFAULT FALSE,
+        is_paid BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
     console.log('[DB] "territories" table is ready.');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_shield_active BOOLEAN DEFAULT FALSE;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_carve_mode_active BOOLEAN DEFAULT FALSE;');
+    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE;'); // Ensures is_paid column exists on old tables
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
@@ -490,7 +510,6 @@ adminRouter.put('/quests/:questId/winner/approve', async (req, res) => {
 // =======================================================================
 // --- SPONSOR PANEL LOGIC ---
 // =======================================================================
-// ... (Your sponsor panel logic remains unchanged) ...
 const sponsorRouter = express.Router();
 
 const checkSponsorAuth = (req, res, next) => {
@@ -628,8 +647,6 @@ sponsorRouter.put('/api/quests/entries/:entryId/select-winner', checkSponsorAuth
 
 app.get('/sponsor', (req, res) => res.redirect('/sponsor/login'));
 
-
-// --- The rest of your file from MAIN GAME LOGIC to the end remains the same ---
 // =======================================================================
 // --- MAIN GAME LOGIC (API & SOCKETS) ---
 // =======================================================================
@@ -649,13 +666,14 @@ app.put('/users/me/preferences', authenticate, async (req, res) => {
     }
 });
 
+// --- MODIFIED /check-profile ENDPOINT ---
 app.get('/check-profile', async (req, res) => {
     const { googleId } = req.query;
     if (!googleId) return res.status(400).json({ error: 'googleId is required.' });
     try {
         const query = `
             SELECT
-                t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield,
+                t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
                 c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
                 (c.base_location IS NOT NULL) as base_is_set
             FROM territories t
@@ -668,6 +686,7 @@ app.get('/check-profile', async (req, res) => {
             const row = result.rows[0];
             const response = {
                 profileExists: true,
+                isPaid: row.is_paid, // Added payment status to the response
                 username: row.username,
                 profileImageUrl: row.profile_image_url,
                 identityColor: row.identity_color,
@@ -704,7 +723,7 @@ app.post('/setup-profile', async (req, res) => {
     if (!googleId || !username || !imageUrl || !displayName) return res.status(400).json({ error: 'Missing required profile data.' });
     try {
         await pool.query(
-            `INSERT INTO territories (owner_id, owner_name, username, profile_image_url, area, area_sqm, original_base_point) VALUES ($1, $2, $3, $4, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), 0, NULL)
+            `INSERT INTO territories (owner_id, owner_name, username, profile_image_url, area, area_sqm, original_base_point, is_paid) VALUES ($1, $2, $3, $4, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), 0, NULL, FALSE)
              ON CONFLICT (owner_id) DO UPDATE SET username = $3, profile_image_url = $4, owner_name = $2;`,
             [googleId, displayName, username, imageUrl]
         );
@@ -713,6 +732,67 @@ app.post('/setup-profile', async (req, res) => {
         if (err.code === '23505') return res.status(409).json({ message: 'Username is already taken.' });
         console.error('[API] Error setting up profile:', err);
         res.status(500).json({ error: 'Failed to set up profile.' });
+    }
+});
+
+// --- NEW RAZORPAY PAYMENT ENDPOINTS ---
+app.post('/create-order', async (req, res) => {
+    if (!razorpay) {
+      return res.status(500).json({ error: 'Razorpay is not configured on the server.' });
+    }
+    try {
+      // Amount in the smallest currency unit. E.g., 49900 paise = ₹499.00
+      const amount = 49900; 
+      const currency = 'INR';
+  
+      const options = {
+        amount,
+        currency,
+        receipt: `receipt_order_${new Date().getTime()}`,
+      };
+  
+      const order = await razorpay.orders.create(options);
+      if (!order) {
+        return res.status(500).send('Error creating Razorpay order.');
+      }
+  
+      res.json({ order_id: order.id, amount: order.amount });
+    } catch (err) {
+      console.error('[Razorpay] Error creating order:', err);
+      res.status(500).json({ error: 'Server error while creating order.' });
+    }
+});
+  
+app.post('/verify-payment', async (req, res) => {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, googleId } = req.body;
+
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !googleId) {
+        return res.status(400).json({ error: 'Missing required payment verification data.' });
+    }
+
+    try {
+        // This is the crucial step for verification
+        const body = razorpay_order_id + "|" + razorpay_payment_id;
+
+        const expectedSignature = crypto
+            .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+            .update(body.toString())
+            .digest('hex');
+
+        if (expectedSignature === razorpay_signature) {
+            // Signature matches: Payment is authentic.
+            // Now, update the user's paid status in the database.
+            await pool.query('UPDATE territories SET is_paid = TRUE WHERE owner_id = $1', [googleId]);
+            console.log(`[Payment] Verification successful for user ${googleId}. Access granted.`);
+            res.status(200).json({ success: true, message: 'Payment verified successfully.' });
+        } else {
+            // Signature does not match: Payment is fraudulent or there was an error.
+            console.warn(`[Payment] Verification FAILED for user ${googleId}. Mismatched signatures.`);
+            res.status(400).json({ success: false, message: 'Payment verification failed.' });
+        }
+    } catch (err) {
+        console.error('[Razorpay] Error verifying payment:', err);
+        res.status(500).json({ error: 'Server error while verifying payment.' });
     }
 });
 
@@ -1461,5 +1541,5 @@ const main = async () => {
     });
   });
 };
-//sass
+
 main();
