@@ -711,10 +711,18 @@ app.get('/check-profile', async (req, res) => {
 // =========================================================================
 app.get('/users/check-username', async (req, res) => {
     const { username } = req.query;
-    if (!username) return res.status(400).json({ error: 'Username query parameter is required.' });
+    if (!username) {
+      return res.status(400).json({ error: 'Username query parameter is required.' });
+    }
     try {
         const result = await pool.query('SELECT 1 FROM territories WHERE username ILIKE $1', [username]);
-        res.json({ isAvailable: result.rowCount === 0 });
+
+        // This logic correctly handles the "(0 rows)" case.
+        const isAvailable = result.rowCount === 0;
+
+        // This sends the correct JSON key ('available') and the correct boolean value.
+        res.json({ available: isAvailable }); 
+
     } catch (err) {
         console.error('[API] Error in /users/check-username:', err);
         res.status(500).json({ error: 'Server error while checking username.' });
