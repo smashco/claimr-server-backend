@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -707,16 +706,22 @@ app.get('/check-profile', async (req, res) => {
     }
 });
 
-app.get('/check-username', async (req, res) => {
+// =========================================================================
+// ========================= THIS IS THE CORRECTED CODE =========================
+// =========================================================================
+app.get('/users/check-username', async (req, res) => {
     const { username } = req.query;
     if (!username) return res.status(400).json({ error: 'Username query parameter is required.' });
     try {
         const result = await pool.query('SELECT 1 FROM territories WHERE username ILIKE $1', [username]);
         res.json({ isAvailable: result.rowCount === 0 });
     } catch (err) {
+        console.error('[API] Error in /users/check-username:', err);
         res.status(500).json({ error: 'Server error while checking username.' });
     }
 });
+// =========================================================================
+// =========================================================================
 
 app.post('/setup-profile', async (req, res) => {
     const { googleId, username, imageUrl, displayName } = req.body;
