@@ -2,7 +2,7 @@
 const express = require('express');
 const path = require('path');
 const bcrypt = require('bcryptjs');
-const { updateQuestProgress, QUEST_TYPES } = require('../game_logic/quest_handler');
+const { updateQuestProgress } = require('../game_logic/quest_handler');
 
 const router = express.Router();
 
@@ -23,22 +23,25 @@ module.exports = (pool, io, players) => {
     router.get('/dashboard', checkSponsorAuth, (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'sponsor_dashboard.html')));
 
     router.post('/login', async (req, res) => {
-        const { name, password } = req.body;
+        const { login_id, passcode } = req.body;
+        if (!login_id || !passcode) {
+            return res.status(400).send('Sponsor ID and Passcode are required.');
+        }
         try {
-            const sponsorRes = await pool.query('SELECT * FROM sponsors WHERE name = $1', [name]);
-            if (sponsorRes.rowCount === 0) return res.status(401).send('Invalid sponsor name or password.');
+            const sponsorRes = await pool.query('SELECT * FROM sponsors WHERE login_id = $1', [login_id]);
+            if (sponsorRes.rowCount === 0) return res.status(401).send('Invalid sponsor ID or passcode.');
             
             const sponsor = sponsorRes.rows[0];
-            const isMatch = await bcrypt.compare(password, sponsor.password_hash);
+            const isMatch = await bcrypt.compare(passcode, sponsor.passcode_hash);
             
             if (isMatch) {
                 const cookieOptions = { httpOnly: true, secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000, path: '/sponsor' };
-                res.cookie('sponsor_session', 'your_secure_random_token_here', cookieOptions);
+                res.cookie('sponsor_session', sponsor.id, cookieOptions);
                 res.cookie('sponsor_name', sponsor.name, cookieOptions);
                 res.cookie('sponsor_id', sponsor.id, cookieOptions);
                 res.redirect('/sponsor/dashboard');
             } else {
-                res.status(401).send('Invalid sponsor name or password.');
+                res.status(401).send('Invalid sponsor ID or passcode.');
             }
         } catch(err) {
             console.error('[Sponsor Login] Error:', err);
@@ -46,51 +49,149 @@ module.exports = (pool, io, players) => {
         }
     });
 
-    router.get('/api/registrations', checkSponsorAuth, async (req, res) => {
+    router.get('/api/quests', checkSponsorAuth, async (req, res) => {
+        const sponsorId = req.cookies.sponsor_session;
         try {
-            const result = await pool.query(`
-                SELECT r.id, r.unique_code, r.status, t.username, t.owner_name, t.profile_image_url
-                FROM sponsor_quest_registrations r
-                JOIN territories t ON r.user_id = t.owner_id
-                JOIN quests q ON r.quest_id = q.id
-                WHERE q.sponsor_name = $1 AND q.expires_at > NOW()
-                ORDER BY r.registered_at DESC
-            `, [req.sponsor.name]);
+            const result = await pool.query(
+                `SELECT id, title, status FROM quests WHERE sponsor_id = $1 ORDER BY created_at DESC`,
+                [sponsorId]
+            );
             res.json(result.rows);
         } catch (err) {
-            console.error('[API/Sponsor] Error fetching registrations:', err);
+            console.error('[SPONSOR] Error fetching quests:', err);
             res.status(500).json({ message: 'Server error' });
         }
     });
 
+    router.post('/api/quests', checkSponsorAuth, async (req, res) => {
+        const sponsorId = req.cookies.sponsor_session;
+        const { title, description, google_form_url } = req.body;
+
+        if (!title || !description || !google_form_url) {
+            return res.status(400).json({ message: 'Title, Description, and Google Form URL are required.' });
+        }
+
+        try {
+            const result = await pool.query(
+                "INSERT INTO quests (title, description, type, objective_type, objective_value, sponsor_id, google_form_url, status, is_first_come_first_served, expiry_time) VALUES ($1, $2, 'sponsor', 'qr_scan', 1, $3, $4, 'pending', false, NOW() + INTERVAL '7 days') RETURNING id",
+                [title, description, sponsorId, google_form_url]
+            );
+            res.status(201).json({ message: 'Quest submitted for admin approval.', questId: result.rows[0].id });
+        } catch (err) {
+            console.error('[SPONSOR] Error creating quest:', err);
+            res.status(500).json({ message: 'Server error' });
+        }
+    });
+
+    router.get('/api/quests/:id/entries', checkSponsorAuth, async (req, res) => {
+        const sponsorId = req.cookies.sponsor_session;
+        const { id: questId } = req.params;
+
+        try {
+            const questCheck = await pool.query('SELECT id FROM quests WHERE id = $1 AND sponsor_id = $2', [questId, sponsorId]);
+            if (questCheck.rowCount === 0) {
+                return res.status(403).json({ message: 'You are not authorized to view entries for this quest.' });
+            }
+
+            const entries = await pool.query(
+                `SELECT qe.id, qe.user_id, t.username, qe.status, qe.submitted_at
+                 FROM quest_entries qe
+                 JOIN territories t ON qe.user_id = t.owner_id
+                 WHERE qe.quest_id = $1
+                 ORDER BY qe.submitted_at ASC`,
+                [questId]
+            );
+            res.json(entries.rows);
+        } catch (err) {
+            console.error('[SPONSOR] Error fetching quest entries:', err);
+            res.status(500).json({ message: 'Server error' });
+        }
+    });
+
+    router.put('/api/quests/entries/:entryId/select-winner', checkSponsorAuth, async (req, res) => {
+        const sponsorId = req.cookies.sponsor_session;
+        const { entryId } = req.params;
+
+        try {
+            const entryCheck = await pool.query(
+                `SELECT q.id FROM quest_entries qe
+                 JOIN quests q ON qe.quest_id = q.id
+                 WHERE qe.id = $1 AND q.sponsor_id = $2`,
+                [entryId, sponsorId]
+            );
+
+            if (entryCheck.rowCount === 0) {
+                return res.status(403).json({ message: 'You are not authorized to select a winner for this entry.' });
+            }
+
+            await pool.query("UPDATE quest_entries SET status = 'winner_selected' WHERE id = $1", [entryId]);
+            res.json({ message: 'Winner selected. Awaiting final admin approval.' });
+        } catch (err) {
+            console.error('[SPONSOR] Error selecting winner:', err);
+            res.status(500).json({ message: 'Server error' });
+        }
+    });
+    
+    // --- QR CODE VALIDATION ENDPOINT ---
     router.post('/api/verify', checkSponsorAuth, async (req, res) => {
-        const { unique_code } = req.body;
+        const { qr_code_data } = req.body; // The data scanned from the QR code
+        const sponsorId = req.sponsor.id;
+
+        if (!qr_code_data) {
+            return res.status(400).json({ message: 'QR code data is required.' });
+        }
+        
+        // QR Code data should contain the quest_id and user_id
+        // Example format: { "quest_id": 123, "user_id": "google_user_id_string" }
+        let parsedData;
+        try {
+            parsedData = JSON.parse(qr_code_data);
+        } catch (e) {
+            return res.status(400).json({ message: 'Invalid QR code format.' });
+        }
+
+        const { quest_id, user_id } = parsedData;
+
+        if (!quest_id || !user_id) {
+            return res.status(400).json({ message: 'QR code is missing necessary information.' });
+        }
+
         const client = await pool.connect();
         try {
             await client.query('BEGIN');
-            const regRes = await client.query(`
-                SELECT r.user_id, r.quest_id FROM sponsor_quest_registrations r
-                JOIN quests q ON r.quest_id = q.id
-                WHERE r.unique_code ILIKE $1 AND q.sponsor_name = $2 AND r.status = 'registered'
-            `, [unique_code, req.sponsor.name]);
             
-            if (regRes.rowCount === 0) {
+            // 1. Verify that the quest belongs to the sponsor and is active
+            const questRes = await client.query(`
+                SELECT id FROM quests
+                WHERE id = $1 AND sponsor_id = $2 AND status = 'active' AND expiry_time > NOW()
+            `, [quest_id, sponsorId]);
+            
+            if (questRes.rowCount === 0) {
                 await client.query('ROLLBACK');
-                return res.status(404).json({ message: 'Invalid or already verified code for your active quest.' });
+                return res.status(404).json({ message: 'Invalid or expired quest for this sponsor.' });
             }
             
-            const { user_id, quest_id } = regRes.rows[0];
-            await client.query(`UPDATE sponsor_quest_registrations SET status = 'verified' WHERE unique_code ILIKE $1`, [unique_code]);
+            // 2. Check if the user has an entry for this quest (they must have registered first)
+            const entryRes = await client.query(`
+                SELECT id FROM quest_entries WHERE quest_id = $1 AND user_id = $2
+            `, [quest_id, user_id]);
+
+            if (entryRes.rowCount === 0) {
+                await client.query('ROLLBACK');
+                return res.status(404).json({ message: 'Player is not registered for this quest.' });
+            }
             
-            // This is the key part: linking to the quest system
-            await updateQuestProgress(user_id, QUEST_TYPES.SPONSOR_CHECKIN, 1, client, io, players);
+            // 3. Update the quest progress for the user
+            // This is the key part that connects to the quest system
+            await updateQuestProgress(client, io, user_id, 'qr_scan', 1);
 
             await client.query('COMMIT');
-            res.json({ message: `Player verified successfully! Quest progress updated.` });
+            res.json({ success: true, message: `Player verified successfully! Quest progress updated.` });
+
         } catch(err) {
             await client.query('ROLLBACK');
-            console.error('[API/Sponsor] Error verifying code:', err);
-            res.status(500).json({ message: 'Server error' });
+            console.error('[API/Sponsor] Error verifying QR code:', err);
+            res.status(500).json({ message: 'Server error during verification.' });
         } finally {
             client.release();
         }

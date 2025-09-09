@@ -9,23 +9,36 @@ const router = express.Router();
 module.exports = (pool, io, geofenceService) => {
     // --- Player Management ---
     router.get('/players', async (req, res) => {
-        // This logic is moved from server.js
         try {
             const result = await pool.query('SELECT owner_id, username, area_sqm FROM territories ORDER BY username');
-            const players = result.rows.map(dbPlayer => {
-                // You will need to pass the `players` map from server.js if you want online status here
-                // For simplicity, we are omitting it for now. Re-add if needed.
-                return { ...dbPlayer, isOnline: false }; // Simplified for modularity
+            const playersList = result.rows.map(dbPlayer => {
+                // Check against the in-memory 'players' map for online status
+                const isOnline = Object.values(players).some(p => p.googleId === dbPlayer.owner_id);
+                return { ...dbPlayer, isOnline };
             });
-            res.json(players);
+            res.json(playersList);
         } catch (err) {
             console.error('[API/Admin] Error fetching players:', err);
             res.status(500).json({ message: 'Server error' });
         }
     });
 
+    // NEW: Endpoint to get full details for a single player
+    router.get('/player/:id', async (req, res) => {
+        const { id } = req.params;
+        try {
+            const result = await pool.query('SELECT * FROM territories WHERE owner_id = $1', [id]);
+            if (result.rowCount === 0) {
+                return res.status(404).json({ message: 'Player not found.' });
+            }
+            res.json(result.rows[0]);
+        } catch (err) {
+            console.error(`[API/Admin] Error fetching details for player ${id}:`, err);
+            res.status(500).json({ message: 'Server error' });
+        }
+    });
+
     router.post('/player/:id/:action', async (req, res) => {
-        // This logic is moved from server.js
         const { id, action } = req.params;
         try {
             if (action === 'reset-territory') {
@@ -47,8 +60,9 @@ module.exports = (pool, io, geofenceService) => {
     router.get('/quests', async (req, res) => {
         try {
             const result = await pool.query(`
-                SELECT q.*, t.username as winner_username, t.owner_name as winner_fullname
-                FROM quests q LEFT JOIN territories t ON q.winner_id = t.owner_id
+                SELECT q.*, s.name as sponsor_name
+                FROM quests q
+                LEFT JOIN sponsors s ON q.sponsor_id = s.id
                 ORDER BY q.created_at DESC
             `);
             res.json(result.rows);
@@ -59,29 +73,46 @@ module.exports = (pool, io, geofenceService) => {
     });
 
     router.post('/quests', async (req, res) => {
-        const { title, description, quest_type, target_value, reward_description, expires_at, sponsor_name } = req.body;
-        const type = sponsor_name ? 'sponsor' : 'admin'; // Determine if it's a sponsor quest
+        const { title, description, type, objective_type, objective_value, is_first_come_first_served, launch_time, expiry_time, sponsor_id, google_form_url } = req.body;
+        if (!title || !description || !type || !objective_type || !objective_value || !expiry_time) {
+            return res.status(400).json({ message: 'Missing required quest fields.' });
+        }
         try {
             const newQuest = await pool.query(
-                `INSERT INTO quests (title, description, type, quest_type, target_value, reward_description, sponsor_name, expires_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-                [title, description, type, quest_type, target_value, reward_description, sponsor_name || null, expires_at]
+                `INSERT INTO quests (title, description, type, objective_type, objective_value, is_first_come_first_served, launch_time, expiry_time, sponsor_id, google_form_url, status)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active') RETURNING *`,
+                [title, description, type, objective_type, objective_value, !!is_first_come_first_served, launch_time, expiry_time, sponsor_id, google_form_url]
             );
-            io.emit('questUpdate'); // Notify all clients of a new quest
+            io.emit('newQuestLaunched', newQuest.rows[0]);
             res.status(201).json(newQuest.rows[0]);
         } catch (err) {
             console.error('[API/Admin] Error creating quest:', err);
-            res.status(500).json({ message: 'Server error' });
+            res.status(500).json({ message: 'Server error while creating quest.' });
         }
     });
     
     router.delete('/quests/:id', async (req, res) => {
         try {
             await pool.query('DELETE FROM quests WHERE id = $1', [req.params.id]);
-            io.emit('questUpdate');
+            io.emit('questDeleted', { questId: req.params.id });
             res.json({ message: 'Quest deleted successfully.' });
         } catch (err) {
             console.error('[API/Admin] Error deleting quest:', err);
+            res.status(500).json({ message: 'Server error' });
+        }
+    });
+
+    router.put('/quests/:id/extend', async (req, res) => {
+        const { new_expiry_time } = req.body;
+        if (!new_expiry_time) {
+            return res.status(400).json({ message: 'new_expiry_time is required.' });
+        }
+        try {
+            await pool.query('UPDATE quests SET expiry_time = $1 WHERE id = $2', [new_expiry_time, req.params.id]);
+            io.emit('questUpdated', { questId: req.params.id, expiry_time: new_expiry_time });
+            res.json({ message: 'Quest expiry time extended.' });
+        } catch (err) {
+            console.error('[API/Admin] Error extending quest:', err);
             res.status(500).json({ message: 'Server error' });
         }
     });
@@ -97,7 +128,7 @@ module.exports = (pool, io, geofenceService) => {
         }
     });
 
-    router.post('/geofence-zones', upload.single('kmlFile'), async (req, res) => {
+    router.post('/geofence-zones/upload', upload.single('kmlFile'), async (req, res) => {
         const { name, zoneType } = req.body;
         if (!req.file || !name || !zoneType) {
             return res.status(400).json({ message: 'KML file, name, and zoneType are required.' });
@@ -106,7 +137,6 @@ module.exports = (pool, io, geofenceService) => {
             const kmlString = req.file.buffer.toString('utf8');
             await geofenceService.addZoneFromKML(kmlString, name, zoneType);
             
-            // Broadcast the update to all connected game clients
             const allZones = await geofenceService.getGeofencePolygons();
             io.emit('geofenceUpdate', allZones);
             
@@ -121,7 +151,6 @@ module.exports = (pool, io, geofenceService) => {
         try {
             await geofenceService.deleteZone(req.params.id);
             
-            // Broadcast the update to all connected game clients
             const allZones = await geofenceService.getGeofencePolygons();
             io.emit('geofenceUpdate', allZones);
 
@@ -129,6 +158,46 @@ module.exports = (pool, io, geofenceService) => {
         } catch (error) {
             console.error('[API/Admin] Error deleting geofence zone:', error);
             res.status(500).json({ message: 'Server error while deleting zone.' });
+        }
+    });
+
+    // --- Superpower Chest Management ---
+    router.post('/spawn-chest', async (req, res) => {
+        const { lat, lng } = req.body;
+        if (lat === undefined || lng === undefined) {
+            return res.status(400).json({ message: 'Latitude and Longitude are required.' });
+        }
+        try {
+            const pointWKT = `ST_SetSRID(ST_Point(${lng}, ${lat}), 4326)`;
+            const result = await pool.query(
+                `INSERT INTO superpower_chests (location) VALUES (${pointWKT}) RETURNING id, ST_AsGeoJSON(location) as location`,
+            );
+            const newChest = {
+                id: result.rows[0].id,
+                location: JSON.parse(result.rows[0].location).coordinates.reverse()
+            };
+            io.emit('chestSpawned', newChest);
+            res.status(201).json({ message: 'Superpower chest spawned successfully.', chest: newChest });
+        } catch (err) {
+            console.error('[ADMIN] Error spawning chest:', err);
+            res.status(500).json({ message: 'Server error' });
+        }
+    });
+    
+    router.get('/chests', async (req, res) => {
+        try {
+            const result = await pool.query(`
+                SELECT id, ST_AsGeoJSON(location) as location
+                FROM superpower_chests WHERE is_active = TRUE
+            `);
+            const chests = result.rows.map(c => ({
+                id: c.id,
+                location: JSON.parse(c.location).coordinates.reverse()
+            }));
+            res.json(chests);
+        } catch (err) {
+            console.error('[ADMIN] Error fetching chests:', err);
+            res.status(500).json({ message: 'Server error' });
         }
     });
 

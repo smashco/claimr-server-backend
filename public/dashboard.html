@@ -11,16 +11,21 @@
         .table { color: #dee2e6; }
         .container-fluid { max-width: 1800px; }
         #map { height: 450px; background-color: #343a40; border-radius: 8px; margin-bottom: 20px; }
-        .card { background-color: #343a40; }
+        .card { background-color: #343a40; margin-bottom: 20px; }
         .nav-tabs .nav-link { background-color: #343a40; border-color: #495057; color: #dee2e6; }
         .nav-tabs .nav-link.active { background-color: #495057; border-color: #495057; color: #fff; }
+        .form-check-input:checked { background-color: #D4FF00; border-color: #D4FF00; }
+        .leaflet-crosshair-cursor { cursor: crosshair !important; }
     </style>
 </head>
 <body>
     <div class="container-fluid py-4">
         <div class="d-flex justify-content-between align-items-center mb-4">
             <h1>Admin Dashboard</h1>
-            <button class="btn btn-secondary" onclick="fetchAllData()">Refresh All Data</button>
+            <div>
+                <button class="btn btn-info" id="spawnChestBtn">Spawn Chest</button>
+                <button class="btn btn-secondary" onclick="fetchAllData()">Refresh All Data</button>
+            </div>
         </div>
 
         <div id="map"></div>
@@ -90,8 +95,46 @@
             <!-- Quest Management Tab -->
             <div class="tab-pane fade p-3" id="quests-tab-pane" role="tabpanel">
                 <div class="row">
-                    <!-- Create Sponsor Section -->
+                    <!-- Management Forms Column -->
                     <div class="col-md-4">
+                         <div class="card">
+                            <div class="card-body">
+                                <h5 class="card-title">Create Developer Quest</h5>
+                                <form id="createQuestForm">
+                                    <div class="mb-3">
+                                        <label for="questTitle" class="form-label">Title</label>
+                                        <input type="text" class="form-control" id="questTitle" required>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="questDescription" class="form-label">Description</label>
+                                        <textarea class="form-control" id="questDescription" rows="2" required></textarea>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="objectiveType" class="form-label">Objective Type</label>
+                                        <select class="form-select" id="objectiveType" required>
+                                            <option value="claim_area">Claim Area (sqm)</option>
+                                            <option value="trail_cut">Trail Cut (count)</option>
+                                            <option value="qr_scan">QR Scan (count)</option>
+                                        </select>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="objectiveValue" class="form-label">Objective Value</label>
+                                        <input type="number" class="form-control" id="objectiveValue" required>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="expiryTime" class="form-label">Expiry Time</label>
+                                        <input type="datetime-local" class="form-control" id="expiryTime" required>
+                                    </div>
+                                    <div class="form-check mb-3">
+                                        <input class="form-check-input" type="checkbox" id="isFCS">
+                                        <label class="form-check-label" for="isFCS">
+                                            First Come, First Served (Ends after first completion)
+                                        </label>
+                                    </div>
+                                    <button type="submit" class="btn btn-primary">Create and Launch Quest</button>
+                                </form>
+                            </div>
+                        </div>
                          <div class="card">
                             <div class="card-body">
                                 <h5 class="card-title">Create Sponsor Account</h5>
@@ -113,18 +156,19 @@
                             </div>
                         </div>
                     </div>
-                    <!-- Quests List -->
+                    <!-- Quests List Column -->
                     <div class="col-md-8">
-                        <h5>Pending & Active Quests</h5>
+                        <h5>Active & Historical Quests</h5>
                         <div class="table-responsive">
                             <table class="table table-dark table-striped table-hover">
                                 <thead>
                                     <tr>
                                         <th>Title</th>
                                         <th>Type</th>
-                                        <th>Sponsor</th>
+                                        <th>Objective</th>
                                         <th>Status</th>
-                                        <th>Action</th>
+                                        <th>Expires</th>
+                                        <th>Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody id="quest-table-body"></tbody>
@@ -141,7 +185,9 @@
     <script>
         let map;
         let playerMarkers = {};
+        let chestMarkers = {};
         let geofenceLayers = L.featureGroup();
+        let isSpawnMode = false;
 
         function initMap() {
             map = L.map('map').setView([19.0760, 72.8777], 10);
@@ -151,6 +197,7 @@
                 maxZoom: 19
             }).addTo(map);
             geofenceLayers.addTo(map);
+            map.on('click', onMapClick);
         }
 
         async function apiFetch(url, options = {}) {
@@ -177,6 +224,7 @@
             fetchPlayers();
             fetchGeofenceZones();
             fetchQuests();
+            fetchChests();
         }
 
         async function fetchPlayers() {
@@ -201,6 +249,7 @@
                     <td>${player.username || 'N/A'}</td>
                     <td>${areaKm2}</td>
                     <td>
+                        <a href="/admin/player_details.html?id=${player.owner_id}" class="btn btn-sm btn-primary">Details</a>
                         <button class="btn btn-sm btn-warning" onclick="performAction('${player.owner_id}', 'reset-territory', '${player.username}')">Reset</button>
                         <button class="btn btn-sm btn-danger" onclick="performAction('${player.owner_id}', 'delete', '${player.username}')">Delete</button>
                     </td>
@@ -295,7 +344,7 @@
                 renderQuests(quests);
             } catch (error) {
                 console.error('Error fetching quests:', error);
-                document.getElementById('quest-table-body').innerHTML = `<tr><td colspan="5" class="text-danger text-center">${error.message}</td></tr>`;
+                document.getElementById('quest-table-body').innerHTML = `<tr><td colspan="6" class="text-danger text-center">${error.message}</td></tr>`;
             }
         }
 
@@ -303,37 +352,77 @@
             const tableBody = document.getElementById('quest-table-body');
             tableBody.innerHTML = '';
             if (quests.length === 0) {
-                tableBody.innerHTML = '<tr><td colspan="5" class="text-center">No quests found.</td></tr>';
+                tableBody.innerHTML = '<tr><td colspan="6" class="text-center">No quests found.</td></tr>';
                 return;
             }
             quests.forEach(quest => {
                 const row = document.createElement('tr');
-                const isPending = quest.status === 'pending';
-                const statusBadge = isPending ? 'bg-warning text-dark' : 'bg-success';
+                const statusBadge = {
+                    'pending': 'bg-warning text-dark',
+                    'active': 'bg-success',
+                    'completed': 'bg-info',
+                    'expired': 'bg-secondary'
+                }[quest.status] || 'bg-light text-dark';
                 
                 row.innerHTML = `
                     <td>${quest.title}</td>
-                    <td>${quest.quest_type}</td>
-                    <td>${quest.sponsor_name || 'Admin'}</td>
+                    <td>${quest.type}</td>
+                    <td>${quest.objective_type.replace('_', ' ')}: ${quest.objective_value}</td>
                     <td><span class="badge ${statusBadge}">${quest.status}</span></td>
+                    <td>${new Date(quest.expiry_time).toLocaleString()}</td>
                     <td>
-                        ${isPending ? `<button class="btn btn-sm btn-success" onclick="approveQuest(${quest.id})">Approve</button>` : 'Launched'}
+                        <button class="btn btn-sm btn-outline-danger" onclick="deleteQuest(${quest.id})">Delete</button>
+                        <button class="btn btn-sm btn-outline-info" onclick="extendQuest(${quest.id})">Extend</button>
                     </td>
                 `;
                 tableBody.appendChild(row);
             });
         }
 
-        async function approveQuest(questId) {
-            if (!confirm('Are you sure you want to approve and launch this quest? All players will be notified.')) return;
+        async function deleteQuest(questId) {
+            if (!confirm('Are you sure you want to permanently delete this quest?')) return;
             try {
-                const result = await apiFetch(`/admin/api/quests/${questId}/approve`, { method: 'PUT' });
+                const result = await apiFetch(`/admin/api/quests/${questId}`, { method: 'DELETE' });
                 alert(result.message);
                 fetchQuests();
             } catch (error) {
                 alert(`Error: ${error.message}`);
             }
         }
+
+        async function extendQuest(questId) {
+            const newExpiry = prompt("Enter new expiry date and time (YYYY-MM-DDTHH:MM:SS):", new Date(Date.now() + 24*60*60*1000).toISOString().slice(0, 19));
+            if (!newExpiry) return;
+            try {
+                const result = await apiFetch(`/admin/api/quests/${questId}/extend`, { method: 'PUT', body: { new_expiry_time: newExpiry } });
+                alert(result.message);
+                fetchQuests();
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        document.getElementById('createQuestForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const body = {
+                title: document.getElementById('questTitle').value,
+                description: document.getElementById('questDescription').value,
+                type: 'developer',
+                objective_type: document.getElementById('objectiveType').value,
+                objective_value: parseInt(document.getElementById('objectiveValue').value, 10),
+                expiry_time: new Date(document.getElementById('expiryTime').value).toISOString(),
+                is_first_come_first_served: document.getElementById('isFCS').checked
+            };
+
+            try {
+                const result = await apiFetch('/admin/api/quests', { method: 'POST', body });
+                alert('Quest created successfully!');
+                this.reset();
+                fetchQuests();
+            } catch(error) {
+                alert(`Error: ${error.message}`);
+            }
+        });
 
         document.getElementById('createSponsorForm').addEventListener('submit', async function(e) {
             e.preventDefault();
@@ -352,6 +441,70 @@
                 alert(`Error: ${error.message}`);
             }
         });
+        
+        document.getElementById('spawnChestBtn').addEventListener('click', () => {
+            isSpawnMode = !isSpawnMode;
+            const spawnBtn = document.getElementById('spawnChestBtn');
+            const mapContainer = document.getElementById('map');
+            if (isSpawnMode) {
+                spawnBtn.textContent = 'Spawning... Click on Map';
+                spawnBtn.classList.add('btn-success');
+                spawnBtn.classList.remove('btn-info');
+                L.DomUtil.addClass(mapContainer, 'leaflet-crosshair-cursor');
+            } else {
+                spawnBtn.textContent = 'Spawn Chest';
+                spawnBtn.classList.add('btn-info');
+                spawnBtn.classList.remove('btn-success');
+                L.DomUtil.removeClass(mapContainer, 'leaflet-crosshair-cursor');
+            }
+        });
+
+        async function onMapClick(e) {
+            if (!isSpawnMode) return;
+            
+            const { lat, lng } = e.latlng;
+            if (!confirm(`Spawn a superpower chest at these coordinates?\nLat: ${lat.toFixed(6)}, Lng: ${lng.toFixed(6)}`)) return;
+
+            try {
+                const result = await apiFetch('/admin/api/spawn-chest', {
+                    method: 'POST',
+                    body: { lat, lng }
+                });
+                alert(result.message);
+                fetchChests();
+            } catch(error) {
+                alert(`Error: ${error.message}`);
+            } finally {
+                isSpawnMode = false;
+                document.getElementById('spawnChestBtn').textContent = 'Spawn Chest';
+                document.getElementById('spawnChestBtn').classList.add('btn-info');
+                document.getElementById('spawnChestBtn').classList.remove('btn-success');
+                L.DomUtil.removeClass(document.getElementById('map'), 'leaflet-crosshair-cursor');
+            }
+        }
+
+        async function fetchChests() {
+            try {
+                const chests = await apiFetch('/admin/api/chests');
+                renderChests(chests);
+            } catch (error) {
+                console.error('Error fetching chests:', error);
+            }
+        }
+
+        function renderChests(chests) {
+            Object.values(chestMarkers).forEach(marker => marker.remove());
+            chestMarkers = {};
+            chests.forEach(chest => {
+                const [lat, lng] = chest.location;
+                chestMarkers[chest.id] = L.circleMarker([lat, lng], {
+                    radius: 8,
+                    color: '#FFD700',
+                    fillColor: '#FFD700',
+                    fillOpacity: 0.8
+                }).addTo(map).bindPopup(`<b>Chest ID: ${chest.id}</b>`);
+            });
+        }
         
         window.onload = () => {
             initMap();

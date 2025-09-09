@@ -1,10 +1,11 @@
+// game_logic/solo_handler.js
+
 const turf = require('@turf/turf');
 const { handleShieldHit } = require('./interactions/shield_interaction');
 const { handleWipeout } = require('./interactions/unshielded_interaction');
 const { handleInfiltratorClaim } = require('./interactions/infiltrator_interaction');
 const { handleCarveOut } = require('./interactions/carve_interaction');
-// FIX: Import the function using destructuring to match the export style.
-const { handlePartialWipeout } = require('./interactions/partial_wipeout_interaction');
+const { updateQuestProgress } = require('./quest_handler'); // Import the quest handler
 
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client) {
     const { isInfiltratorActive, isCarveModeActive } = player;
@@ -107,35 +108,17 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
 
         if (victim.is_shield_active) {
             attackerNetGainGeom = await handleShieldHit(victim, attackerNetGainGeom, client, io, players);
-        } else { // This is the unshielded case
+        } else {
             if (isCarveModeActive) {
                 console.log('[DEBUG] Carve Mode is active. Calling handleCarveOut.');
                 await handleCarveOut(victim, attackerNetGainGeom, client);
             } else {
-                // This is the new logic for standard (non-carve) unshielded interactions
-                console.log(`[DEBUG] Standard interaction with ${victim.username}. Checking for full vs. partial wipeout.`);
-
-                // Check if the attacker's new claim polygon COMPLETELY CONTAINS the victim's territory
-                const containmentCheck = await client.query(
-                    `SELECT ST_Contains($1::geometry, $2::geometry) as contains`,
-                    [attackerNetGainGeom, victim.area]
-                );
-
-                if (containmentCheck.rows[0].contains) {
-                    // If the victim is fully inside the new claim, it's a full wipeout.
-                    console.log(`[DEBUG] Attacker's claim fully contains ${victim.username}. Calling handleWipeout.`);
-                    attackerNetGainGeom = await handleWipeout(victim, attackerNetGainGeom, client);
-                } else {
-                    // If it's just an intersection, it's a partial wipeout.
-                    // The victim loses the intersected area and any smaller, disconnected pieces.
-                    console.log(`[DEBUG] Attacker's claim partially intersects ${victim.username}. Calling handlePartialWipeout.`);
-                    await handlePartialWipeout(victim, attackerNetGainGeom, client);
-                }
+                console.log('[DEBUG] Standard mode. Calling handleWipeout.');
+                attackerNetGainGeom = await handleWipeout(victim, attackerNetGainGeom, client);
             }
         }
     }
 
-    // --- UPDATED: Reset the Carve Mode flag in the database ---
     if (isCarveModeActive) {
         console.log('[DEBUG] Carve mode expansion complete. Deactivating carve mode in DB.');
         await client.query('UPDATE territories SET is_carve_mode_active = false WHERE owner_id = $1', [userId]);
@@ -179,6 +162,15 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
     `, [userId, player.name, finalAreaGeoJSON, finalAreaSqM, isInitialBaseClaim, baseClaim?.lng, baseClaim?.lat]);
 
     console.log(`[SUCCESS] Claim committed: +${newAreaSqM.toFixed(2)} sqm`);
+
+    // --- QUEST INTEGRATION (CORRECTED) ---
+    // We pass the 'client' object from the transaction, not the whole 'pool'.
+    await updateQuestProgress(client, io, userId, 'claim_area', Math.round(newAreaSqM));
+    
+    // We can also add other objective types. For example, a trail cut quest.
+    // This would be called from the trail intersection logic in server.js.
+    // Example: await updateQuestProgress(client, io, attackerId, 'trail_cut', 1);
+
     return {
         finalTotalArea: finalAreaSqM,
         areaClaimed: newAreaSqM,
