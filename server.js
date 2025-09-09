@@ -12,22 +12,18 @@ const admin = require('firebase-admin');
 const turf = require('@turf/turf');
 const multer = require('multer');
 
-// --- NEW RAZORPAY & CRYPTO REQUIREMENTS ---
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
 
-// --- Require the Game and Service Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
 const GeofenceService = require('./geofence_service');
 const { updateQuestProgress } = require('./game_logic/quest_handler');
 
-// --- Route Handlers ---
 const adminApiRouter = require('./routes/admin_api');
 const sponsorPortalRouter = require('./routes/sponsor_portal');
 const questsApiRouter = require('./routes/quests_api');
 
-// --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
   console.error('SERVER ERROR: Unhandled Rejection at:', promise, 'reason:', reason);
 });
@@ -36,7 +32,6 @@ process.on('uncaughtException', (error) => {
   process.exit(1);
 });
 
-// --- App & Server Setup ---
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -53,7 +48,6 @@ const io = new Server(server, {
   }
 });
 
-// --- Firebase Admin SDK Initialization ---
 try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -69,7 +63,6 @@ try {
   console.error('[Firebase Admin] FATAL: Failed to initialize Firebase Admin.', error.message);
 }
 
-// --- NEW RAZORPAY INITIALIZATION ---
 let razorpay;
 if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
   razorpay = new Razorpay({
@@ -81,7 +74,6 @@ if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
   console.warn('[Razorpay] Skipping initialization (RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET not set in env).');
 }
 
-// --- Constants & Database Pool ---
 const PORT = process.env.PORT || 10000;
 const SERVER_TICK_RATE_MS = 500;
 const DISCONNECT_TRAIL_PERSIST_SECONDS = 60;
@@ -96,7 +88,6 @@ const pool = new Pool({
 const geofenceService = new GeofenceService(pool);
 const players = {};
 
-// --- Database Schema Setup ---
 const setupDatabase = async () => {
   const client = await pool.connect();
   try {
@@ -283,7 +274,6 @@ const setupDatabase = async () => {
   }
 };
 
-// --- Middleware ---
 const authenticate = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -305,46 +295,9 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// =======================================================================
-// --- ADMIN PANEL LOGIC & ROUTES ---
-// =======================================================================
-const appAdminRouter = require('./routes/admin_api')(pool, io, geofenceService, players);
-app.use('/admin/api', appAdminRouter);
-
-const checkAdminAuth = (req, res, next) => {
-    if (req.cookies.admin_session === process.env.ADMIN_SECRET_KEY) {
-        return next();
-    }
-    if (req.originalUrl.startsWith('/admin/api')) {
-        return res.status(401).json({ message: 'Unauthorized: Please log in.' });
-    }
-    res.redirect('/admin/login');
-};
-app.get('/admin/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
-app.post('/admin/login', (req, res) => {
-    const { password } = req.body;
-    if (password === process.env.ADMIN_SECRET_KEY) {
-        res.cookie('admin_session', password, { httpOnly: true, secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000, path: '/admin' });
-        res.redirect('/admin/dashboard');
-    } else {
-        res.status(401).send('Invalid Password. <a href="/admin/login">Try again</a>');
-    }
-});
-app.get('/admin/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
-app.get('/admin/player_details.html', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'player_details.html')));
-app.get('/admin', (req, res) => res.redirect('/admin/login'));
-
-// =======================================================================
-// --- SPONSOR PANEL LOGIC & ROUTES ---
-// =======================================================================
-const appSponsorRouter = require('./routes/sponsor_portal')(pool, io, players);
-app.use('/sponsor', appSponsorRouter);
-
-// =======================================================================
-// --- MAIN GAME LOGIC (API & SOCKETS) ---
-// =======================================================================
-const appQuestsRouter = require('./routes/quests_api')(pool, authenticate);
-app.use('/api/quests', appQuestsRouter);
+app.use('/admin', adminApiRouter(pool, io, geofenceService, players));
+app.use('/sponsor', sponsorPortalRouter(pool, io, players));
+app.use('/api/quests', questsApiRouter(pool, authenticate));
 
 app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
@@ -376,7 +329,6 @@ app.post('/users/me/health-profile', authenticate, async (req, res) => {
         res.status(500).json({ message: 'Server error while updating health profile.' });
     }
 });
-
 
 app.get('/check-profile', async (req, res) => {
     const { googleId } = req.query;
@@ -501,6 +453,45 @@ app.post('/verify-payment', async (req, res) => {
         res.status(500).json({ error: 'Server error while verifying payment.' });
     }
 });
+
+app.get('/subscription/status', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query('SELECT razorpay_subscription_id, subscription_status FROM territories WHERE owner_id = $1', [req.user.googleId]);
+        if (result.rowCount === 0 || !result.rows[0].razorpay_subscription_id) {
+            return res.status(404).json({ message: 'No active subscription found.' });
+        }
+        
+        const subscription = await razorpay.subscriptions.fetch(result.rows[0].razorpay_subscription_id);
+        res.json({
+            status: subscription.status,
+            current_start: new Date(subscription.current_start * 1000),
+            current_end: new Date(subscription.current_end * 1000),
+            charge_at: new Date(subscription.charge_at * 1000),
+        });
+    } catch (err) {
+        console.error('[Razorpay] Error fetching subscription status:', err);
+        res.status(500).json({ error: 'Server error while fetching status.' });
+    }
+});
+
+app.post('/subscription/cancel', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query('SELECT razorpay_subscription_id FROM territories WHERE owner_id = $1', [req.user.googleId]);
+        if (result.rowCount === 0 || !result.rows[0].razorpay_subscription_id) {
+            return res.status(404).json({ message: 'No active subscription found.' });
+        }
+        
+        await razorpay.subscriptions.cancel(result.rows[0].razorpay_subscription_id, { cancel_at_cycle_end: false });
+        
+        await pool.query("UPDATE territories SET subscription_status = 'cancelled' WHERE owner_id = $1", [req.user.googleId]);
+
+        res.json({ success: true, message: 'Your subscription has been cancelled.' });
+    } catch (err) {
+        console.error('[Razorpay] Error cancelling subscription:', err);
+        res.status(500).json({ error: 'Server error while cancelling.' });
+    }
+});
+
 
 app.get('/leaderboard', async (req, res) => {
     try {
@@ -808,6 +799,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
         client.release();
     }
 });
+
 
 // --- Socket.IO Logic ---
 io.on('connection', (socket) => {
@@ -1150,8 +1142,34 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- Server Start ---
-setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
+async function broadcastAllPlayers() {
+    const playerIds = Object.keys(players);
+    if (playerIds.length === 0) return;
+    const googleIds = Object.values(players).map(p => p.googleId).filter(id => id);
+    if (googleIds.length === 0) return;
+    try {
+        const profileQuery = await pool.query('SELECT owner_id, username, profile_image_url, identity_color FROM territories WHERE owner_id = ANY($1::varchar[])', [googleIds]);
+        const profiles = profileQuery.rows.reduce((acc, row) => {
+            acc[row.owner_id] = { username: row.username, imageUrl: row.profile_image_url, identityColor: row.identity_color };
+            return acc;
+        }, {});
+        const allPlayersData = Object.values(players).map(p => {
+            const profile = profiles[p.googleId] || {};
+            return {
+                id: p.id,
+                ownerId: p.googleId,
+                name: profile.username || p.name,
+                imageUrl: profile.imageUrl,
+                identityColor: profile.identityColor,
+                lastKnownPosition: p.lastKnownPosition
+            };
+        });
+        io.emit('allPlayersUpdate', allPlayersData);
+    } catch(e) {
+        console.error("[Broadcast] Error fetching profiles for broadcast:", e);
+    }
+}
+
 const main = async () => {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`[SERVER] Listening on 0.0.0.0:${PORT}`);
@@ -1162,4 +1180,5 @@ const main = async () => {
   });
 };
 
+setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
 main();
