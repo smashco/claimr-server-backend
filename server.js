@@ -118,6 +118,8 @@ const setupDatabase = async () => {
         is_paid BOOLEAN DEFAULT FALSE,
         razorpay_subscription_id VARCHAR(100),
         subscription_status VARCHAR(50),
+        total_distance_km REAL DEFAULT 0,
+        total_duration_minutes INTEGER DEFAULT 0,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -141,6 +143,10 @@ const setupDatabase = async () => {
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS razorpay_subscription_id VARCHAR(100);');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50);');
+    
+    // --- NEW COLUMNS FOR STATS ---
+    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_distance_km REAL DEFAULT 0;');
+    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_duration_minutes INTEGER DEFAULT 0;');
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
@@ -351,6 +357,67 @@ app.post('/users/me/health-profile', authenticate, async (req, res) => {
     } catch (err) {
         console.error('[API] Error updating health profile:', err);
         res.status(500).json({ message: 'Server error while updating health profile.' });
+    }
+});
+
+// --- NEW ENDPOINT TO LOG A COMPLETED RUN ---
+app.post('/users/me/log-run', authenticate, async (req, res) => {
+    const { googleId } = req.user;
+    const { distance, durationSeconds } = req.body;
+
+    if (typeof distance !== 'number' || typeof durationSeconds !== 'number') {
+        return res.status(400).json({ message: 'Invalid distance or duration provided.' });
+    }
+
+    try {
+        const durationMinutes = Math.floor(durationSeconds / 60);
+        await pool.query(
+            `UPDATE territories 
+             SET 
+                total_distance_km = total_distance_km + $1,
+                total_duration_minutes = total_duration_minutes + $2
+             WHERE owner_id = $3`,
+            [distance, durationMinutes, googleId]
+        );
+        res.status(200).json({ success: true, message: 'Run logged successfully.' });
+    } catch (err) {
+        console.error('[API] Error logging run:', err);
+        res.status(500).json({ message: 'Server error while logging run.' });
+    }
+});
+
+// --- NEW ENDPOINT TO FETCH USER STATS ---
+app.get('/users/me/stats', authenticate, async (req, res) => {
+    const { googleId } = req.user;
+    try {
+        const result = await pool.query(
+            'SELECT total_distance_km, total_duration_minutes FROM territories WHERE owner_id = $1',
+            [googleId]
+        );
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
+        
+        const totalDistance = result.rows[0].total_distance_km || 0;
+        const totalDuration = result.rows[0].total_duration_minutes || 0;
+
+        // Simple estimate: ~65 calories per km. Can be improved with weight/height data.
+        const estimatedCalories = totalDistance * 65; 
+        
+        // Placeholder for weekly activity. This would require storing historical run data with timestamps.
+        const weeklyActivity = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]; 
+
+        res.status(200).json({
+            totalDistance: totalDistance,
+            totalActiveTimeMinutes: totalDuration,
+            totalCaloriesBurned: estimatedCalories,
+            weeklyActivity: weeklyActivity
+        });
+
+    } catch (err) {
+        console.error('[API] Error fetching user stats:', err);
+        res.status(500).json({ message: 'Server error while fetching stats.' });
     }
 });
 
@@ -824,7 +891,6 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     }
 });
 
-// --- THIS IS THE FUNCTION THAT WAS MISSING ---
 async function broadcastAllPlayers() {
     const playerIds = Object.keys(players);
     if (playerIds.length === 0) return;
