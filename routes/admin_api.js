@@ -6,13 +6,13 @@ const multer = require('multer');
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
 
-module.exports = (pool, io, geofenceService) => {
+module.exports = (pool, io, geofenceService, players) => { // Added 'players' here
     // --- Player Management ---
     router.get('/players', async (req, res) => {
         try {
             const result = await pool.query('SELECT owner_id, username, area_sqm FROM territories ORDER BY username');
             const playersList = result.rows.map(dbPlayer => {
-                // Check against the in-memory 'players' map for online status
+                // Now we can safely check the in-memory 'players' map
                 const isOnline = Object.values(players).some(p => p.googleId === dbPlayer.owner_id);
                 return { ...dbPlayer, isOnline };
             });
@@ -23,7 +23,6 @@ module.exports = (pool, io, geofenceService) => {
         }
     });
 
-    // NEW: Endpoint to get full details for a single player
     router.get('/player/:id', async (req, res) => {
         const { id } = req.params;
         try {
@@ -45,9 +44,6 @@ module.exports = (pool, io, geofenceService) => {
                 await pool.query("UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), area_sqm = 0 WHERE owner_id = $1", [id]);
                 io.emit('batchTerritoryUpdate', [{ ownerId: id, area: 0, geojson: null }]);
                 return res.json({ message: `Territory for player ${id} has been reset.` });
-            } else if (action === 'delete') {
-                await pool.query('DELETE FROM territories WHERE owner_id = $1', [id]);
-                return res.json({ message: `Player ${id} has been deleted.` });
             }
             res.status(400).json({ message: 'Invalid action.' });
         } catch (err) {
@@ -55,6 +51,19 @@ module.exports = (pool, io, geofenceService) => {
             res.status(500).json({ message: 'Server error' });
         }
     });
+    
+    router.delete('/player/:id/delete', async (req, res) => {
+        const { id } = req.params;
+        try {
+           const playerSocket = Object.values(players).find(p => p.googleId === id);
+           await pool.query('DELETE FROM territories WHERE owner_id = $1', [id]);
+           if (playerSocket) io.to(playerSocket.id).disconnect(true);
+           return res.json({ message: `Player ${id} and all their data have been permanently deleted.` });
+       } catch (err) {
+           console.error(`[ADMIN] Error deleting player ${id}:`, err);
+           res.status(500).json({ message: 'Server error' });
+       }
+   });
 
     // --- Quest Management ---
     router.get('/quests', async (req, res) => {
@@ -81,7 +90,7 @@ module.exports = (pool, io, geofenceService) => {
             const newQuest = await pool.query(
                 `INSERT INTO quests (title, description, type, objective_type, objective_value, is_first_come_first_served, launch_time, expiry_time, sponsor_id, google_form_url, status)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active') RETURNING *`,
-                [title, description, type, objective_type, objective_value, !!is_first_come_first_served, launch_time, expiry_time, sponsor_id, google_form_url]
+                [title, description, type, objective_type, objective_value, !!is_first_come_first_served, launch_time, expiry_time, sponsor_id || null, google_form_url || null]
             );
             io.emit('newQuestLaunched', newQuest.rows[0]);
             res.status(201).json(newQuest.rows[0]);

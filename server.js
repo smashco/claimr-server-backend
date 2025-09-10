@@ -212,8 +212,8 @@ const setupDatabase = async () => {
             title VARCHAR(150) NOT NULL,
             description TEXT NOT NULL,
             type VARCHAR(20) NOT NULL,
-            objective_type VARCHAR(50) NOT NULL,
-            objective_value INT NOT NULL,
+            objective_type VARCHAR(50),
+            objective_value INT,
             status VARCHAR(20) NOT NULL DEFAULT 'pending',
             is_first_come_first_served BOOLEAN DEFAULT FALSE,
             sponsor_id INTEGER REFERENCES sponsors(id) ON DELETE SET NULL,
@@ -318,8 +318,6 @@ app.post('/admin/login', (req, res) => {
 app.get('/admin/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
 app.get('/admin/player_details.html', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'player_details.html')));
 app.get('/admin', (req, res) => res.redirect('/admin/login'));
-
-// --- THIS IS THE FIX: Pass the 'players' object to the router ---
 app.use('/admin/api', checkAdminAuth, adminApiRouter(pool, io, geofenceService, players));
 
 app.use('/sponsor', sponsorPortalRouter(pool, io, players));
