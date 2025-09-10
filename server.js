@@ -12,22 +12,18 @@ const admin = require('firebase-admin');
 const turf = require('@turf/turf');
 const multer = require('multer');
 
-// --- NEW RAZORPAY & CRYPTO REQUIREMENTS ---
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
 
-// --- Require the Game and Service Logic Handlers ---
 const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
 const GeofenceService = require('./geofence_service');
 const { updateQuestProgress } = require('./game_logic/quest_handler');
 
-// --- Route Handlers ---
 const adminApiRouter = require('./routes/admin_api');
 const sponsorPortalRouter = require('./routes/sponsor_portal');
 const questsApiRouter = require('./routes/quests_api');
 
-// --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
   console.error('SERVER ERROR: Unhandled Rejection at:', promise, 'reason:', reason);
 });
@@ -36,7 +32,6 @@ process.on('uncaughtException', (error) => {
   process.exit(1);
 });
 
-// --- App & Server Setup ---
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -53,7 +48,6 @@ const io = new Server(server, {
   }
 });
 
-// --- Firebase Admin SDK Initialization ---
 try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -69,7 +63,6 @@ try {
   console.error('[Firebase Admin] FATAL: Failed to initialize Firebase Admin.', error.message);
 }
 
-// --- NEW RAZORPAY INITIALIZATION ---
 let razorpay;
 if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
   razorpay = new Razorpay({
@@ -81,7 +74,6 @@ if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
   console.warn('[Razorpay] Skipping initialization (RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET not set in env).');
 }
 
-// --- Constants & Database Pool ---
 const PORT = process.env.PORT || 10000;
 const SERVER_TICK_RATE_MS = 500;
 const DISCONNECT_TRAIL_PERSIST_SECONDS = 60;
@@ -96,14 +88,12 @@ const pool = new Pool({
 const geofenceService = new GeofenceService(pool);
 const players = {};
 
-// --- Database Schema Setup ---
 const setupDatabase = async () => {
   const client = await pool.connect();
   try {
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
     console.log('[DB] PostGIS extension is enabled.');
 
-    // --- MODIFIED TERRITORIES TABLE SCHEMA ---
     await client.query(`
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
@@ -126,6 +116,8 @@ const setupDatabase = async () => {
         is_shield_active BOOLEAN DEFAULT FALSE,
         is_carve_mode_active BOOLEAN DEFAULT FALSE,
         is_paid BOOLEAN DEFAULT FALSE,
+        razorpay_subscription_id VARCHAR(100),
+        subscription_status VARCHAR(50),
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -139,10 +131,7 @@ const setupDatabase = async () => {
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS height_cm REAL;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS weight_kg REAL;');
     
-    // Ensure username constraint exists if altering type
-    const usernameConstraint = await client.query(`
-        SELECT 1 FROM pg_constraint WHERE conname = 'territories_username_key'
-    `);
+    const usernameConstraint = await client.query(`SELECT 1 FROM pg_constraint WHERE conname = 'territories_username_key'`);
     if(usernameConstraint.rowCount === 0) {
         await client.query('ALTER TABLE territories ADD CONSTRAINT territories_username_key UNIQUE (username);');
     }
@@ -150,6 +139,8 @@ const setupDatabase = async () => {
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_shield_active BOOLEAN DEFAULT FALSE;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_carve_mode_active BOOLEAN DEFAULT FALSE;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE;');
+    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS razorpay_subscription_id VARCHAR(100);');
+    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50);');
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
@@ -274,6 +265,7 @@ const setupDatabase = async () => {
     await client.query('CREATE INDEX IF NOT EXISTS superpower_chests_location_idx ON superpower_chests USING GIST (location);');
     console.log('[DB] Spatial index for "superpower_chests" is ensured.');
 
+
   } catch (err) {
     console.error('[DB] FATAL ERROR during database setup:', err);
     throw err;
@@ -282,7 +274,6 @@ const setupDatabase = async () => {
   }
 };
 
-// --- Middleware ---
 const authenticate = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -304,11 +295,6 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// =======================================================================
-// --- ADMIN PANEL LOGIC ---
-// =======================================================================
-const adminRouter = express.Router();
-
 const checkAdminAuth = (req, res, next) => {
     if (req.cookies.admin_session === process.env.ADMIN_SECRET_KEY) {
         return next();
@@ -319,310 +305,24 @@ const checkAdminAuth = (req, res, next) => {
     res.redirect('/admin/login');
 };
 
-app.get('/admin/login', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'admin.html'));
-});
-
+app.get('/admin/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 app.post('/admin/login', (req, res) => {
     const { password } = req.body;
     if (password === process.env.ADMIN_SECRET_KEY) {
-        res.cookie('admin_session', password, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            maxAge: 24 * 60 * 60 * 1000,
-            path: '/admin'
-        });
+        res.cookie('admin_session', password, { httpOnly: true, secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000, path: '/admin' });
         res.redirect('/admin/dashboard');
     } else {
         res.status(401).send('Invalid Password. <a href="/admin/login">Try again</a>');
     }
 });
+app.get('/admin/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
+app.get('/admin/player_details.html', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'player_details.html')));
+app.get('/admin', (req, res) => res.redirect('/admin/login'));
+app.use('/admin/api', checkAdminAuth, adminApiRouter(pool, io, geofenceService, players));
 
-app.get('/admin/dashboard', checkAdminAuth, (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
-});
+app.use('/sponsor', sponsorPortalRouter(pool, io, players));
 
-app.use('/admin/api', checkAdminAuth, adminRouter);
-
-app.get('/admin', (req, res) => {
-    res.redirect('/admin/login');
-});
-
-adminRouter.get('/players', async (req, res) => {
-    try {
-        const result = await pool.query('SELECT owner_id, username, area_sqm, is_carve_mode_active FROM territories ORDER BY username');
-        res.json(result.rows);
-    } catch (err) {
-        console.error('[ADMIN] Error fetching players:', err);
-        res.status(500).json({ message: 'Server error' });
-    }
-});
-
-adminRouter.post('/player/:id/:action', async (req, res) => {
-    const { id, action } = req.params;
-    const playerSocket = Object.values(players).find(p => p.googleId === id);
-    try {
-        switch (action) {
-            case 'reset-territory':
-                await pool.query("UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), area_sqm = 0, original_base_point = NULL, is_carve_mode_active = false WHERE owner_id = $1", [id]);
-                if (playerSocket) {
-                    playerSocket.isCarveModeActive = false;
-                    io.to(playerSocket.id).emit('allTerritoriesCleared');
-                }
-                io.emit('batchTerritoryUpdate', [{ ownerId: id, area: 0, geojson: null }]);
-                return res.json({ message: `Territory for player ${id} has been reset.` });
-            case 'give-shield':
-                 await pool.query("UPDATE territories SET has_shield = true WHERE owner_id = $1", [id]);
-                 if (playerSocket) playerSocket.hasShield = true;
-                 return res.json({ message: `Shield given to player ${id}.` });
-            case 'give-infiltrator':
-                if (playerSocket) {
-                    playerSocket.infiltratorCharges = (playerSocket.infiltratorCharges || 0) + 1;
-                    return res.json({ message: `Infiltrator charge given to player ${id}.` });
-                }
-                return res.status(404).json({ message: 'Player is not online to receive charge.' });
-            case 'kick':
-                if (playerSocket) {
-                    io.to(playerSocket.id).disconnect(true);
-                    return res.json({ message: `Player ${id} has been kicked.` });
-                }
-                return res.status(404).json({ message: 'Player is not online.' });
-            default:
-                return res.status(400).json({ message: 'Invalid action.' });
-        }
-    } catch (err) {
-        console.error(`[ADMIN] Error performing action '${action}' on player ${id}:`, err);
-        res.status(500).json({ message: 'Server error' });
-    }
-});
-
-adminRouter.delete('/player/:id/delete', async (req, res) => {
-    const { id } = req.params;
-     try {
-        const playerSocket = Object.values(players).find(p => p.googleId === id);
-        await pool.query('DELETE FROM territories WHERE owner_id = $1', [id]);
-        if (playerSocket) io.to(playerSocket.id).disconnect(true);
-        return res.json({ message: `Player ${id} and all their data have been permanently deleted.` });
-    } catch (err) {
-        console.error(`[ADMIN] Error deleting player ${id}:`, err);
-        res.status(500).json({ message: 'Server error' });
-    }
-});
-
-adminRouter.get('/geofence-zones', async (req, res) => {
-    try {
-        const zones = await geofenceService.getGeofencePolygons();
-        res.json(zones);
-    } catch (err) {
-        console.error('[ADMIN] Error fetching geofence zones:', err);
-        res.status(500).json({ message: 'Server error' });
-    }
-});
-
-adminRouter.post('/geofence-zones/upload', upload.single('kmlFile'), async (req, res) => {
-    try {
-        const { name, zoneType } = req.body;
-        const kmlFile = req.file;
-
-        if (!name || !zoneType || !kmlFile) {
-            return res.status(400).json({ message: 'Name, Zone Type, and KML file are required.' });
-        }
-        const kmlString = kmlFile.buffer.toString('utf8');
-        await geofenceService.addZoneFromKML(kmlString, name, zoneType);
-        const updatedZones = await geofenceService.getGeofencePolygons();
-        io.emit('geofenceUpdate', updatedZones);
-        res.json({ message: 'Geofence zone uploaded successfully!' });
-
-    } catch (err) {
-        console.error('[ADMIN] Error uploading KML:', err);
-        res.status(500).json({ message: err.message || 'Failed to process KML file.' });
-    }
-});
-
-adminRouter.delete('/geofence-zones/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        await geofenceService.deleteZone(id);
-        const updatedZones = await geofenceService.getGeofencePolygons();
-        io.emit('geofenceUpdate', updatedZones);
-        res.json({ message: 'Zone deleted successfully.' });
-    } catch (err) {
-        console.error('[ADMIN] Error deleting zone:', err);
-        res.status(500).json({ message: 'Server error' });
-    }
-});
-
-adminRouter.post('/sponsors', async (req, res) => {
-    const { name, login_id, passcode } = req.body;
-    if (!name || !login_id || !passcode) {
-        return res.status(400).json({ message: 'Name, Login ID, and Passcode are required.' });
-    }
-    try {
-        const salt = await bcrypt.genSalt(10);
-        const passcode_hash = await bcrypt.hash(passcode, salt);
-        await pool.query(
-            'INSERT INTO sponsors (name, login_id, passcode_hash) VALUES ($1, $2, $3)',
-            [name, login_id, passcode_hash]
-        );
-        res.status(201).json({ message: 'Sponsor account created successfully.' });
-    } catch (err) {
-        if (err.code === '23505') { 
-            return res.status(409).json({ message: 'Sponsor Login ID already exists.' });
-        }
-        console.error('[ADMIN] Error creating sponsor:', err);
-        res.status(500).json({ message: 'Server error' });
-    }
-});
-
-adminRouter.get('/quests', async (req, res) => {
-    try {
-        const result = await pool.query(
-            `SELECT q.*, s.name as sponsor_name
-             FROM quests q
-             LEFT JOIN sponsors s ON q.sponsor_id = s.id
-             ORDER BY q.created_at DESC`
-        );
-        res.json(result.rows);
-    } catch (err) {
-        console.error('[ADMIN] Error fetching quests:', err);
-        res.status(500).json({ message: 'Server error' });
-    }
-});
-
-adminRouter.post('/quests', async (req, res) => {
-    const { title, description, type, objective_type, objective_value, is_first_come_first_served, launch_time, expiry_time, sponsor_id, google_form_url } = req.body;
-    if (!title || !description || !type || !objective_type || !objective_value || !expiry_time) {
-        return res.status(400).json({ message: 'Missing required quest fields.' });
-    }
-    try {
-        const newQuest = await pool.query(
-            `INSERT INTO quests (title, description, type, objective_type, objective_value, is_first_come_first_served, launch_time, expiry_time, sponsor_id, google_form_url, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active') RETURNING *`,
-            [title, description, type, objective_type, objective_value, !!is_first_come_first_served, launch_time, expiry_time, sponsor_id, google_form_url]
-        );
-        io.emit('newQuestLaunched', newQuest.rows[0]);
-        res.status(201).json(newQuest.rows[0]);
-    } catch (err) {
-        console.error('[ADMIN] Error creating quest:', err);
-        res.status(500).json({ message: 'Server error while creating quest.' });
-    }
-});
-
-adminRouter.delete('/quests/:id', async (req, res) => {
-    try {
-        await pool.query('DELETE FROM quests WHERE id = $1', [req.params.id]);
-        io.emit('questDeleted', { questId: req.params.id });
-        res.json({ message: 'Quest deleted successfully.' });
-    } catch (err) {
-        console.error('[ADMIN] Error deleting quest:', err);
-        res.status(500).json({ message: 'Server error' });
-    }
-});
-
-adminRouter.put('/quests/:id/extend', async (req, res) => {
-    const { new_expiry_time } = req.body;
-    if (!new_expiry_time) {
-        return res.status(400).json({ message: 'new_expiry_time is required.' });
-    }
-    try {
-        await pool.query('UPDATE quests SET expiry_time = $1 WHERE id = $2', [new_expiry_time, req.params.id]);
-        io.emit('questUpdated', { questId: req.params.id, expiry_time: new_expiry_time });
-        res.json({ message: 'Quest expiry time extended.' });
-    } catch (err) {
-        console.error('[ADMIN] Error extending quest:', err);
-        res.status(500).json({ message: 'Server error' });
-    }
-});
-
-adminRouter.put('/quests/:id/approve', async (req, res) => {
-    const { id: questId } = req.params;
-    try {
-        const result = await pool.query(
-            "UPDATE quests SET status = 'active' WHERE id = $1 AND status = 'pending' RETURNING id, title",
-            [questId]
-        );
-        
-        if (result.rowCount > 0) {
-            io.emit('newQuestLaunched', {
-                id: result.rows[0].id,
-                title: result.rows[0].title
-            });
-            console.log(`[QUESTS] Quest ${questId} approved and launched.`);
-            res.json({ message: 'Quest approved and launched successfully.' });
-        } else {
-            res.status(404).json({ message: 'Quest not found or already approved.' });
-        }
-    } catch (err) {
-        console.error('[ADMIN] Error approving quest:', err);
-        res.status(500).json({ message: 'Server error' });
-    }
-});
-
-adminRouter.put('/quests/:questId/winner/approve', async (req, res) => {
-    const { questId } = req.params;
-    const { entryId } = req.body; 
-
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        
-        const entryRes = await client.query("SELECT user_id FROM quest_entries WHERE id = $1 AND quest_id = $2 AND status = 'winner_selected'", [entryId, questId]);
-        if (entryRes.rowCount === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ message: 'Winning entry not found or not in correct status.' });
-        }
-        const winnerUserId = entryRes.rows[0].user_id;
-
-        await client.query("UPDATE quests SET status = 'completed', winner_user_id = $1 WHERE id = $2", [winnerUserId, questId]);
-        await client.query("UPDATE quest_entries SET status = 'winner_confirmed' WHERE id = $1", [entryId]);
-        await client.query('COMMIT');
-        
-        const winnerSocket = Object.values(players).find(p => p.googleId === winnerUserId);
-        if (winnerSocket) {
-            io.to(winnerSocket.id).emit('questWinner', { message: 'Congratulations! You have won a quest!' });
-        }
-        
-        res.json({ message: `Winner approved for quest ${questId}.`});
-    } catch (err) {
-        await client.query('ROLLBACK');
-        console.error('[ADMIN] Error approving winner:', err);
-        res.status(500).json({ message: 'Server error' });
-    } finally {
-        client.release();
-    }
-});
-
-adminRouter.post('/spawn-chest', async (req, res) => {
-    const { lat, lng } = req.body;
-    if (lat === undefined || lng === undefined) {
-        return res.status(400).json({ message: 'Latitude and Longitude are required.' });
-    }
-    try {
-        const pointWKT = `ST_SetSRID(ST_Point(${lng}, ${lat}), 4326)`;
-        const result = await pool.query(
-            `INSERT INTO superpower_chests (location) VALUES (${pointWKT}) RETURNING id, ST_AsGeoJSON(location) as location`,
-        );
-        const newChest = {
-            id: result.rows[0].id,
-            location: JSON.parse(result.rows[0].location).coordinates.reverse() // [lat, lng]
-        };
-        io.emit('chestSpawned', newChest);
-        res.status(201).json({ message: 'Superpower chest spawned successfully.', chest: newChest });
-    } catch (err) {
-        console.error('[ADMIN] Error spawning chest:', err);
-        res.status(500).json({ message: 'Server error' });
-    }
-});
-
-
-// =======================================================================
-// --- SPONSOR PANEL LOGIC ---
-// =======================================================================
-app.use('/sponsor', sponsorPortalRouter);
-
-// =======================================================================
-// --- MAIN GAME LOGIC (API & SOCKETS) ---
-// =======================================================================
+app.use('/api/quests', questsApiRouter(pool, authenticate));
 app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
 
@@ -662,6 +362,7 @@ app.get('/check-profile', async (req, res) => {
         const query = `
             SELECT
                 t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
+                t.razorpay_subscription_id, t.subscription_status,
                 c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
                 (c.base_location IS NOT NULL) as base_is_set
             FROM territories t
@@ -680,6 +381,8 @@ app.get('/check-profile', async (req, res) => {
                 identityColor: row.identity_color,
                 area_sqm: row.area_sqm || 0,
                 has_shield: row.has_shield,
+                razorpaySubscriptionId: row.razorpay_subscription_id,
+                subscriptionStatus: row.subscription_status,
                 clan_info: null
             };
             if (row.clan_id) {
@@ -763,7 +466,7 @@ app.post('/verify-payment', async (req, res) => {
         const body = `${razorpay_order_id}|${razorpay_payment_id}`;
         const expectedSignature = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET).update(body.toString()).digest('hex');
         if (expectedSignature === razorpay_signature) {
-            await pool.query('UPDATE territories SET is_paid = TRUE WHERE owner_id = $1', [googleId]);
+            await pool.query("UPDATE territories SET is_paid = TRUE, subscription_status = 'active' WHERE owner_id = $1", [googleId]);
             console.log(`[Payment] Verification successful for user ${googleId}. Access granted.`);
             res.status(200).json({ success: true, message: 'Payment verified successfully.' });
         } else {
@@ -773,6 +476,44 @@ app.post('/verify-payment', async (req, res) => {
     } catch (err) {
         console.error('[Razorpay] Error verifying payment:', err);
         res.status(500).json({ error: 'Server error while verifying payment.' });
+    }
+});
+
+app.get('/subscription/status', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query('SELECT razorpay_subscription_id, subscription_status FROM territories WHERE owner_id = $1', [req.user.googleId]);
+        if (result.rowCount === 0 || !result.rows[0].razorpay_subscription_id) {
+            return res.status(404).json({ message: 'No active subscription found.' });
+        }
+        
+        const subscription = await razorpay.subscriptions.fetch(result.rows[0].razorpay_subscription_id);
+        res.json({
+            status: subscription.status,
+            current_start: new Date(subscription.current_start * 1000),
+            current_end: new Date(subscription.current_end * 1000),
+            charge_at: new Date(subscription.charge_at * 1000),
+        });
+    } catch (err) {
+        console.error('[Razorpay] Error fetching subscription status:', err);
+        res.status(500).json({ error: 'Server error while fetching status.' });
+    }
+});
+
+app.post('/subscription/cancel', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query('SELECT razorpay_subscription_id FROM territories WHERE owner_id = $1', [req.user.googleId]);
+        if (result.rowCount === 0 || !result.rows[0].razorpay_subscription_id) {
+            return res.status(404).json({ message: 'No active subscription found.' });
+        }
+        
+        await razorpay.subscriptions.cancel(result.rows[0].razorpay_subscription_id, { cancel_at_cycle_end: false });
+        
+        await pool.query("UPDATE territories SET subscription_status = 'cancelled' WHERE owner_id = $1", [req.user.googleId]);
+
+        res.json({ success: true, message: 'Your subscription has been cancelled.' });
+    } catch (err) {
+        console.error('[Razorpay] Error cancelling subscription:', err);
+        res.status(500).json({ error: 'Server error while cancelling.' });
     }
 });
 
@@ -809,39 +550,6 @@ app.get('/leaderboard/clans', async (req, res) => {
     } catch (err) {
         console.error('[API] Error fetching clan leaderboard:', err);
         res.status(500).json({ error: 'Failed to fetch clan leaderboard.' });
-    }
-});
-
-app.get('/api/quests/active', authenticate, async (req, res) => {
-    try {
-        const result = await pool.query(
-            `SELECT q.id, q.title, q.description, q.type, q.google_form_url, s.name as sponsor_name
-             FROM quests q
-             LEFT JOIN sponsors s ON q.sponsor_id = s.id
-             WHERE q.status = 'active'
-             ORDER BY q.created_at DESC`
-        );
-        res.json(result.rows);
-    } catch (err) {
-        console.error('[API] Error fetching active quests:', err);
-        res.status(500).json({ error: 'Failed to fetch active quests.' });
-    }
-});
-
-app.post('/api/quests/:id/register', authenticate, async (req, res) => {
-    const { id: questId } = req.params;
-    const { googleId: userId } = req.user;
-
-    try {
-        await pool.query(
-            `INSERT INTO quest_entries (quest_id, user_id) VALUES ($1, $2)
-             ON CONFLICT (quest_id, user_id) DO NOTHING`,
-            [questId, userId]
-        );
-        res.status(200).json({ message: 'Successfully registered for quest.' });
-    } catch (err) {
-        console.error('[API] Error registering for quest:', err);
-        res.status(500).json({ message: 'Server error while registering for quest.' });
     }
 });
 
@@ -1116,36 +824,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     }
 });
 
-
 // --- Socket.IO Logic ---
-async function broadcastAllPlayers() {
-    const playerIds = Object.keys(players);
-    if (playerIds.length === 0) return;
-    const googleIds = Object.values(players).map(p => p.googleId).filter(id => id);
-    if (googleIds.length === 0) return;
-    try {
-        const profileQuery = await pool.query('SELECT owner_id, username, profile_image_url, identity_color FROM territories WHERE owner_id = ANY($1::varchar[])', [googleIds]);
-        const profiles = profileQuery.rows.reduce((acc, row) => {
-            acc[row.owner_id] = { username: row.username, imageUrl: row.profile_image_url, identityColor: row.identity_color };
-            return acc;
-        }, {});
-        const allPlayersData = Object.values(players).map(p => {
-            const profile = profiles[p.googleId] || {};
-            return {
-                id: p.id,
-                ownerId: p.googleId,
-                name: profile.username || p.name,
-                imageUrl: profile.imageUrl,
-                identityColor: profile.identityColor,
-                lastKnownPosition: p.lastKnownPosition
-            };
-        });
-        io.emit('allPlayersUpdate', allPlayersData);
-    } catch(e) {
-        console.error("[Broadcast] Error fetching profiles for broadcast:", e);
-    }
-}
-
 io.on('connection', (socket) => {
   console.log(`[SERVER] User connected: ${socket.id}`);
 
@@ -1188,9 +867,11 @@ io.on('connection', (socket) => {
             lastStandCharges: 1,
             infiltratorCharges: 1,
             ghostRunnerCharges: 1,
+            trailDefenseCharges: 1,
             isGhostRunnerActive: false,
             isLastStandActive: false,
             isInfiltratorActive: false,
+            isTrailDefenseActive: false,
             isCarveModeActive: isCarveModeActive,
         };
 
@@ -1317,8 +998,23 @@ io.on('connection', (socket) => {
                     const victimTrailGeom = `ST_SetSRID(ST_GeomFromText('${victimTrailWKT}'), 4326)`;
                     const res = await pool.query(`SELECT ST_Intersects(${attackerSegmentGeom}, ${victimTrailGeom}) as intersects;`);
                     if (res.rows[0].intersects) {
+
+                        if (victim.isTrailDefenseActive) {
+                            console.log(`[GAME] TRAIL DEFLECTED! Attacker ${player.name} hit Victim ${victim.name}'s defense.`);
+                            io.to(socket.id).emit('runTerminated', { reason: `Your run was deflected by an opponent's Trail Defense!` });
+                            
+                            player.isDrawing = false;
+                            player.activeTrail = [];
+                            io.emit('trailCleared', { id: socket.id });
+
+                            return; 
+                        }
+                        
+                        console.log(`[GAME] TRAIL CUT! Attacker ${player.name} cut Victim ${victim.name}`);
                         io.to(victimId).emit('runTerminated', { reason: `Your trail was cut by ${player.name}!` });
+                        
                         await updateQuestProgress(pool, io, player.googleId, 'trail_cut', 1);
+
                         victim.isDrawing = false;
                         victim.activeTrail = [];
                         io.emit('trailCleared', { id: victimId });
@@ -1352,7 +1048,18 @@ io.on('connection', (socket) => {
     player.activeTrail = [];
     player.isGhostRunnerActive = false;
     player.isLastStandActive = false;
+    player.isTrailDefenseActive = false;
     io.emit('trailCleared', { id: socket.id });
+  });
+
+  socket.on('activateTrailDefense', () => {
+    const player = players[socket.id];
+    if (player && player.trailDefenseCharges > 0) {
+        player.trailDefenseCharges--;
+        player.isTrailDefenseActive = true;
+        console.log(`[GAME] ${player.name} activated TRAIL DEFENSE. Charges left: ${player.trailDefenseCharges}`);
+        socket.emit('superpowerAcknowledged', { power: 'trailDefense', chargesLeft: player.trailDefenseCharges });
+    }
   });
 
   socket.on('activateGhostRunner', () => {
@@ -1458,8 +1165,6 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- Server Start ---
-setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
 const main = async () => {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`[SERVER] Listening on 0.0.0.0:${PORT}`);
@@ -1470,4 +1175,5 @@ const main = async () => {
   });
 };
 
+setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
 main();
