@@ -318,6 +318,8 @@ app.post('/admin/login', (req, res) => {
 app.get('/admin/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
 app.get('/admin/player_details.html', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'player_details.html')));
 app.get('/admin', (req, res) => res.redirect('/admin/login'));
+
+// --- THIS IS THE FIX: Pass the 'players' object to the router ---
 app.use('/admin/api', checkAdminAuth, adminApiRouter(pool, io, geofenceService, players));
 
 app.use('/sponsor', sponsorPortalRouter(pool, io, players));
