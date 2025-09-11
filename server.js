@@ -20,8 +20,6 @@ const handleClanClaim = require('./game_logic/clan_handler');
 const GeofenceService = require('./geofence_service');
 const { updateQuestProgress } = require('./game_logic/quest_handler');
 
-// --- THIS IS THE KEY CHANGE ---
-// Ensure you are importing the modular router
 const adminApiRouter = require('./routes/admin_api');
 const sponsorPortalRouter = require('./routes/sponsor_portal');
 const questsApiRouter = require('./routes/quests_api');
@@ -392,11 +390,10 @@ app.post('/admin/login', (req, res) => {
 app.get('/admin/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
 app.get('/admin/player_details.html', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'player_details.html')));
 app.get('/admin', (req, res) => res.redirect('/admin/login'));
-
-// --- THIS IS THE KEY CHANGE: Connect the modular admin router ---
 app.use('/admin/api', checkAdminAuth, adminApiRouter(pool, io, geofenceService, players));
 
 app.use('/sponsor', sponsorPortalRouter(pool, io, players));
+
 app.use('/api/quests', questsApiRouter(pool, authenticate));
 app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
