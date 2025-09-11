@@ -390,6 +390,7 @@ app.post('/admin/login', (req, res) => {
 app.get('/admin/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
 app.get('/admin/player_details.html', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'player_details.html')));
 app.get('/admin', (req, res) => res.redirect('/admin/login'));
+
 app.use('/admin/api', checkAdminAuth, adminApiRouter(pool, io, geofenceService, players));
 
 app.use('/sponsor', sponsorPortalRouter(pool, io, players));
@@ -947,6 +948,82 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
         await client.query('ROLLBACK');
         console.error('[API] Error managing join request:', err);
         res.status(500).json({ message: 'Server error while managing request.' });
+    } finally {
+        client.release();
+    }
+});
+
+// --- NEW CLIENT-FACING SHOP & PRIZE ROUTES ---
+
+app.get('/shop/items', authenticate, async (req, res) => {
+    const { googleId } = req.user;
+    try {
+        const userRes = await pool.query('SELECT currency FROM territories WHERE owner_id = $1', [googleId]);
+        const userCurrency = userRes.rowCount > 0 ? userRes.rows[0].currency : 0;
+        
+        const itemsRes = await pool.query("SELECT item_id as id, name, description, price FROM shop_items WHERE item_type = 'superpower' ORDER BY price ASC");
+
+        res.status(200).json({
+            userCurrency,
+            superpowers: itemsRes.rows
+        });
+    } catch (err) {
+        console.error('[API] Error fetching shop items for client:', err);
+        res.status(500).json({ message: 'Server error while fetching shop items.' });
+    }
+});
+
+app.post('/shop/purchase', authenticate, async (req, res) => {
+    const { googleId } = req.user;
+    const { itemId } = req.body;
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        const itemRes = await client.query('SELECT price FROM shop_items WHERE item_id = $1', [itemId]);
+        if (itemRes.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ message: 'Item not found.' });
+        }
+        const itemPrice = itemRes.rows[0].price;
+
+        const userRes = await client.query('SELECT currency, superpowers FROM territories WHERE owner_id = $1 FOR UPDATE', [googleId]);
+        if (userRes.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ message: 'Player not found.' });
+        }
+
+        const player = userRes.rows[0];
+        if (player.currency < itemPrice) {
+            await client.query('ROLLBACK');
+            return res.status(402).json({ message: 'Not enough currency.' });
+        }
+        
+        const newCurrency = player.currency - itemPrice;
+        const currentSuperpowers = player.superpowers || {};
+        currentSuperpowers[itemId] = (currentSuperpowers[itemId] || 0) + 1;
+
+        await client.query(
+            'UPDATE territories SET currency = $1, superpowers = $2 WHERE owner_id = $3',
+            [newCurrency, currentSuperpowers, googleId]
+        );
+
+        await client.query('COMMIT');
+
+        const playerSocketId = Object.keys(players).find(id => players[id].googleId === googleId);
+        if (playerSocketId) {
+            const chargeKey = `${itemId}Charges`;
+            if (players[playerSocketId].hasOwnProperty(chargeKey)) {
+                players[playerSocketId][chargeKey]++;
+            }
+        }
+
+        res.status(200).json({ success: true, newCurrencyTotal: newCurrency });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('[API] Error during client item purchase:', err);
+        res.status(500).json({ message: 'Server error during purchase.' });
     } finally {
         client.release();
     }
