@@ -120,8 +120,7 @@ const setupDatabase = async () => {
         subscription_status VARCHAR(50),
         total_distance_km REAL DEFAULT 0,
         total_duration_minutes INTEGER DEFAULT 0,
-        currency INTEGER DEFAULT 1000,
-        superpowers JSONB DEFAULT '{}',
+        superpowers JSONB DEFAULT '{"owned": []}',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -147,8 +146,18 @@ const setupDatabase = async () => {
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50);');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_distance_km REAL DEFAULT 0;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_duration_minutes INTEGER DEFAULT 0;');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS currency INTEGER DEFAULT 1000;');
-    await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{}';`);
+    
+    // --- SCHEMA CHANGE FOR REAL-MONEY SHOP ---
+    // Drop the old currency column if it exists
+    const hasCurrencyColumn = await client.query(`SELECT 1 FROM information_schema.columns WHERE table_name='territories' AND column_name='currency'`);
+    if (hasCurrencyColumn.rowCount > 0) {
+        await client.query('ALTER TABLE territories DROP COLUMN currency;');
+        console.log('[DB] Dropped old "currency" column.');
+    }
+    // Ensure superpowers column is JSONB and defaults to an object with an owned array
+    await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{"owned": []}';`);
+    await client.query(`ALTER TABLE territories ALTER COLUMN superpowers SET DEFAULT '{"owned": []}';`);
+
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
@@ -390,7 +399,6 @@ app.post('/admin/login', (req, res) => {
 app.get('/admin/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
 app.get('/admin/player_details.html', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'player_details.html')));
 app.get('/admin', (req, res) => res.redirect('/admin/login'));
-
 app.use('/admin/api', checkAdminAuth, adminApiRouter(pool, io, geofenceService, players));
 
 app.use('/sponsor', sponsorPortalRouter(pool, io, players));
@@ -490,7 +498,7 @@ app.get('/check-profile', async (req, res) => {
         const query = `
             SELECT
                 t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
-                t.razorpay_subscription_id, t.subscription_status, t.currency,
+                t.razorpay_subscription_id, t.subscription_status,
                 c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
                 (c.base_location IS NOT NULL) as base_is_set
             FROM territories t
@@ -511,7 +519,6 @@ app.get('/check-profile', async (req, res) => {
                 has_shield: row.has_shield,
                 razorpaySubscriptionId: row.razorpay_subscription_id,
                 subscriptionStatus: row.subscription_status,
-                currency: row.currency,
                 clan_info: null
             };
             if (row.clan_id) {
@@ -571,40 +578,100 @@ app.post('/setup-profile', authenticate, async (req, res) => {
     }
 });
 
-app.post('/create-order', authenticate, async (req, res) => {
-    if (!razorpay) return res.status(500).json({ error: 'Razorpay is not configured on the server.' });
+// --- THIS IS THE OLD /create-order. IT'S NOW REPLACED BY THE NEW ONE BELOW ---
+// app.post('/create-order', authenticate, async (req, res) => { ... });
+  
+// --- NEW REAL-MONEY SHOP ENDPOINTS ---
+app.post('/shop/create-order', authenticate, async (req, res) => {
+    if (!razorpay) return res.status(500).json({ message: 'Payment gateway is not configured.' });
+    
+    const { itemId } = req.body;
+    const { googleId } = req.user;
+
+    if (!itemId) return res.status(400).json({ message: 'Item ID is required.' });
+
     try {
-      const amount = 5900; 
-      const currency = 'INR';
-      const options = { amount, currency, receipt: `receipt_order_${new Date().getTime()}` };
-      const order = await razorpay.orders.create(options);
-      if (!order) return res.status(500).send('Error creating Razorpay order.');
-      res.json({ order_id: order.id, amount: order.amount });
+        // 1. Check if user already owns this single-use superpower
+        const userRes = await pool.query("SELECT superpowers FROM territories WHERE owner_id = $1", [googleId]);
+        if (userRes.rowCount > 0) {
+            const ownedPowers = userRes.rows[0].superpowers?.owned || [];
+            if (ownedPowers.includes(itemId)) {
+                return res.status(409).json({ message: 'You already own this superpower.' });
+            }
+        }
+
+        // 2. Create Razorpay order for ₹29 (2900 paise)
+        const amount = 2900;
+        const currency = 'INR';
+        const options = { 
+            amount, 
+            currency, 
+            receipt: `receipt_user_${googleId}_item_${itemId}`,
+            notes: {
+                purchaseType: 'superpower',
+                itemId: itemId,
+                googleId: googleId
+            }
+        };
+
+        const order = await razorpay.orders.create(options);
+        if (!order) return res.status(500).json({ message: 'Error creating Razorpay order.' });
+        
+        res.json({ orderId: order.id, amount: order.amount });
+
     } catch (err) {
-      console.error('[Razorpay] Error creating order:', err);
-      res.status(500).json({ error: 'Server error while creating order.' });
+        console.error('[Razorpay] Error creating superpower order:', err);
+        res.status(500).json({ message: 'Server error while creating order.' });
     }
 });
-  
+
 app.post('/verify-payment', async (req, res) => {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, googleId } = req.body;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, googleId, purchaseType, itemId } = req.body;
+
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !googleId) {
         return res.status(400).json({ error: 'Missing required payment verification data.' });
     }
+    
+    const client = await pool.connect();
     try {
         const body = `${razorpay_order_id}|${razorpay_payment_id}`;
         const expectedSignature = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET).update(body.toString()).digest('hex');
-        if (expectedSignature === razorpay_signature) {
-            await pool.query("UPDATE territories SET is_paid = TRUE, subscription_status = 'active' WHERE owner_id = $1", [googleId]);
-            console.log(`[Payment] Verification successful for user ${googleId}. Access granted.`);
-            res.status(200).json({ success: true, message: 'Payment verified successfully.' });
-        } else {
+
+        if (expectedSignature !== razorpay_signature) {
             console.warn(`[Payment] Verification FAILED for user ${googleId}. Mismatched signatures.`);
-            res.status(400).json({ success: false, message: 'Payment verification failed.' });
+            return res.status(400).json({ success: false, message: 'Payment verification failed.' });
         }
+        
+        await client.query('BEGIN');
+
+        if (purchaseType === 'superpower' && itemId) {
+            // Logic for single superpower purchase
+            const userRes = await client.query("SELECT superpowers FROM territories WHERE owner_id = $1 FOR UPDATE", [googleId]);
+            const currentSuperpowers = userRes.rows[0]?.superpowers || { owned: [] };
+            const ownedList = currentSuperpowers.owned || [];
+            
+            if (!ownedList.includes(itemId)) {
+                ownedList.push(itemId);
+            }
+            
+            await client.query("UPDATE territories SET superpowers = $1 WHERE owner_id = $2", [JSON.stringify({ owned: ownedList }), googleId]);
+            console.log(`[Payment] Superpower '${itemId}' granted to user ${googleId}.`);
+
+        } else {
+            // Original logic for pro subscription
+            await client.query("UPDATE territories SET is_paid = TRUE, subscription_status = 'active' WHERE owner_id = $1", [googleId]);
+            console.log(`[Payment] Pro Subscription verified for user ${googleId}.`);
+        }
+        
+        await client.query('COMMIT');
+        res.status(200).json({ success: true, message: 'Payment verified successfully.' });
+
     } catch (err) {
+        await client.query('ROLLBACK');
         console.error('[Razorpay] Error verifying payment:', err);
         res.status(500).json({ error: 'Server error while verifying payment.' });
+    } finally {
+        client.release();
     }
 });
 
@@ -953,82 +1020,6 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     }
 });
 
-// --- NEW CLIENT-FACING SHOP & PRIZE ROUTES ---
-
-app.get('/shop/items', authenticate, async (req, res) => {
-    const { googleId } = req.user;
-    try {
-        const userRes = await pool.query('SELECT currency FROM territories WHERE owner_id = $1', [googleId]);
-        const userCurrency = userRes.rowCount > 0 ? userRes.rows[0].currency : 0;
-        
-        const itemsRes = await pool.query("SELECT item_id as id, name, description, price FROM shop_items WHERE item_type = 'superpower' ORDER BY price ASC");
-
-        res.status(200).json({
-            userCurrency,
-            superpowers: itemsRes.rows
-        });
-    } catch (err) {
-        console.error('[API] Error fetching shop items for client:', err);
-        res.status(500).json({ message: 'Server error while fetching shop items.' });
-    }
-});
-
-app.post('/shop/purchase', authenticate, async (req, res) => {
-    const { googleId } = req.user;
-    const { itemId } = req.body;
-
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-
-        const itemRes = await client.query('SELECT price FROM shop_items WHERE item_id = $1', [itemId]);
-        if (itemRes.rowCount === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ message: 'Item not found.' });
-        }
-        const itemPrice = itemRes.rows[0].price;
-
-        const userRes = await client.query('SELECT currency, superpowers FROM territories WHERE owner_id = $1 FOR UPDATE', [googleId]);
-        if (userRes.rowCount === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ message: 'Player not found.' });
-        }
-
-        const player = userRes.rows[0];
-        if (player.currency < itemPrice) {
-            await client.query('ROLLBACK');
-            return res.status(402).json({ message: 'Not enough currency.' });
-        }
-        
-        const newCurrency = player.currency - itemPrice;
-        const currentSuperpowers = player.superpowers || {};
-        currentSuperpowers[itemId] = (currentSuperpowers[itemId] || 0) + 1;
-
-        await client.query(
-            'UPDATE territories SET currency = $1, superpowers = $2 WHERE owner_id = $3',
-            [newCurrency, currentSuperpowers, googleId]
-        );
-
-        await client.query('COMMIT');
-
-        const playerSocketId = Object.keys(players).find(id => players[id].googleId === googleId);
-        if (playerSocketId) {
-            const chargeKey = `${itemId}Charges`;
-            if (players[playerSocketId].hasOwnProperty(chargeKey)) {
-                players[playerSocketId][chargeKey]++;
-            }
-        }
-
-        res.status(200).json({ success: true, newCurrencyTotal: newCurrency });
-    } catch (err) {
-        await client.query('ROLLBACK');
-        console.error('[API] Error during client item purchase:', err);
-        res.status(500).json({ message: 'Server error during purchase.' });
-    } finally {
-        client.release();
-    }
-});
-
 async function broadcastAllPlayers() {
     const playerIds = Object.keys(players);
     if (playerIds.length === 0) return;
@@ -1083,7 +1074,7 @@ io.on('connection', (socket) => {
         const hasShield = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_shield : false;
         const isCarveModeActive = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].is_carve_mode_active : false;
         const playerHasRecord = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_record : false;
-        const superpowers = playerProfileRes.rows.length > 0 ? (playerProfileRes.rows[0].superpowers || {}) : {};
+        const superpowers = playerProfileRes.rows.length > 0 ? (playerProfileRes.rows[0].superpowers || { owned: [] }) : { owned: [] };
 
         players[socket.id] = {
             id: socket.id,
@@ -1097,10 +1088,10 @@ io.on('connection', (socket) => {
             activeTrail: [],
             hasShield: hasShield,
             disconnectTimer: null,
-            lastStandCharges: superpowers.lastStand || 0,
-            infiltratorCharges: superpowers.infiltrator || 0,
-            ghostRunnerCharges: superpowers.ghostRunner || 0,
-            trailDefenseCharges: superpowers.trailDefense || 0,
+            lastStandCharges: superpowers.owned.includes('lastStand') ? 1 : 0,
+            infiltratorCharges: superpowers.owned.includes('infiltrator') ? 1 : 0,
+            ghostRunnerCharges: superpowers.owned.includes('ghostRunner') ? 1 : 0,
+            trailDefenseCharges: superpowers.owned.includes('trailDefense') ? 1 : 0,
             isGhostRunnerActive: false,
             isLastStandActive: false,
             isInfiltratorActive: false,
@@ -1262,9 +1253,19 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('startDrawingTrail', () => {
+  socket.on('startDrawingTrail', async () => {
     const player = players[socket.id];
     if (!player || player.gameMode === 'spectator' || player.isDrawing) return;
+    
+    // Consume a charge when the power is used at the start of a run
+    if (player.isGhostRunnerActive && player.ghostRunnerCharges > 0) {
+        player.ghostRunnerCharges--;
+        const newSuperpowers = (await pool.query('SELECT superpowers FROM territories WHERE owner_id = $1', [player.googleId])).rows[0].superpowers;
+        newSuperpowers.owned = newSuperpowers.owned.filter(p => p !== 'ghostRunner');
+        await pool.query('UPDATE territories SET superpowers = $1 WHERE owner_id = $2', [newSuperpowers, player.googleId]);
+    }
+    // Similarly for other powers that are activated pre-run
+
     player.isDrawing = true;
     player.activeTrail = [];
     console.log(`[Socket] Player ${player.name} (${socket.id}) started drawing trail. Ghost Runner: ${player.isGhostRunnerActive}`);
@@ -1285,33 +1286,37 @@ io.on('connection', (socket) => {
     io.emit('trailCleared', { id: socket.id });
   });
 
-  socket.on('activateTrailDefense', () => {
+  socket.on('activateTrailDefense', async () => {
     const player = players[socket.id];
     if (player && player.trailDefenseCharges > 0) {
         player.trailDefenseCharges--;
         player.isTrailDefenseActive = true;
-        console.log(`[GAME] ${player.name} activated TRAIL DEFENSE. Charges left: ${player.trailDefenseCharges}`);
-        socket.emit('superpowerAcknowledged', { power: 'trailDefense', chargesLeft: player.trailDefenseCharges });
+        
+        const res = await pool.query('SELECT superpowers FROM territories WHERE owner_id = $1', [player.googleId]);
+        const newSuperpowers = res.rows[0].superpowers || { owned: [] };
+        newSuperpowers.owned = newSuperpowers.owned.filter(p => p !== 'trailDefense');
+        await pool.query('UPDATE territories SET superpowers = $1 WHERE owner_id = $2', [newSuperpowers, player.googleId]);
+        
+        console.log(`[GAME] ${player.name} activated TRAIL DEFENSE.`);
+        socket.emit('superpowerAcknowledged', { power: 'trailDefense' });
     }
   });
 
   socket.on('activateGhostRunner', () => {
       const player = players[socket.id];
       if (player && player.ghostRunnerCharges > 0) {
-          player.ghostRunnerCharges--;
           player.isGhostRunnerActive = true;
-          console.log(`[GAME] ${player.name} activated GHOST RUNNER. Charges left: ${player.ghostRunnerCharges}`);
-          socket.emit('superpowerAcknowledged', { power: 'ghostRunner', chargesLeft: player.ghostRunnerCharges });
+          console.log(`[GAME] ${player.name} queued GHOST RUNNER for next run.`);
+          socket.emit('superpowerAcknowledged', { power: 'ghostRunner' });
       }
   });
 
   socket.on('activateInfiltrator', () => {
       const player = players[socket.id];
       if (player && player.infiltratorCharges > 0) {
-          player.infiltratorCharges--;
           player.isInfiltratorActive = true;
-          console.log(`[GAME] ${player.name} activated INFILTRATOR. Charges left: ${player.infiltratorCharges}`);
-          socket.emit('superpowerAcknowledged', { power: 'infiltrator', chargesLeft: player.infiltratorCharges });
+          console.log(`[GAME] ${player.name} activated INFILTRATOR.`);
+          socket.emit('superpowerAcknowledged', { power: 'infiltrator' });
       }
   });
 
@@ -1321,9 +1326,13 @@ io.on('connection', (socket) => {
           player.lastStandCharges--;
           player.isLastStandActive = true;
           try {
-              await pool.query('UPDATE territories SET is_shield_active = true WHERE owner_id = $1', [player.googleId]);
-              console.log(`[GAME] ${player.name} activated LAST STAND. Charges left: ${player.lastStandCharges}`);
-              socket.emit('superpowerAcknowledged', { power: 'lastStand', chargesLeft: player.lastStandCharges });
+              const res = await pool.query('SELECT superpowers FROM territories WHERE owner_id = $1', [player.googleId]);
+              const newSuperpowers = res.rows[0].superpowers || { owned: [] };
+              newSuperpowers.owned = newSuperpowers.owned.filter(p => p !== 'lastStand');
+              await pool.query('UPDATE territories SET is_shield_active = true, superpowers = $1 WHERE owner_id = $2', [newSuperpowers, player.googleId]);
+              
+              console.log(`[GAME] ${player.name} activated LAST STAND.`);
+              socket.emit('superpowerAcknowledged', { power: 'lastStand' });
           } catch(e) {
               console.error(`[DB] Error activating shield for ${player.googleId}`, e);
               player.lastStandCharges++;
