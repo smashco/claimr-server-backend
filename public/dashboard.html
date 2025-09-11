@@ -16,6 +16,7 @@
         .nav-tabs .nav-link.active { background-color: #495057; border-color: #495057; color: #fff; }
         .form-check-input:checked { background-color: #D4FF00; border-color: #D4FF00; }
         .leaflet-crosshair-cursor { cursor: crosshair !important; }
+        .list-group-item { background-color: #212529; border-color: #495057; }
     </style>
 </head>
 <body>
@@ -40,6 +41,10 @@
             <li class="nav-item" role="presentation">
                 <button class="nav-link" id="quests-tab" data-bs-toggle="tab" data-bs-target="#quests-tab-pane" type="button" role="tab">Quest Management</button>
             </li>
+            <!-- NEW TAB FOR SHOP -->
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="shop-tab" data-bs-toggle="tab" data-bs-target="#shop-tab-pane" type="button" role="tab">Shop & Prizes</button>
+            </li>
         </ul>
 
         <div class="tab-content" id="myTabContent">
@@ -52,6 +57,7 @@
                                     <th>Status</th>
                                     <th>Username</th>
                                     <th>Territory (km²)</th>
+                                    <th>Currency (G)</th>
                                     <th>Actions</th>
                                 </tr>
                             </thead>
@@ -171,6 +177,64 @@
                     </div>
                 </div>
             </div>
+
+            <!-- NEW SHOP & PRIZES TAB PANE -->
+            <div class="tab-pane fade p-3" id="shop-tab-pane" role="tabpanel">
+                <div class="row">
+                    <div class="col-lg-5">
+                        <div class="card">
+                            <div class="card-body">
+                                <h5 class="card-title">Superpower Prices</h5>
+                                <p class="card-text text-muted small">Update the Gold price for each superpower.</p>
+                                <div id="superpower-prices-list"></div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <div class="card-body">
+                                <h5 class="card-title">Mega Prize Winners</h5>
+                                <ul class="list-group" id="mega-prize-winners-list">
+                                    <li class="list-group-item">No winners yet.</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-7">
+                        <div class="card">
+                            <div class="card-body">
+                                <h5 class="card-title">Mega Prize Management</h5>
+                                <div class="mb-3">
+                                    <h6>Voting Control</h6>
+                                    <div class="d-flex align-items-center">
+                                        <span>Status: </span>
+                                        <span id="voting-status" class="badge bg-secondary ms-2">UNKNOWN</span>
+                                        <button class="btn btn-sm btn-success ms-auto" id="start-voting-btn">Start Voting</button>
+                                        <button class="btn btn-sm btn-warning ms-2" id="stop-voting-btn">Stop Voting</button>
+                                    </div>
+                                </div>
+                                <hr>
+                                <h6>Add Prize Candidate</h6>
+                                <form id="add-prize-form">
+                                    <div class="row g-2">
+                                        <div class="col-md">
+                                            <input type="text" class="form-control" id="prize-name" placeholder="Prize Name (e.g., PlayStation 5)" required>
+                                        </div>
+                                        <div class="col-md">
+                                            <input type="text" class="form-control" id="prize-brand" placeholder="Brand (e.g., Sony)">
+                                        </div>
+                                        <div class="col-auto">
+                                            <button type="submit" class="btn btn-primary">Add</button>
+                                        </div>
+                                    </div>
+                                </form>
+                                <hr>
+                                <h6>Active Candidates & Vote Counts</h6>
+                                <div id="prize-candidates-list" class="list-group mb-3"></div>
+                                <button class="btn btn-danger w-100" id="declare-winner-btn" disabled>Declare Winner & Reset</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -219,6 +283,8 @@
             fetchGeofenceZones();
             fetchQuests();
             fetchChests();
+            fetchShopData();
+            fetchMegaPrizeData();
         }
 
         async function fetchPlayers() {
@@ -242,6 +308,7 @@
                     <td><span class="badge ${player.isOnline ? 'bg-success' : 'bg-secondary'}">${player.isOnline ? 'Online' : 'Offline'}</span></td>
                     <td>${player.username || 'N/A'}</td>
                     <td>${areaKm2}</td>
+                    <td>${player.currency}</td>
                     <td>
                         <a href="/admin/player_details.html?id=${player.owner_id}" class="btn btn-sm btn-primary">Details</a>
                         <button class="btn btn-sm btn-warning" onclick="performAction('${player.owner_id}', 'reset-territory', '${player.username}')">Reset</button>
@@ -358,7 +425,6 @@
                     'expired': 'bg-secondary'
                 }[quest.status] || 'bg-light text-dark';
                 
-                // --- THIS IS THE FIX ---
                 const objectiveText = quest.objective_type ? `${quest.objective_type.replace('_', ' ')}: ${quest.objective_value}` : 'N/A';
                 
                 row.innerHTML = `
@@ -503,6 +569,158 @@
             });
         }
         
+        // --- NEW SHOP & PRIZE FUNCTIONS ---
+
+        async function fetchShopData() {
+            try {
+                const items = await apiFetch('/admin/api/shop/items');
+                renderSuperpowerPrices(items);
+            } catch (error) {
+                console.error('Error fetching shop items:', error);
+                document.getElementById('superpower-prices-list').innerHTML = `<div class="text-danger">${error.message}</div>`;
+            }
+        }
+
+        function renderSuperpowerPrices(items) {
+            const container = document.getElementById('superpower-prices-list');
+            container.innerHTML = '';
+            items.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'input-group mb-2';
+                div.innerHTML = `
+                    <span class="input-group-text" style="width: 120px;">${item.name}</span>
+                    <input type="number" class="form-control" value="${item.price}" id="price-${item.item_id}">
+                    <button class="btn btn-outline-secondary" type="button" onclick="updatePrice('${item.item_id}')">Update</button>
+                `;
+                container.appendChild(div);
+            });
+        }
+
+        async function updatePrice(itemId) {
+            const price = document.getElementById(`price-${itemId}`).value;
+            try {
+                const result = await apiFetch('/admin/api/shop/items', {
+                    method: 'PUT',
+                    body: { itemId, price: parseInt(price, 10) }
+                });
+                alert(result.message);
+                fetchShopData();
+            } catch(error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        async function fetchMegaPrizeData() {
+            try {
+                const data = await apiFetch('/admin/api/mega-prize');
+                renderMegaPrize(data);
+            } catch (error) {
+                console.error('Error fetching mega prize data:', error);
+            }
+        }
+        
+        function renderMegaPrize(data) {
+            // Status
+            const statusBadge = document.getElementById('voting-status');
+            statusBadge.textContent = data.voting_active ? 'ACTIVE' : 'INACTIVE';
+            statusBadge.className = `badge ms-2 ${data.voting_active ? 'bg-success' : 'bg-secondary'}`;
+            
+            // Buttons
+            document.getElementById('start-voting-btn').disabled = data.voting_active;
+            document.getElementById('stop-voting-btn').disabled = !data.voting_active;
+            document.getElementById('declare-winner-btn').disabled = data.voting_active;
+
+            // Candidates
+            const candidatesList = document.getElementById('prize-candidates-list');
+            candidatesList.innerHTML = '';
+            if (data.candidates.length === 0) {
+                candidatesList.innerHTML = '<div class="list-group-item">No active prize candidates.</div>';
+            }
+            data.candidates.forEach(c => {
+                const item = document.createElement('div');
+                item.className = 'list-group-item d-flex justify-content-between align-items-center';
+                item.innerHTML = `
+                    <span>${c.name} (${c.brand || 'N/A'}) - <strong>${c.vote_count} votes</strong></span>
+                    <button class="btn btn-sm btn-outline-danger" onclick="deletePrizeCandidate(${c.id})">Delete</button>
+                `;
+                candidatesList.appendChild(item);
+            });
+
+            // Winners
+            const winnersList = document.getElementById('mega-prize-winners-list');
+            winnersList.innerHTML = '';
+            if (data.winners.length === 0) {
+                 winnersList.innerHTML = '<li class="list-group-item">No winners yet.</li>';
+            }
+            data.winners.forEach(w => {
+                const item = document.createElement('li');
+                item.className = 'list-group-item';
+                item.innerHTML = `<strong>${w.username}</strong> won "${w.prize_name}" on ${new Date(w.win_date).toLocaleDateString()}`;
+                winnersList.appendChild(item);
+            });
+        }
+
+        document.getElementById('add-prize-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const name = document.getElementById('prize-name').value;
+            const brand = document.getElementById('prize-brand').value;
+            try {
+                const result = await apiFetch('/admin/api/mega-prize/candidates', {
+                    method: 'POST',
+                    body: { name, brand }
+                });
+                alert(result.message);
+                this.reset();
+                fetchMegaPrizeData();
+            } catch(error) {
+                alert(`Error: ${error.message}`);
+            }
+        });
+        
+        async function deletePrizeCandidate(id) {
+            if(!confirm('Are you sure you want to delete this prize candidate?')) return;
+             try {
+                const result = await apiFetch(`/admin/api/mega-prize/candidates/${id}`, { method: 'DELETE' });
+                alert(result.message);
+                fetchMegaPrizeData();
+            } catch(error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        document.getElementById('start-voting-btn').addEventListener('click', async () => {
+            if(!confirm('Are you sure you want to START the voting period and clear all previous votes?')) return;
+            try {
+                const result = await apiFetch('/admin/api/mega-prize/start-voting', { method: 'POST' });
+                alert(result.message);
+                fetchMegaPrizeData();
+            } catch(error) {
+                alert(`Error: ${error.message}`);
+            }
+        });
+
+        document.getElementById('stop-voting-btn').addEventListener('click', async () => {
+            if(!confirm('Are you sure you want to STOP the voting period?')) return;
+            try {
+                const result = await apiFetch('/admin/api/mega-prize/stop-voting', { method: 'POST' });
+                alert(result.message);
+                fetchMegaPrizeData();
+            } catch(error) {
+                alert(`Error: ${error.message}`);
+            }
+        });
+
+        document.getElementById('declare-winner-btn').addEventListener('click', async () => {
+            if(!confirm('DANGER: This will declare a winner, record them, and clear all candidates and votes. This cannot be undone. Proceed?')) return;
+            try {
+                const result = await apiFetch('/admin/api/mega-prize/declare-winner', { method: 'POST' });
+                alert(`🎉 WINNER DECLARED! 🎉\n\n${result.message}`);
+                fetchMegaPrizeData();
+            } catch(error) {
+                alert(`Error: ${error.message}`);
+            }
+        });
+
         window.onload = () => {
             initMap();
             fetchAllData();

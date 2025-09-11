@@ -120,6 +120,8 @@ const setupDatabase = async () => {
         subscription_status VARCHAR(50),
         total_distance_km REAL DEFAULT 0,
         total_duration_minutes INTEGER DEFAULT 0,
+        currency INTEGER DEFAULT 1000,
+        superpowers JSONB DEFAULT '{}',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -143,10 +145,10 @@ const setupDatabase = async () => {
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS razorpay_subscription_id VARCHAR(100);');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50);');
-    
-    // --- NEW COLUMNS FOR STATS ---
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_distance_km REAL DEFAULT 0;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_duration_minutes INTEGER DEFAULT 0;');
+    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS currency INTEGER DEFAULT 1000;');
+    await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{}';`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
@@ -270,7 +272,71 @@ const setupDatabase = async () => {
 
     await client.query('CREATE INDEX IF NOT EXISTS superpower_chests_location_idx ON superpower_chests USING GIST (location);');
     console.log('[DB] Spatial index for "superpower_chests" is ensured.');
+    
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS shop_items (
+        item_id VARCHAR(50) PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        description TEXT NOT NULL,
+        price INTEGER NOT NULL,
+        item_type VARCHAR(50) NOT NULL DEFAULT 'superpower'
+      );
+    `);
+    console.log('[DB] "shop_items" table is ready.');
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS mega_prize_candidates (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(150) NOT NULL,
+        brand VARCHAR(100),
+        is_active BOOLEAN DEFAULT TRUE
+      );
+    `);
+    console.log('[DB] "mega_prize_candidates" table is ready.');
+    
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS mega_prize_votes (
+        user_id VARCHAR(255) PRIMARY KEY REFERENCES territories(owner_id) ON DELETE CASCADE,
+        candidate_id INTEGER NOT NULL REFERENCES mega_prize_candidates(id) ON DELETE CASCADE,
+        voted_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[DB] "mega_prize_votes" table is ready.');
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS mega_prize_winners (
+        id SERIAL PRIMARY KEY,
+        prize_name VARCHAR(255) NOT NULL,
+        winner_user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
+        win_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('[DB] "mega_prize_winners" table is ready.');
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS system_settings (
+        setting_key VARCHAR(50) PRIMARY KEY,
+        setting_value TEXT
+      );
+    `);
+    console.log('[DB] "system_settings" table is ready.');
+
+    const superpowerItems = [
+      { id: 'lastStand', name: 'Last Stand', description: 'Protects your territory from the next attack.', price: 150 },
+      { id: 'infiltrator', name: 'Infiltrator', description: 'Start a run from deep within enemy territory.', price: 200 },
+      { id: 'ghostRunner', name: 'Ghost Runner', description: 'Your trail is hidden from rivals for one run.', price: 100 },
+      { id: 'trailDefense', name: 'Trail Defense', description: 'Your trail cannot be cut by rivals.', price: 250 },
+    ];
+    for (const item of superpowerItems) {
+      await client.query(
+        `INSERT INTO shop_items (item_id, name, description, price, item_type) VALUES ($1, $2, $3, $4, 'superpower') ON CONFLICT (item_id) DO NOTHING;`,
+        [item.id, item.name, item.description, item.price]
+      );
+    }
+    console.log('[DB] Seeded superpower items.');
+
+    await client.query(`INSERT INTO system_settings (setting_key, setting_value) VALUES ('mega_prize_voting_active', 'true') ON CONFLICT (setting_key) DO NOTHING;`);
+    console.log('[DB] Seeded system settings.');
 
   } catch (err) {
     console.error('[DB] FATAL ERROR during database setup:', err);
@@ -360,7 +426,6 @@ app.post('/users/me/health-profile', authenticate, async (req, res) => {
     }
 });
 
-// --- NEW ENDPOINT TO LOG A COMPLETED RUN ---
 app.post('/users/me/log-run', authenticate, async (req, res) => {
     const { googleId } = req.user;
     const { distance, durationSeconds } = req.body;
@@ -386,7 +451,6 @@ app.post('/users/me/log-run', authenticate, async (req, res) => {
     }
 });
 
-// --- NEW ENDPOINT TO FETCH USER STATS ---
 app.get('/users/me/stats', authenticate, async (req, res) => {
     const { googleId } = req.user;
     try {
@@ -401,11 +465,7 @@ app.get('/users/me/stats', authenticate, async (req, res) => {
         
         const totalDistance = result.rows[0].total_distance_km || 0;
         const totalDuration = result.rows[0].total_duration_minutes || 0;
-
-        // Simple estimate: ~65 calories per km. Can be improved with weight/height data.
         const estimatedCalories = totalDistance * 65; 
-        
-        // Placeholder for weekly activity. This would require storing historical run data with timestamps.
         const weeklyActivity = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]; 
 
         res.status(200).json({
@@ -429,7 +489,7 @@ app.get('/check-profile', async (req, res) => {
         const query = `
             SELECT
                 t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
-                t.razorpay_subscription_id, t.subscription_status,
+                t.razorpay_subscription_id, t.subscription_status, t.currency,
                 c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
                 (c.base_location IS NOT NULL) as base_is_set
             FROM territories t
@@ -450,6 +510,7 @@ app.get('/check-profile', async (req, res) => {
                 has_shield: row.has_shield,
                 razorpaySubscriptionId: row.razorpay_subscription_id,
                 subscriptionStatus: row.subscription_status,
+                currency: row.currency,
                 clan_info: null
             };
             if (row.clan_id) {
@@ -941,10 +1002,11 @@ io.on('connection', (socket) => {
         const clanId = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].clan_id : null;
         const role = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].role : null;
 
-        const playerProfileRes = await client.query('SELECT has_shield, is_carve_mode_active, username IS NOT NULL as has_record FROM territories WHERE owner_id = $1', [googleId]);
+        const playerProfileRes = await client.query('SELECT has_shield, is_carve_mode_active, username IS NOT NULL as has_record, superpowers FROM territories WHERE owner_id = $1', [googleId]);
         const hasShield = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_shield : false;
         const isCarveModeActive = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].is_carve_mode_active : false;
         const playerHasRecord = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_record : false;
+        const superpowers = playerProfileRes.rows.length > 0 ? (playerProfileRes.rows[0].superpowers || {}) : {};
 
         players[socket.id] = {
             id: socket.id,
@@ -958,10 +1020,10 @@ io.on('connection', (socket) => {
             activeTrail: [],
             hasShield: hasShield,
             disconnectTimer: null,
-            lastStandCharges: 1,
-            infiltratorCharges: 1,
-            ghostRunnerCharges: 1,
-            trailDefenseCharges: 1,
+            lastStandCharges: superpowers.lastStand || 0,
+            infiltratorCharges: superpowers.infiltrator || 0,
+            ghostRunnerCharges: superpowers.ghostRunner || 0,
+            trailDefenseCharges: superpowers.trailDefense || 0,
             isGhostRunnerActive: false,
             isLastStandActive: false,
             isInfiltratorActive: false,
