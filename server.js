@@ -593,11 +593,52 @@ app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
         const order = await razorpay.orders.create(options);
         if (!order) return res.status(500).json({ message: 'Error creating Razorpay order.' });
         
-        res.json({ orderId: order.id, amount: order.amount });
+        res.json({ order_id: order.id, amount: order.amount });
 
     } catch (err) {
         console.error('[Razorpay] Error creating subscription order:', err);
         res.status(500).json({ message: 'Server error while creating subscription order.' });
+    }
+});
+
+app.post('/shop/create-order', authenticate, async (req, res) => {
+    if (!razorpay) return res.status(500).json({ message: 'Payment gateway is not configured.' });
+    
+    const { itemId } = req.body;
+    const { googleId } = req.user;
+
+    if (!itemId) return res.status(400).json({ message: 'Item ID is required.' });
+
+    try {
+        const userRes = await pool.query("SELECT superpowers FROM territories WHERE owner_id = $1", [googleId]);
+        if (userRes.rowCount > 0) {
+            const ownedPowers = userRes.rows[0].superpowers?.owned || [];
+            if (ownedPowers.includes(itemId)) {
+                return res.status(409).json({ message: 'You already own this superpower.' });
+            }
+        }
+
+        const amount = 2900;
+        const currency = 'INR';
+        const options = { 
+            amount, 
+            currency, 
+            receipt: `receipt_user_${googleId}_item_${itemId}`,
+            notes: {
+                purchaseType: 'superpower',
+                itemId: itemId,
+                googleId: googleId
+            }
+        };
+
+        const order = await razorpay.orders.create(options);
+        if (!order) return res.status(500).json({ message: 'Error creating Razorpay order.' });
+        
+        res.json({ orderId: order.id, amount: order.amount });
+
+    } catch (err) {
+        console.error('[Razorpay] Error creating superpower order:', err);
+        res.status(500).json({ message: 'Server error while creating order.' });
     }
 });
   
