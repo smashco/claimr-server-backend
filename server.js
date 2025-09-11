@@ -574,6 +574,30 @@ app.post('/setup-profile', authenticate, async (req, res) => {
     }
 });
 
+app.get('/shop/items', authenticate, async (req, res) => {
+    const { googleId } = req.user;
+    try {
+        const itemsResult = await pool.query(
+          `SELECT item_id as id, name, description, price FROM shop_items WHERE item_type = 'superpower' ORDER BY price ASC;`
+        );
+        
+        const userResult = await pool.query(
+          'SELECT superpowers FROM territories WHERE owner_id = $1', [googleId]
+        );
+
+        const ownedSuperpowers = userResult.rows[0]?.superpowers?.owned || [];
+
+        res.json({
+            superpowers: itemsResult.rows,
+            ownedSuperpowers: ownedSuperpowers
+        });
+
+    } catch (err) {
+        console.error('[API] Error fetching shop data:', err);
+        res.status(500).json({ message: 'Server error while fetching shop data.' });
+    }
+});
+
 app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
     if (!razorpay) return res.status(500).json({ message: 'Payment gateway is not configured.' });
     
