@@ -120,8 +120,7 @@ const setupDatabase = async () => {
         subscription_status VARCHAR(50),
         total_distance_km REAL DEFAULT 0,
         total_duration_minutes INTEGER DEFAULT 0,
-        currency INTEGER DEFAULT 1000,
-        superpowers JSONB DEFAULT '{}',
+        superpowers JSONB DEFAULT '{"owned": []}',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -147,8 +146,14 @@ const setupDatabase = async () => {
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50);');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_distance_km REAL DEFAULT 0;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_duration_minutes INTEGER DEFAULT 0;');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS currency INTEGER DEFAULT 1000;');
-    await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{}';`);
+    
+    const hasCurrencyColumn = await client.query(`SELECT 1 FROM information_schema.columns WHERE table_name='territories' AND column_name='currency'`);
+    if (hasCurrencyColumn.rowCount > 0) {
+        await client.query('ALTER TABLE territories DROP COLUMN currency;');
+        console.log('[DB] Dropped old "currency" column.');
+    }
+    await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{"owned": []}';`);
+    await client.query(`ALTER TABLE territories ALTER COLUMN superpowers SET DEFAULT '{"owned": []}';`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
@@ -322,14 +327,14 @@ const setupDatabase = async () => {
     console.log('[DB] "system_settings" table is ready.');
 
     const superpowerItems = [
-      { id: 'lastStand', name: 'Last Stand', description: 'Protects your territory from the next attack.', price: 150 },
-      { id: 'infiltrator', name: 'Infiltrator', description: 'Start a run from deep within enemy territory.', price: 200 },
-      { id: 'ghostRunner', name: 'Ghost Runner', description: 'Your trail is hidden from rivals for one run.', price: 100 },
-      { id: 'trailDefense', name: 'Trail Defense', description: 'Your trail cannot be cut by rivals.', price: 250 },
+      { id: 'lastStand', name: 'Last Stand', description: 'Protects your territory from the next attack.', price: 29 },
+      { id: 'infiltrator', name: 'Infiltrator', description: 'Start a run from deep within enemy territory.', price: 29 },
+      { id: 'ghostRunner', name: 'Ghost Runner', description: 'Your trail is hidden from rivals for one run.', price: 29 },
+      { id: 'trailDefense', name: 'Trail Defense', description: 'Your trail cannot be cut by rivals.', price: 29 },
     ];
     for (const item of superpowerItems) {
       await client.query(
-        `INSERT INTO shop_items (item_id, name, description, price, item_type) VALUES ($1, $2, $3, $4, 'superpower') ON CONFLICT (item_id) DO NOTHING;`,
+        `INSERT INTO shop_items (item_id, name, description, price, item_type) VALUES ($1, $2, $3, $4, 'superpower') ON CONFLICT (item_id) DO UPDATE SET name = $2, description = $3, price = $4;`,
         [item.id, item.name, item.description, item.price]
       );
     }
@@ -390,7 +395,6 @@ app.post('/admin/login', (req, res) => {
 app.get('/admin/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
 app.get('/admin/player_details.html', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'player_details.html')));
 app.get('/admin', (req, res) => res.redirect('/admin/login'));
-
 app.use('/admin/api', checkAdminAuth, adminApiRouter(pool, io, geofenceService, players));
 
 app.use('/sponsor', sponsorPortalRouter(pool, io, players));
@@ -1232,9 +1236,9 @@ io.on('connection', (socket) => {
         const res = await pool.query('SELECT superpowers FROM territories WHERE owner_id = $1', [player.googleId]);
         const newSuperpowers = res.rows[0].superpowers || { owned: [] };
         newSuperpowers.owned = newSuperpowers.owned.filter(p => p !== 'ghostRunner');
-        await pool.query('UPDATE territories SET superpowers = $1 WHERE owner_id = $2', [newSuperpowers, player.googleId]);
+        await pool.query('UPDATE territories SET superpowers = $1 WHERE owner_id = $2', [JSON.stringify(newSuperpowers), player.googleId]);
     }
-
+    
     player.isDrawing = true;
     player.activeTrail = [];
     console.log(`[Socket] Player ${player.name} (${socket.id}) started drawing trail. Ghost Runner: ${player.isGhostRunnerActive}`);
@@ -1264,7 +1268,7 @@ io.on('connection', (socket) => {
         const res = await pool.query('SELECT superpowers FROM territories WHERE owner_id = $1', [player.googleId]);
         const newSuperpowers = res.rows[0].superpowers || { owned: [] };
         newSuperpowers.owned = newSuperpowers.owned.filter(p => p !== 'trailDefense');
-        await pool.query('UPDATE territories SET superpowers = $1 WHERE owner_id = $2', [newSuperpowers, player.googleId]);
+        await pool.query('UPDATE territories SET superpowers = $1 WHERE owner_id = $2', [JSON.stringify(newSuperpowers), player.googleId]);
         
         console.log(`[GAME] ${player.name} activated TRAIL DEFENSE.`);
         socket.emit('superpowerAcknowledged', { power: 'trailDefense' });
@@ -1289,7 +1293,7 @@ io.on('connection', (socket) => {
           const res = await pool.query('SELECT superpowers FROM territories WHERE owner_id = $1', [player.googleId]);
           const newSuperpowers = res.rows[0].superpowers || { owned: [] };
           newSuperpowers.owned = newSuperpowers.owned.filter(p => p !== 'infiltrator');
-          await pool.query('UPDATE territories SET superpowers = $1 WHERE owner_id = $2', [newSuperpowers, player.googleId]);
+          await pool.query('UPDATE territories SET superpowers = $1 WHERE owner_id = $2', [JSON.stringify(newSuperpowers), player.googleId]);
 
           console.log(`[GAME] ${player.name} activated INFILTRATOR.`);
           socket.emit('superpowerAcknowledged', { power: 'infiltrator' });
@@ -1305,7 +1309,7 @@ io.on('connection', (socket) => {
               const res = await pool.query('SELECT superpowers FROM territories WHERE owner_id = $1', [player.googleId]);
               const newSuperpowers = res.rows[0].superpowers || { owned: [] };
               newSuperpowers.owned = newSuperpowers.owned.filter(p => p !== 'lastStand');
-              await pool.query('UPDATE territories SET is_shield_active = true, superpowers = $1 WHERE owner_id = $2', [newSuperpowers, player.googleId]);
+              await pool.query('UPDATE territories SET is_shield_active = true, superpowers = $1 WHERE owner_id = $2', [JSON.stringify(newSuperpowers), player.googleId]);
               
               console.log(`[GAME] ${player.name} activated LAST STAND.`);
               socket.emit('superpowerAcknowledged', { power: 'lastStand' });
