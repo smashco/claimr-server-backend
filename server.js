@@ -120,7 +120,8 @@ const setupDatabase = async () => {
         subscription_status VARCHAR(50),
         total_distance_km REAL DEFAULT 0,
         total_duration_minutes INTEGER DEFAULT 0,
-        superpowers JSONB DEFAULT '{"owned": []}',
+        currency INTEGER DEFAULT 1000,
+        superpowers JSONB DEFAULT '{}',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -146,14 +147,8 @@ const setupDatabase = async () => {
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50);');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_distance_km REAL DEFAULT 0;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_duration_minutes INTEGER DEFAULT 0;');
-    
-    const hasCurrencyColumn = await client.query(`SELECT 1 FROM information_schema.columns WHERE table_name='territories' AND column_name='currency'`);
-    if (hasCurrencyColumn.rowCount > 0) {
-        await client.query('ALTER TABLE territories DROP COLUMN currency;');
-        console.log('[DB] Dropped old "currency" column.');
-    }
-    await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{"owned": []}';`);
-    await client.query(`ALTER TABLE territories ALTER COLUMN superpowers SET DEFAULT '{"owned": []}';`);
+    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS currency INTEGER DEFAULT 1000;');
+    await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{}';`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
@@ -395,6 +390,7 @@ app.post('/admin/login', (req, res) => {
 app.get('/admin/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
 app.get('/admin/player_details.html', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'player_details.html')));
 app.get('/admin', (req, res) => res.redirect('/admin/login'));
+
 app.use('/admin/api', checkAdminAuth, adminApiRouter(pool, io, geofenceService, players));
 
 app.use('/sponsor', sponsorPortalRouter(pool, io, players));
@@ -578,7 +574,7 @@ app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
     if (!razorpay) return res.status(500).json({ message: 'Payment gateway is not configured.' });
     
     try {
-        const amount = 5900; // ₹59 in paise
+        const amount = 5900;
         const currency = 'INR';
         const options = { 
             amount, 
@@ -593,7 +589,7 @@ app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
         const order = await razorpay.orders.create(options);
         if (!order) return res.status(500).json({ message: 'Error creating Razorpay order.' });
         
-        res.json({ order_id: order.id, amount: order.amount });
+        res.json({ orderId: order.id, amount: order.amount });
 
     } catch (err) {
         console.error('[Razorpay] Error creating subscription order:', err);
@@ -1231,7 +1227,6 @@ io.on('connection', (socket) => {
     const player = players[socket.id];
     if (!player || player.gameMode === 'spectator' || player.isDrawing) return;
     
-    // Consume a charge when the power is used at the start of a run
     if (player.isGhostRunnerActive && player.ghostRunnerCharges > 0) {
         player.ghostRunnerCharges--;
         const res = await pool.query('SELECT superpowers FROM territories WHERE owner_id = $1', [player.googleId]);
@@ -1239,7 +1234,7 @@ io.on('connection', (socket) => {
         newSuperpowers.owned = newSuperpowers.owned.filter(p => p !== 'ghostRunner');
         await pool.query('UPDATE territories SET superpowers = $1 WHERE owner_id = $2', [newSuperpowers, player.googleId]);
     }
-    
+
     player.isDrawing = true;
     player.activeTrail = [];
     console.log(`[Socket] Player ${player.name} (${socket.id}) started drawing trail. Ghost Runner: ${player.isGhostRunnerActive}`);
