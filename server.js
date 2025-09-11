@@ -147,17 +147,13 @@ const setupDatabase = async () => {
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_distance_km REAL DEFAULT 0;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_duration_minutes INTEGER DEFAULT 0;');
     
-    // --- SCHEMA CHANGE FOR REAL-MONEY SHOP ---
-    // Drop the old currency column if it exists
     const hasCurrencyColumn = await client.query(`SELECT 1 FROM information_schema.columns WHERE table_name='territories' AND column_name='currency'`);
     if (hasCurrencyColumn.rowCount > 0) {
         await client.query('ALTER TABLE territories DROP COLUMN currency;');
         console.log('[DB] Dropped old "currency" column.');
     }
-    // Ensure superpowers column is JSONB and defaults to an object with an owned array
     await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{"owned": []}';`);
     await client.query(`ALTER TABLE territories ALTER COLUMN superpowers SET DEFAULT '{"owned": []}';`);
-
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
@@ -578,53 +574,33 @@ app.post('/setup-profile', authenticate, async (req, res) => {
     }
 });
 
-// --- THIS IS THE OLD /create-order. IT'S NOW REPLACED BY THE NEW ONE BELOW ---
-// app.post('/create-order', authenticate, async (req, res) => { ... });
-  
-// --- NEW REAL-MONEY SHOP ENDPOINTS ---
-app.post('/shop/create-order', authenticate, async (req, res) => {
+app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
     if (!razorpay) return res.status(500).json({ message: 'Payment gateway is not configured.' });
     
-    const { itemId } = req.body;
-    const { googleId } = req.user;
-
-    if (!itemId) return res.status(400).json({ message: 'Item ID is required.' });
-
     try {
-        // 1. Check if user already owns this single-use superpower
-        const userRes = await pool.query("SELECT superpowers FROM territories WHERE owner_id = $1", [googleId]);
-        if (userRes.rowCount > 0) {
-            const ownedPowers = userRes.rows[0].superpowers?.owned || [];
-            if (ownedPowers.includes(itemId)) {
-                return res.status(409).json({ message: 'You already own this superpower.' });
-            }
-        }
-
-        // 2. Create Razorpay order for ₹29 (2900 paise)
-        const amount = 2900;
+        const amount = 5900; // ₹59 in paise
         const currency = 'INR';
         const options = { 
             amount, 
             currency, 
-            receipt: `receipt_user_${googleId}_item_${itemId}`,
+            receipt: `receipt_sub_${req.user.googleId}_${new Date().getTime()}`,
             notes: {
-                purchaseType: 'superpower',
-                itemId: itemId,
-                googleId: googleId
+                purchaseType: 'subscription',
+                googleId: req.user.googleId
             }
         };
 
         const order = await razorpay.orders.create(options);
         if (!order) return res.status(500).json({ message: 'Error creating Razorpay order.' });
         
-        res.json({ orderId: order.id, amount: order.amount });
+        res.json({ order_id: order.id, amount: order.amount });
 
     } catch (err) {
-        console.error('[Razorpay] Error creating superpower order:', err);
-        res.status(500).json({ message: 'Server error while creating order.' });
+        console.error('[Razorpay] Error creating subscription order:', err);
+        res.status(500).json({ message: 'Server error while creating subscription order.' });
     }
 });
-
+  
 app.post('/verify-payment', async (req, res) => {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, googleId, purchaseType, itemId } = req.body;
 
@@ -645,7 +621,6 @@ app.post('/verify-payment', async (req, res) => {
         await client.query('BEGIN');
 
         if (purchaseType === 'superpower' && itemId) {
-            // Logic for single superpower purchase
             const userRes = await client.query("SELECT superpowers FROM territories WHERE owner_id = $1 FOR UPDATE", [googleId]);
             const currentSuperpowers = userRes.rows[0]?.superpowers || { owned: [] };
             const ownedList = currentSuperpowers.owned || [];
@@ -658,7 +633,6 @@ app.post('/verify-payment', async (req, res) => {
             console.log(`[Payment] Superpower '${itemId}' granted to user ${googleId}.`);
 
         } else {
-            // Original logic for pro subscription
             await client.query("UPDATE territories SET is_paid = TRUE, subscription_status = 'active' WHERE owner_id = $1", [googleId]);
             console.log(`[Payment] Pro Subscription verified for user ${googleId}.`);
         }
@@ -1260,12 +1234,12 @@ io.on('connection', (socket) => {
     // Consume a charge when the power is used at the start of a run
     if (player.isGhostRunnerActive && player.ghostRunnerCharges > 0) {
         player.ghostRunnerCharges--;
-        const newSuperpowers = (await pool.query('SELECT superpowers FROM territories WHERE owner_id = $1', [player.googleId])).rows[0].superpowers;
+        const res = await pool.query('SELECT superpowers FROM territories WHERE owner_id = $1', [player.googleId]);
+        const newSuperpowers = res.rows[0].superpowers || { owned: [] };
         newSuperpowers.owned = newSuperpowers.owned.filter(p => p !== 'ghostRunner');
         await pool.query('UPDATE territories SET superpowers = $1 WHERE owner_id = $2', [newSuperpowers, player.googleId]);
     }
-    // Similarly for other powers that are activated pre-run
-
+    
     player.isDrawing = true;
     player.activeTrail = [];
     console.log(`[Socket] Player ${player.name} (${socket.id}) started drawing trail. Ghost Runner: ${player.isGhostRunnerActive}`);
@@ -1311,10 +1285,17 @@ io.on('connection', (socket) => {
       }
   });
 
-  socket.on('activateInfiltrator', () => {
+  socket.on('activateInfiltrator', async () => {
       const player = players[socket.id];
       if (player && player.infiltratorCharges > 0) {
+          player.infiltratorCharges--;
           player.isInfiltratorActive = true;
+          
+          const res = await pool.query('SELECT superpowers FROM territories WHERE owner_id = $1', [player.googleId]);
+          const newSuperpowers = res.rows[0].superpowers || { owned: [] };
+          newSuperpowers.owned = newSuperpowers.owned.filter(p => p !== 'infiltrator');
+          await pool.query('UPDATE territories SET superpowers = $1 WHERE owner_id = $2', [newSuperpowers, player.googleId]);
+
           console.log(`[GAME] ${player.name} activated INFILTRATOR.`);
           socket.emit('superpowerAcknowledged', { power: 'infiltrator' });
       }
