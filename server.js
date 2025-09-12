@@ -1,5 +1,3 @@
-// server.js
-
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -154,6 +152,7 @@ const setupDatabase = async () => {
     }
     await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{"owned": []}';`);
     await client.query(`ALTER TABLE territories ALTER COLUMN superpowers SET DEFAULT '{"owned": []}';`);
+    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS trail_effect VARCHAR(50) DEFAULT \'default\';');
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
@@ -172,23 +171,32 @@ const setupDatabase = async () => {
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clan_members (
-        clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE, user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-        role VARCHAR(20) NOT NULL DEFAULT 'member', joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (clan_id, user_id)
+        clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
+        user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
+        role VARCHAR(20) NOT NULL DEFAULT 'member',
+        joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (clan_id, user_id)
       );
     `);
     console.log('[DB] "clan_members" table is ready.');
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clan_join_requests (
-        id SERIAL PRIMARY KEY, clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE, user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-        status VARCHAR(20) NOT NULL DEFAULT 'pending', requested_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, UNIQUE(clan_id, user_id)
+        id SERIAL PRIMARY KEY,
+        clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
+        user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        requested_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(clan_id, user_id)
       );
     `);
     console.log('[DB] "clan_join_requests" table is ready.');
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS clan_territories (
-        clan_id INTEGER NOT NULL PRIMARY KEY REFERENCES clans(id) ON DELETE CASCADE, area GEOMETRY(GEOMETRY, 4326), area_sqm REAL,
+        clan_id INTEGER NOT NULL PRIMARY KEY REFERENCES clans(id) ON DELETE CASCADE,
+        area GEOMETRY(GEOMETRY, 4326),
+        area_sqm REAL,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -494,7 +502,7 @@ app.get('/check-profile', async (req, res) => {
         const query = `
             SELECT
                 t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
-                t.razorpay_subscription_id, t.subscription_status,
+                t.razorpay_subscription_id, t.subscription_status, t.trail_effect,
                 c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
                 (c.base_location IS NOT NULL) as base_is_set
             FROM territories t
@@ -515,6 +523,7 @@ app.get('/check-profile', async (req, res) => {
                 has_shield: row.has_shield,
                 razorpaySubscriptionId: row.razorpay_subscription_id,
                 subscriptionStatus: row.subscription_status,
+                trailEffect: row.trail_effect || 'default',
                 clan_info: null
             };
             if (row.clan_id) {
@@ -571,6 +580,21 @@ app.post('/setup-profile', authenticate, async (req, res) => {
         if (err.code === '23505' && err.constraint === 'territories_unique_player_id_key') return res.status(500).json({ message: 'Failed to generate a unique player ID. Please try again.'});
         console.error('[API] Error setting up profile:', err);
         res.status(500).json({ error: 'Failed to set up profile.' });
+    }
+});
+
+app.put('/users/me/trail-effect', authenticate, async (req, res) => {
+    const { googleId } = req.user;
+    const { trailEffect } = req.body;
+    if (!trailEffect) { 
+        return res.status(400).json({ message: 'trailEffect is required.' }); 
+    }
+    try {
+        await pool.query('UPDATE territories SET trail_effect = $1 WHERE owner_id = $2', [trailEffect, googleId]);
+        res.status(200).json({ success: true, message: 'Trail effect updated.' });
+    } catch (err) {
+        console.error('[API] Error updating trail effect:', err);
+        res.status(500).json({ message: 'Server error while updating trail effect.' });
     }
 });
 
