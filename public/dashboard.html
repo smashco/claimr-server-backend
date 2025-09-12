@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -16,7 +17,7 @@
         .nav-tabs .nav-link.active { background-color: #495057; border-color: #495057; color: #fff; }
         .form-check-input:checked { background-color: #D4FF00; border-color: #D4FF00; }
         .leaflet-crosshair-cursor { cursor: crosshair !important; }
-        .list-group-item { background-color: #212529; border-color: #495057; }
+        .list-group-item { background-color: #343a40; border-color: #495057; color: #dee2e6;}
     </style>
 </head>
 <body>
@@ -41,7 +42,6 @@
             <li class="nav-item" role="presentation">
                 <button class="nav-link" id="quests-tab" data-bs-toggle="tab" data-bs-target="#quests-tab-pane" type="button" role="tab">Quest Management</button>
             </li>
-            <!-- NEW TAB FOR SHOP -->
             <li class="nav-item" role="presentation">
                 <button class="nav-link" id="shop-tab" data-bs-toggle="tab" data-bs-target="#shop-tab-pane" type="button" role="tab">Shop & Prizes</button>
             </li>
@@ -57,7 +57,6 @@
                                     <th>Status</th>
                                     <th>Username</th>
                                     <th>Territory (km²)</th>
-                                    <th>Currency (G)</th>
                                     <th>Actions</th>
                                 </tr>
                             </thead>
@@ -178,7 +177,6 @@
                 </div>
             </div>
 
-            <!-- NEW SHOP & PRIZES TAB PANE -->
             <div class="tab-pane fade p-3" id="shop-tab-pane" role="tabpanel">
                 <div class="row">
                     <div class="col-lg-5">
@@ -308,7 +306,6 @@
                     <td><span class="badge ${player.isOnline ? 'bg-success' : 'bg-secondary'}">${player.isOnline ? 'Online' : 'Offline'}</span></td>
                     <td>${player.username || 'N/A'}</td>
                     <td>${areaKm2}</td>
-                    <td>${player.currency}</td>
                     <td>
                         <a href="/admin/player_details.html?id=${player.owner_id}" class="btn btn-sm btn-primary">Details</a>
                         <button class="btn btn-sm btn-warning" onclick="performAction('${player.owner_id}', 'reset-territory', '${player.username}')">Reset</button>
@@ -569,8 +566,6 @@
             });
         }
         
-        // --- NEW SHOP & PRIZE FUNCTIONS ---
-
         async function fetchShopData() {
             try {
                 const items = await apiFetch('/admin/api/shop/items');
@@ -620,17 +615,14 @@
         }
         
         function renderMegaPrize(data) {
-            // Status
             const statusBadge = document.getElementById('voting-status');
             statusBadge.textContent = data.voting_active ? 'ACTIVE' : 'INACTIVE';
             statusBadge.className = `badge ms-2 ${data.voting_active ? 'bg-success' : 'bg-secondary'}`;
             
-            // Buttons
             document.getElementById('start-voting-btn').disabled = data.voting_active;
             document.getElementById('stop-voting-btn').disabled = !data.voting_active;
             document.getElementById('declare-winner-btn').disabled = data.voting_active;
 
-            // Candidates
             const candidatesList = document.getElementById('prize-candidates-list');
             candidatesList.innerHTML = '';
             if (data.candidates.length === 0) {
@@ -646,7 +638,6 @@
                 candidatesList.appendChild(item);
             });
 
-            // Winners
             const winnersList = document.getElementById('mega-prize-winners-list');
             winnersList.innerHTML = '';
             if (data.winners.length === 0) {
@@ -714,7 +705,7 @@
             if(!confirm('DANGER: This will declare a winner, record them, and clear all candidates and votes. This cannot be undone. Proceed?')) return;
             try {
                 const result = await apiFetch('/admin/api/mega-prize/declare-winner', { method: 'POST' });
-                alert(`🎉 WINNER DECLARED! 🎉\n\n${result.message}`);
+                alert(result.message);
                 fetchMegaPrizeData();
             } catch(error) {
                 alert(`Error: ${error.message}`);
