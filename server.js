@@ -474,7 +474,15 @@ app.post('/admin/api/players/:googleId/manage-superpower', checkAdminAuth, async
         
         const playerSocketId = Object.keys(players).find(id => players[id].googleId === googleId);
         if (playerSocketId) {
-            io.to(playerSocketId).emit('superpowerInventoryUpdated', { owned: newInventory.owned });
+            // Update the player's in-memory state
+            const onlinePlayer = players[playerSocketId];
+            const ownedList = newInventory.owned || [];
+            onlinePlayer.hasLastStand = ownedList.includes('lastStand');
+            onlinePlayer.hasInfiltrator = ownedList.includes('infiltrator');
+            onlinePlayer.hasGhostRunner = ownedList.includes('ghostRunner');
+            onlinePlayer.hasTrailDefense = ownedList.includes('trailDefense');
+            
+            io.to(playerSocketId).emit('superpowerInventoryUpdated', newInventory);
             logSocket(`Notified player ${googleId} of superpower update from admin in real-time.`);
         }
 
@@ -905,7 +913,9 @@ app.post('/clans', authenticate, async (req, res) => {
         const clanResult = await client.query(insertClanQuery, [name, tag, description || '', leaderId]);
         const newClan = clanResult.rows[0];
         await client.query('INSERT INTO clan_members(clan_id, user_id, role) VALUES($1, $2, $3)', [newClan.id, leaderId, 'leader']);
+
         await client.query(`INSERT INTO clan_territories (clan_id, area, area_sqm) VALUES ($1, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), 0);`, [newClan.id]);
+
         await client.query('COMMIT');
         logDb(`COMMIT transaction for creating clan by ${leaderId}`);
         res.status(201).json({id: newClan.id.toString(), name: newClan.name, tag: newClan.tag, role: 'leader', base_is_set: false});
@@ -1266,7 +1276,7 @@ io.on('connection', (socket) => {
 
         let activeTerritories = [];
         if (gameMode === 'clan') {
-             const query = `
+            const query = `
                 SELECT
                     ct.clan_id::text as "ownerId",
                     c.name as "ownerName",
@@ -1494,8 +1504,6 @@ io.on('connection', (socket) => {
           logGame(`Player ${player.name} activating Last Stand.`);
           try {
             await superpowerManager.usePower(player.googleId, 'lastStand');
-            // This also requires a DB update to set is_shield_active=true, which the manager doesn't do.
-            // A more robust manager would handle this, but for now we'll do it here.
             await pool.query('UPDATE territories SET is_shield_active = true WHERE owner_id = $1', [player.googleId]);
             socket.emit('superpowerAcknowledged', { power: 'lastStand' });
           } catch(err) {
