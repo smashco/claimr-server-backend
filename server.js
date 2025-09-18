@@ -18,7 +18,6 @@ const handleClanClaim = require('./game_logic/clan_handler');
 const GeofenceService = require('./geofence_service');
 const { updateQuestProgress } = require('./game_logic/quest_handler');
 
-// Routers (assuming they exist in the specified paths)
 const adminApiRouter = require('./routes/admin_api');
 const sponsorPortalRouter = require('./routes/sponsor_portal');
 const questsApiRouter = require('./routes/quests_api');
@@ -93,7 +92,6 @@ const setupDatabase = async () => {
     await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
     console.log('[DB] PostGIS extension is enabled.');
 
-    // Refactored superpowers column to be a map of counts { "powerId": count }
     await client.query(`
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
@@ -127,7 +125,6 @@ const setupDatabase = async () => {
     `);
     console.log('[DB] "territories" table is ready.');
     
-    // Add columns if they don't exist (idempotent)
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS unique_player_id VARCHAR(10) UNIQUE;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS phone_number VARCHAR(20);');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS instagram_id VARCHAR(100);');
@@ -146,13 +143,11 @@ const setupDatabase = async () => {
     await client.query(`ALTER TABLE territories ALTER COLUMN superpowers SET DEFAULT '{}'::jsonb;`);
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS trail_effect VARCHAR(50) DEFAULT \'default\';');
     
-    // Ensure username constraint exists
     const usernameConstraint = await client.query(`SELECT 1 FROM pg_constraint WHERE conname = 'territories_username_key'`);
     if(usernameConstraint.rowCount === 0) {
         await client.query('ALTER TABLE territories ADD CONSTRAINT territories_username_key UNIQUE (username);');
     }
     
-    // ... (rest of the table creation queries remain the same)
     await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
         id SERIAL PRIMARY KEY,
@@ -404,12 +399,9 @@ app.get('/admin/player_details.html', checkAdminAuth, (req, res) => res.sendFile
 app.get('/admin', (req, res) => res.redirect('/admin/login'));
 app.use('/admin/api', checkAdminAuth, adminApiRouter(pool, io, geofenceService, players));
 
-// ===================================================================
-// NEW ADMIN FEATURE: Grant/Revoke Superpowers
-// ===================================================================
 app.post('/admin/api/players/:googleId/manage-superpower', checkAdminAuth, async (req, res) => {
     const { googleId } = req.params;
-    const { powerId, action } = req.body; // action can be 'grant' or 'revoke'
+    const { powerId, action } = req.body; 
 
     if (!powerId || !['grant', 'revoke'].includes(action)) {
         return res.status(400).json({ message: "Invalid request. 'powerId' and 'action' ('grant' or 'revoke') are required." });
@@ -437,7 +429,7 @@ app.post('/admin/api/players/:googleId/manage-superpower', checkAdminAuth, async
             }
             currentSuperpowers[powerId] = currentCharges - 1;
             if (currentSuperpowers[powerId] === 0) {
-                delete currentSuperpowers[powerId]; // Clean up the JSON if count is zero
+                delete currentSuperpowers[powerId];
             }
         }
 
@@ -448,19 +440,16 @@ app.post('/admin/api/players/:googleId/manage-superpower', checkAdminAuth, async
 
         await client.query('COMMIT');
 
-        // Notify player in real-time if they are connected
         const playerSocketId = Object.keys(players).find(id => players[id].googleId === googleId);
         if (playerSocketId && players[playerSocketId]) {
             const onlinePlayer = players[playerSocketId];
             const newCharges = updatedPlayer.superpowers[powerId] || 0;
 
-            // Update in-memory state for the active player
             if (powerId === 'lastStand') onlinePlayer.lastStandCharges = newCharges;
             if (powerId === 'infiltrator') onlinePlayer.infiltratorCharges = newCharges;
             if (powerId === 'ghostRunner') onlinePlayer.ghostRunnerCharges = newCharges;
             if (powerId === 'trailDefense') onlinePlayer.trailDefenseCharges = newCharges;
 
-            // Send a specific event to the client to refresh their state
             io.to(playerSocketId).emit('superpowerInventoryUpdated', updatedPlayer.superpowers);
             console.log(`[Admin] Notified player ${googleId} of superpower update in real-time.`);
         }
@@ -479,7 +468,6 @@ app.post('/admin/api/players/:googleId/manage-superpower', checkAdminAuth, async
         client.release();
     }
 });
-
 
 app.use('/sponsor', sponsorPortalRouter(pool, io, players));
 app.use('/api/quests', questsApiRouter(pool, authenticate));
@@ -597,7 +585,7 @@ app.get('/check-profile', async (req, res) => {
                 razorpaySubscriptionId: row.razorpay_subscription_id,
                 subscriptionStatus: row.subscription_status,
                 trailEffect: row.trail_effect || 'default',
-                superpowers: row.superpowers || {}, // Return the superpower map
+                superpowers: row.superpowers || {},
                 clan_info: null
             };
             if (row.clan_id) {
@@ -613,7 +601,6 @@ app.get('/check-profile', async (req, res) => {
     }
 });
 
-// ... (The rest of the file continues with the updated superpower logic integrated)
 app.get('/users/check-username', async (req, res) => {
     const { username } = req.query;
     if (!username) {
@@ -743,18 +730,14 @@ app.post('/shop/mega-prize/vote', authenticate, async (req, res) => {
 });
 
 app.get('/shop/items', authenticate, async (req, res) => {
-    const { googleId } = req.user;
     try {
         const itemsResult = await pool.query(
           `SELECT item_id as id, name, description, price FROM shop_items WHERE item_type = 'superpower' ORDER BY price ASC;`
         );
         
-        // This endpoint doesn't need to return owned powers anymore,
-        // as the main profile check handles that.
-        // It simplifies the shop's responsibility.
         res.json({
             superpowers: itemsResult.rows,
-            ownedSuperpowers: [] // Deprecated, client should use main profile state
+            ownedSuperpowers: []
         });
 
     } catch (err) {
@@ -859,7 +842,6 @@ app.post('/verify-payment', async (req, res) => {
     }
 });
 
-// ... (subscription status and cancel routes remain the same)
 app.get('/subscription/status', authenticate, async (req, res) => {
     try {
         const result = await pool.query('SELECT razorpay_subscription_id, subscription_status FROM territories WHERE owner_id = $1', [req.user.googleId]);
@@ -898,8 +880,6 @@ app.post('/subscription/cancel', authenticate, async (req, res) => {
     }
 });
 
-
-// ... (leaderboard routes remain the same)
 app.get('/leaderboard', async (req, res) => {
     try {
         const result = await pool.query(`
@@ -936,8 +916,6 @@ app.get('/leaderboard/clans', async (req, res) => {
     }
 });
 
-
-// ... (all clan management routes remain the same)
 app.post('/clans', authenticate, async (req, res) => {
     const { name, tag, description } = req.body;
     const leaderId = req.user.googleId;
@@ -1209,7 +1187,6 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     }
 });
 
-
 async function broadcastAllPlayers() {
     const playerIds = Object.keys(players);
     if (playerIds.length === 0) return;
@@ -1298,10 +1275,18 @@ io.on('connection', (socket) => {
         socket.emit('activeChests', chests.rows.map(c => ({ id: c.id, location: JSON.parse(c.location).coordinates.reverse() })));
 
         let activeTerritories = [];
+
         if (gameMode === 'clan') {
             const query = `
-                SELECT ct.clan_id::text as "ownerId", c.name as "ownerName", c.clan_image_url as "profileImageUrl", '#CCCCCC' as identity_color, ST_AsGeoJSON(ct.area) as geojson, ct.area_sqm as area
-                FROM clan_territories ct JOIN clans c ON ct.clan_id = c.id
+                SELECT
+                    ct.clan_id::text as "ownerId",
+                    c.name as "ownerName",
+                    c.clan_image_url as "profileImageUrl",
+                    '#CCCCCC' as identity_color,
+                    ST_AsGeoJSON(ct.area) as geojson,
+                    ct.area_sqm as area
+                FROM clan_territories ct
+                JOIN clans c ON ct.clan_id = c.id
                 WHERE ct.area IS NOT NULL AND NOT ST_IsEmpty(ct.area);
             `;
             const territoryResult = await client.query(query);
@@ -1318,8 +1303,15 @@ io.on('connection', (socket) => {
         }
         else if (gameMode === 'solo') {
             const query = `
-                SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", identity_color, ST_AsGeoJSON(area) as geojson, area_sqm as area
-                FROM territories WHERE area IS NOT NULL AND NOT ST_IsEmpty(area);
+                SELECT
+                    owner_id as "ownerId",
+                    username as "ownerName",
+                    profile_image_url as "profileImageUrl",
+                    identity_color,
+                    ST_AsGeoJSON(area) as geojson,
+                    area_sqm as area
+                FROM territories
+                WHERE area IS NOT NULL AND NOT ST_IsEmpty(area);
             `;
             const territoryResult = await client.query(query);
             activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
@@ -1346,7 +1338,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ... (locationUpdate logic remains the same)
   socket.on('locationUpdate', async (data) => {
     const player = players[socket.id];
     if (!player || !player.googleId) return;
@@ -1471,7 +1462,6 @@ io.on('connection', (socket) => {
               }
           }
           
-          // Additional logic for specific powers, e.g., setting a shield
           if (powerName === 'lastStand') {
               await client.query("UPDATE territories SET superpowers = $1, is_shield_active = true WHERE owner_id = $2", [JSON.stringify(newSuperpowers), player.googleId]);
           } else {
@@ -1483,7 +1473,7 @@ io.on('connection', (socket) => {
       } catch (err) {
           await client.query('ROLLBACK');
           console.error(`[DB] Error activating ${powerName} for ${player.googleId}`, err);
-          player[chargesProp]++; // Revert in-memory charge on failure
+          player[chargesProp]++;
           return { success: false };
       } finally {
           client.release();
@@ -1506,8 +1496,6 @@ io.on('connection', (socket) => {
       const player = players[socket.id];
       if (player && player.ghostRunnerCharges > 0) {
           player.isGhostRunnerActive = true;
-          // Note: Ghost Runner is consumed on 'startDrawingTrail', not here.
-          // We just acknowledge it so the UI can update.
           console.log(`[GAME] ${player.name} queued GHOST RUNNER for next run.`);
           socket.emit('superpowerAcknowledged', { power: 'ghostRunner', chargesLeft: player.ghostRunnerCharges });
       }
@@ -1594,7 +1582,7 @@ io.on('connection', (socket) => {
                 delete players[socket.id];
             }
             io.emit('trailCleared', { id: socket.id });
-            io.emit('playerLeft', { id: socket.id }); // Also notify that the player has fully left
+            io.emit('playerLeft', { id: socket.id });
         }, DISCONNECT_TRAIL_PERSIST_SECONDS * 1000);
       } else {
         delete players[socket.id];
