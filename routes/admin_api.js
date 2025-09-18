@@ -1,4 +1,3 @@
-// routes/admin_api.js
 const express = require('express');
 const multer = require('multer');
 
@@ -10,8 +9,8 @@ module.exports = (pool, io, geofenceService, players) => {
     // --- Player Management ---
     router.get('/players', async (req, res) => {
         try {
-            // UPDATED QUERY: Added currency to the selection
-            const result = await pool.query('SELECT owner_id, username, area_sqm, currency FROM territories ORDER BY username');
+            // UPDATED QUERY: Removed "currency" from the selection
+            const result = await pool.query('SELECT owner_id, username, area_sqm FROM territories ORDER BY username');
             const playersList = result.rows.map(dbPlayer => {
                 const onlinePlayer = Object.values(players).find(p => p.googleId === dbPlayer.owner_id);
                 return { 
