@@ -1202,10 +1202,18 @@ io.on('connection', (socket) => {
         const role = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].role : null;
 
         const playerProfileRes = await client.query('SELECT has_shield, is_carve_mode_active, username IS NOT NULL as has_record, superpowers FROM territories WHERE owner_id = $1', [googleId]);
-        const hasShield = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_shield : false;
-        const isCarveModeActive = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].is_carve_mode_active : false;
-        const playerHasRecord = playerProfileRes.rows.length > 0 ? playerProfileRes.rows[0].has_record : false;
-        const superpowers = playerProfileRes.rows.length > 0 ? (playerProfileRes.rows[0].superpowers || { owned: [] }) : { owned: [] };
+        
+        const playerRecord = playerProfileRes.rows[0];
+        const hasShield = playerRecord ? playerRecord.has_shield : false;
+        const isCarveModeActive = playerRecord ? playerRecord.is_carve_mode_active : false;
+        const playerHasRecord = !!playerRecord; // More robust check
+        
+        // ===================================================================
+        // THIS IS THE FIX
+        // This safely handles cases where playerRecord or superpowers might not exist,
+        // or where the `owned` property is missing.
+        // ===================================================================
+        const ownedPowers = playerRecord?.superpowers?.owned || [];
 
         players[socket.id] = {
             id: socket.id,
@@ -1219,10 +1227,10 @@ io.on('connection', (socket) => {
             activeTrail: [],
             hasShield: hasShield,
             disconnectTimer: null,
-            lastStandCharges: superpowers.owned.includes('lastStand') ? 1 : 0,
-            infiltratorCharges: superpowers.owned.includes('infiltrator') ? 1 : 0,
-            ghostRunnerCharges: superpowers.owned.includes('ghostRunner') ? 1 : 0,
-            trailDefenseCharges: superpowers.owned.includes('trailDefense') ? 1 : 0,
+            lastStandCharges: ownedPowers.includes('lastStand') ? 1 : 0,
+            infiltratorCharges: ownedPowers.includes('infiltrator') ? 1 : 0,
+            ghostRunnerCharges: ownedPowers.includes('ghostRunner') ? 1 : 0,
+            trailDefenseCharges: ownedPowers.includes('trailDefense') ? 1 : 0,
             isGhostRunnerActive: false,
             isLastStandActive: false,
             isInfiltratorActive: false,
