@@ -805,7 +805,7 @@ app.post('/verify-payment', async (req, res) => {
         if (purchaseType === 'superpower' && itemId) {
             await superpowerManager.verifyAndGrantPower(googleId, itemId, { razorpay_order_id, razorpay_payment_id, razorpay_signature });
         } else if (purchaseType === 'subscription') {
-            logPayment(`Subscription logic for ${googleId} needs to be implemented here.`);
+            logPayment(`Subscription logic for ${googleId}.`);
             await pool.query("UPDATE territories SET is_paid = TRUE, subscription_status = 'active' WHERE owner_id = $1", [googleId]);
         } else {
              throw new Error("Invalid purchase type");
@@ -1276,7 +1276,7 @@ io.on('connection', (socket) => {
 
         let activeTerritories = [];
         if (gameMode === 'clan') {
-            const query = `
+             const query = `
                 SELECT
                     ct.clan_id::text as "ownerId",
                     c.name as "ownerName",

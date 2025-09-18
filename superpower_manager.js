@@ -16,6 +16,12 @@ class SuperpowerManager {
         }
     }
 
+    /**
+     * Creates a Razorpay order for a superpower, but only if the user does not already own it.
+     * @param {string} googleId - The Google ID of the user.
+     * @param {string} itemId - The ID of the superpower to purchase (e.g., 'lastStand').
+     * @returns {Promise<object>} The Razorpay order details.
+     */
     async createPurchaseOrder(googleId, itemId) {
         debug(`Attempting to create purchase order for item '${itemId}' for user ${googleId}`);
         if (!this.razorpay) {
@@ -31,7 +37,7 @@ class SuperpowerManager {
             }
         }
 
-        const amount = 2900;
+        const amount = 2900; // Price in paise (e.g., ₹29.00)
         const currency = 'INR';
         const options = {
             amount,
@@ -57,6 +63,13 @@ class SuperpowerManager {
         }
     }
 
+    /**
+     * Verifies a Razorpay payment and grants a unique superpower to the user.
+     * @param {string} googleId - The user's Google ID.
+     * @param {string} itemId - The superpower ID.
+     * @param {object} paymentDetails - Contains razorpay_order_id, razorpay_payment_id, razorpay_signature.
+     * @returns {Promise<void>}
+     */
     async verifyAndGrantPower(googleId, itemId, paymentDetails) {
         debug(`Verifying payment for user ${googleId} for item '${itemId}'`);
         const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = paymentDetails;
@@ -73,30 +86,35 @@ class SuperpowerManager {
         debug(`Payment verified and power '${itemId}' granted to user ${googleId}.`);
     }
 
+    /**
+     * Removes a superpower from a user's inventory after it has been used.
+     * @param {string} googleId - The user's Google ID.
+     * @param {string} powerId - The superpower ID to remove.
+     * @returns {Promise<object>} The user's new superpower inventory.
+     */
     async usePower(googleId, powerId) {
         debug(`User ${googleId} is using power '${powerId}'. Removing from inventory.`);
         return await this.revokePower(googleId, powerId);
     }
     
-    // ===================================================================
-    // MODIFIED FUNCTION
-    // ===================================================================
+    /**
+     * Grants a superpower to a user. Creates a placeholder profile if the user doesn't exist.
+     * @param {string} googleId - The user's Google ID.
+     * @param {string} powerId - The superpower ID to grant.
+     * @returns {Promise<object>} The user's new superpower inventory.
+     */
     async grantPower(googleId, powerId) {
         debug(`Granting power '${powerId}' to user ${googleId}`);
         const client = await this.pool.connect();
         try {
             await client.query('BEGIN');
             
-            // --- NEW: Check for user existence and create if necessary ---
             let userRes = await client.query("SELECT superpowers FROM territories WHERE owner_id = $1 FOR UPDATE", [googleId]);
             if (userRes.rowCount === 0) {
                 debug(`User ${googleId} not found. Creating a placeholder entry before granting power.`);
-                // Insert a new user with default values. The user must complete profile setup later.
                 await client.query(`INSERT INTO territories (owner_id) VALUES ($1)`, [googleId]);
-                // Re-fetch the newly created row to get the default superpowers column
                 userRes = await client.query("SELECT superpowers FROM territories WHERE owner_id = $1 FOR UPDATE", [googleId]);
             }
-            // --- END NEW LOGIC ---
 
             const currentSuperpowers = userRes.rows[0].superpowers || { owned: [] };
             const ownedList = currentSuperpowers.owned || [];
@@ -123,6 +141,12 @@ class SuperpowerManager {
         }
     }
 
+    /**
+     * Revokes a superpower from a user (Admin action or post-use).
+     * @param {string} googleId - The user's Google ID.
+     * @param {string} powerId - The superpower ID to revoke.
+     * @returns {Promise<object>} The user's new superpower inventory.
+     */
     async revokePower(googleId, powerId) {
         debug(`Revoking power '${powerId}' from user ${googleId}`);
         const client = await this.pool.connect();
@@ -130,7 +154,6 @@ class SuperpowerManager {
             await client.query('BEGIN');
             const userRes = await client.query("SELECT superpowers FROM territories WHERE owner_id = $1 FOR UPDATE", [googleId]);
             if (userRes.rowCount === 0) {
-                // If user doesn't exist, there's nothing to revoke.
                 debug(`Cannot revoke power from non-existent user ${googleId}.`);
                 await client.query('ROLLBACK');
                 return { owned: [] };
@@ -138,10 +161,6 @@ class SuperpowerManager {
             
             const currentSuperpowers = userRes.rows[0].superpowers || { owned: [] };
             let ownedList = currentSuperpowers.owned || [];
-
-            if (!ownedList.includes(powerId)) {
-                debug(`Cannot revoke '${powerId}' from ${googleId}, they do not own it.`);
-            }
             
             const updatedOwnedList = ownedList.filter(p => p !== powerId);
             
