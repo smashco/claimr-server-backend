@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -700,7 +699,7 @@ app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
         const options = { 
             amount, 
             currency, 
-            receipt: `receipt_sub_${req.user.googleId}_${new Date().getTime()}`,
+            receipt: `sub_${Date.now()}${crypto.randomBytes(2).toString('hex')}`,
             notes: {
                 purchaseType: 'subscription',
                 googleId: req.user.googleId
@@ -740,7 +739,7 @@ app.post('/shop/create-order', authenticate, async (req, res) => {
         const options = { 
             amount, 
             currency, 
-            receipt: `receipt_user_${googleId}_item_${itemId}`,
+            receipt: `item_${Date.now()}${crypto.randomBytes(2).toString('hex')}`,
             notes: {
                 purchaseType: 'superpower',
                 itemId: itemId,
