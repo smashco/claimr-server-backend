@@ -474,7 +474,6 @@ app.post('/admin/api/players/:googleId/manage-superpower', checkAdminAuth, async
         
         const playerSocketId = Object.keys(players).find(id => players[id].googleId === googleId);
         if (playerSocketId) {
-            // Update the player's in-memory state
             const onlinePlayer = players[playerSocketId];
             const ownedList = newInventory.owned || [];
             onlinePlayer.hasLastStand = ownedList.includes('lastStand');
@@ -913,9 +912,7 @@ app.post('/clans', authenticate, async (req, res) => {
         const clanResult = await client.query(insertClanQuery, [name, tag, description || '', leaderId]);
         const newClan = clanResult.rows[0];
         await client.query('INSERT INTO clan_members(clan_id, user_id, role) VALUES($1, $2, $3)', [newClan.id, leaderId, 'leader']);
-
         await client.query(`INSERT INTO clan_territories (clan_id, area, area_sqm) VALUES ($1, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), 0);`, [newClan.id]);
-
         await client.query('COMMIT');
         logDb(`COMMIT transaction for creating clan by ${leaderId}`);
         res.status(201).json({id: newClan.id.toString(), name: newClan.name, tag: newClan.tag, role: 'leader', base_is_set: false});
