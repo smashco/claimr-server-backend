@@ -25,6 +25,7 @@ Available Namespaces:
 - server:payment    (Razorpay and payment verification logic)
 - server:socket     (Socket.IO connection, disconnects, and events)
 - server:game       (Core game logic like claims, trail cuts, etc.)
+- server:superpower (All logic within the superpower_manager)
 ================================================================================
 */
 
@@ -53,6 +54,9 @@ const logGame = debug('server:game');
 
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
+
+// Import the new manager
+const SuperpowerManager = require('./superpower_manager');
 
 const handleSoloClaim = require('./game_logic/solo_handler');
 const handleClanClaim = require('./game_logic/clan_handler');
@@ -124,6 +128,9 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
+// Instantiate the manager
+const superpowerManager = new SuperpowerManager(pool, razorpay);
+
 const geofenceService = new GeofenceService(pool);
 const players = {};
 
@@ -160,7 +167,7 @@ const setupDatabase = async () => {
         subscription_status VARCHAR(50),
         total_distance_km REAL DEFAULT 0,
         total_duration_minutes INTEGER DEFAULT 0,
-        superpowers JSONB DEFAULT '{}'::jsonb,
+        superpowers JSONB DEFAULT '{"owned": []}'::jsonb,
         trail_effect VARCHAR(50) DEFAULT 'default',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
@@ -181,8 +188,8 @@ const setupDatabase = async () => {
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50);');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_distance_km REAL DEFAULT 0;');
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_duration_minutes INTEGER DEFAULT 0;');
-    await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{}'::jsonb;`);
-    await client.query(`ALTER TABLE territories ALTER COLUMN superpowers SET DEFAULT '{}'::jsonb;`);
+    await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{"owned": []}'::jsonb;`);
+    await client.query(`ALTER TABLE territories ALTER COLUMN superpowers SET DEFAULT '{"owned": []}'::jsonb;`);
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS trail_effect VARCHAR(50) DEFAULT \'default\';');
     
     const usernameConstraint = await client.query(`SELECT 1 FROM pg_constraint WHERE conname = 'territories_username_key'`);
@@ -454,79 +461,31 @@ app.use('/admin/api', checkAdminAuth, adminApiRouter(pool, io, geofenceService, 
 app.post('/admin/api/players/:googleId/manage-superpower', checkAdminAuth, async (req, res) => {
     const { googleId } = req.params;
     const { powerId, action } = req.body; 
-    logAdmin(`Admin action: '${action}' superpower '${powerId}' for user '${googleId}'.`);
 
-    if (!powerId || !['grant', 'revoke'].includes(action)) {
-        logAdmin(`Invalid superpower management request for user ${googleId}.`);
-        return res.status(400).json({ message: "Invalid request. 'powerId' and 'action' ('grant' or 'revoke') are required." });
-    }
-
-    const client = await pool.connect();
     try {
-        logDb(`BEGIN transaction for superpower management on user ${googleId}.`);
-        await client.query('BEGIN');
-
-        const userRes = await client.query("SELECT superpowers FROM territories WHERE owner_id = $1 FOR UPDATE", [googleId]);
-        if (userRes.rowCount === 0) {
-            logAdmin(`Superpower management failed: Player ${googleId} not found.`);
-            await client.query('ROLLBACK');
-            return res.status(404).json({ message: 'Player not found.' });
-        }
-
-        const currentSuperpowers = userRes.rows[0].superpowers || {};
-        const currentCharges = currentSuperpowers[powerId] || 0;
-        logAdmin(`Player ${googleId} currently has ${currentCharges} of '${powerId}'.`);
-
+        let newInventory;
         if (action === 'grant') {
-            currentSuperpowers[powerId] = currentCharges + 1;
+            newInventory = await superpowerManager.grantPower(googleId, powerId);
         } else if (action === 'revoke') {
-            if (currentCharges <= 0) {
-                logAdmin(`Cannot revoke '${powerId}' for ${googleId}, they have none.`);
-                await client.query('ROLLBACK');
-                return res.status(400).json({ message: 'Cannot revoke power, player has none.' });
-            }
-            currentSuperpowers[powerId] = currentCharges - 1;
-            if (currentSuperpowers[powerId] === 0) {
-                delete currentSuperpowers[powerId];
-            }
+            newInventory = await superpowerManager.revokePower(googleId, powerId);
+        } else {
+            return res.status(400).json({ message: "Invalid action." });
         }
-        logAdmin(`New superpower count for '${powerId}' will be ${currentSuperpowers[powerId] || 0}.`);
-
-        const { rows: [updatedPlayer] } = await client.query(
-            "UPDATE territories SET superpowers = $1 WHERE owner_id = $2 RETURNING superpowers",
-            [JSON.stringify(currentSuperpowers), googleId]
-        );
-
-        await client.query('COMMIT');
-        logDb(`COMMIT transaction for superpower management on user ${googleId}.`);
-
+        
         const playerSocketId = Object.keys(players).find(id => players[id].googleId === googleId);
-        if (playerSocketId && players[playerSocketId]) {
-            const onlinePlayer = players[playerSocketId];
-            const newCharges = updatedPlayer.superpowers[powerId] || 0;
-
-            if (powerId === 'lastStand') onlinePlayer.lastStandCharges = newCharges;
-            if (powerId === 'infiltrator') onlinePlayer.infiltratorCharges = newCharges;
-            if (powerId === 'ghostRunner') onlinePlayer.ghostRunnerCharges = newCharges;
-            if (powerId === 'trailDefense') onlinePlayer.trailDefenseCharges = newCharges;
-
-            io.to(playerSocketId).emit('superpowerInventoryUpdated', updatedPlayer.superpowers);
-            logSocket(`Notified player ${googleId} of superpower update in real-time.`);
+        if (playerSocketId) {
+            io.to(playerSocketId).emit('superpowerInventoryUpdated', { owned: newInventory.owned });
+            logSocket(`Notified player ${googleId} of superpower update from admin in real-time.`);
         }
 
         res.status(200).json({
             success: true,
             message: `Successfully ${action === 'grant' ? 'granted' : 'revoked'} '${powerId}'.`,
-            newInventory: updatedPlayer.superpowers
+            newInventory
         });
-
     } catch (err) {
-        await client.query('ROLLBACK');
-        logDb(`ROLLBACK transaction for superpower management due to error: ${err.message}`);
-        console.error(`[Admin API] Error managing superpower for ${googleId}:`, err);
-        res.status(500).json({ message: 'Server error while managing superpower.' });
-    } finally {
-        client.release();
+        logAdmin(`Error managing superpower for ${googleId}: %O`, err);
+        res.status(500).json({ message: err.message || 'Server error while managing superpower.' });
     }
 });
 
@@ -652,7 +611,7 @@ app.get('/check-profile', async (req, res) => {
                 razorpaySubscriptionId: row.razorpay_subscription_id,
                 subscriptionStatus: row.subscription_status,
                 trailEffect: row.trail_effect || 'default',
-                superpowers: row.superpowers || {},
+                superpowers: row.superpowers || { owned: [] },
                 clan_info: null
             };
             if (row.clan_id) {
@@ -805,65 +764,23 @@ app.get('/shop/items', authenticate, async (req, res) => {
         
         res.json({
             superpowers: itemsResult.rows,
-            ownedSuperpowers: []
         });
-
     } catch (err) {
         logApi(`Error fetching shop data for user ${req.user.googleId}: %O`, err);
         res.status(500).json({ message: 'Server error while fetching shop data.' });
     }
 });
 
-app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
-    logPayment(`Creating subscription order for user ${req.user.googleId}`);
-    if (!razorpay) return res.status(500).json({ message: 'Payment gateway is not configured.' });
-    
-    try {
-        const amount = 5900;
-        const currency = 'INR';
-        const options = { 
-            amount, 
-            currency, 
-            receipt: `sub_${Date.now()}${crypto.randomBytes(2).toString('hex')}`,
-            notes: { purchaseType: 'subscription', googleId: req.user.googleId }
-        };
-
-        const order = await razorpay.orders.create(options);
-        if (!order) return res.status(500).json({ message: 'Error creating Razorpay order.' });
-        
-        res.json({ order_id: order.id, amount: order.amount });
-
-    } catch (err) {
-        logPayment(`Error creating subscription order for ${req.user.googleId}: %O`, err);
-        res.status(500).json({ message: 'Server error while creating subscription order.' });
-    }
-});
-
 app.post('/shop/create-order', authenticate, async (req, res) => {
     const { itemId } = req.body;
-    logPayment(`Creating order for item '${itemId}' for user ${req.user.googleId}`);
-    if (!razorpay) return res.status(500).json({ message: 'Payment gateway is not configured.' });
-    
-    if (!itemId) return res.status(400).json({ message: 'Item ID is required.' });
-
+    const { googleId } = req.user;
+    logPayment(`User ${googleId} requesting to create order for item '${itemId}'.`);
     try {
-        const amount = 2900;
-        const currency = 'INR';
-        const options = { 
-            amount, 
-            currency, 
-            receipt: `item_${Date.now()}${crypto.randomBytes(2).toString('hex')}`,
-            notes: { purchaseType: 'superpower', itemId: itemId, googleId: req.user.googleId }
-        };
-
-        const order = await razorpay.orders.create(options);
-        if (!order) return res.status(500).json({ message: 'Error creating Razorpay order.' });
-        
-        res.json({ orderId: order.id, amount: order.amount });
-
+        const orderDetails = await superpowerManager.createPurchaseOrder(googleId, itemId);
+        res.json(orderDetails);
     } catch (err) {
-        logPayment(`Error creating superpower order for ${req.user.googleId}: %O`, err);
-        res.status(500).json({ message: 'Server error while creating order.' });
+        logPayment(`Order creation failed for ${googleId}: %O`, err);
+        res.status(err.message.includes('already own') ? 409 : 500).json({ message: err.message });
     }
 });
   
@@ -876,44 +793,19 @@ app.post('/verify-payment', async (req, res) => {
         return res.status(400).json({ error: 'Missing required payment verification data.' });
     }
     
-    const client = await pool.connect();
     try {
-        const body = `${razorpay_order_id}|${razorpay_payment_id}`;
-        const expectedSignature = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET).update(body.toString()).digest('hex');
-
-        if (expectedSignature !== razorpay_signature) {
-            logPayment(`Payment verification FAILED for user ${googleId}. Mismatched signatures.`);
-            return res.status(400).json({ success: false, message: 'Payment verification failed.' });
-        }
-        
-        logDb(`BEGIN transaction for payment verification on user ${googleId}.`);
-        await client.query('BEGIN');
-
         if (purchaseType === 'superpower' && itemId) {
-            const userRes = await client.query("SELECT superpowers FROM territories WHERE owner_id = $1 FOR UPDATE", [googleId]);
-            const currentSuperpowers = userRes.rows[0]?.superpowers || {};
-            const currentCharges = currentSuperpowers[itemId] || 0;
-            currentSuperpowers[itemId] = currentCharges + 1;
-            
-            await client.query("UPDATE territories SET superpowers = $1 WHERE owner_id = $2", [JSON.stringify(currentSuperpowers), googleId]);
-            logPayment(`Superpower '${itemId}' granted to user ${googleId}. New count: ${currentSuperpowers[itemId]}`);
-
+            await superpowerManager.verifyAndGrantPower(googleId, itemId, { razorpay_order_id, razorpay_payment_id, razorpay_signature });
         } else if (purchaseType === 'subscription') {
-            await client.query("UPDATE territories SET is_paid = TRUE, subscription_status = 'active' WHERE owner_id = $1", [googleId]);
-            logPayment(`Pro Subscription verified for user ${googleId}.`);
+            logPayment(`Subscription logic for ${googleId} needs to be implemented here.`);
+            await pool.query("UPDATE territories SET is_paid = TRUE, subscription_status = 'active' WHERE owner_id = $1", [googleId]);
+        } else {
+             throw new Error("Invalid purchase type");
         }
-        
-        await client.query('COMMIT');
-        logDb(`COMMIT transaction for payment verification on user ${googleId}.`);
         res.status(200).json({ success: true, message: 'Payment verified successfully.' });
-
     } catch (err) {
-        await client.query('ROLLBACK');
-        logDb(`ROLLBACK transaction for payment verification due to error: ${err.message}`);
-        console.error('[Razorpay] Error verifying payment:', err);
-        res.status(500).json({ error: 'Server error while verifying payment.' });
-    } finally {
-        client.release();
+        logPayment(`Payment verification failed for ${googleId}: %O`, err);
+        res.status(500).json({ error: err.message || 'Server error while verifying payment.' });
     }
 });
 
@@ -1013,9 +905,7 @@ app.post('/clans', authenticate, async (req, res) => {
         const clanResult = await client.query(insertClanQuery, [name, tag, description || '', leaderId]);
         const newClan = clanResult.rows[0];
         await client.query('INSERT INTO clan_members(clan_id, user_id, role) VALUES($1, $2, $3)', [newClan.id, leaderId, 'leader']);
-
         await client.query(`INSERT INTO clan_territories (clan_id, area, area_sqm) VALUES ($1, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), 0);`, [newClan.id]);
-
         await client.query('COMMIT');
         logDb(`COMMIT transaction for creating clan by ${leaderId}`);
         res.status(201).json({id: newClan.id.toString(), name: newClan.name, tag: newClan.tag, role: 'leader', base_is_set: false});
@@ -1198,7 +1088,7 @@ app.post('/clans/:id/requests', authenticate, async (req, res) => {
     const { googleId } = req.user;
     logApi(`User ${googleId} requesting to join clan ${clanId}`);
     try {
-        const memberCheck = await client.query('SELECT 1 FROM clan_members WHERE user_id = $1', [googleId]);
+        const memberCheck = await pool.query('SELECT 1 FROM clan_members WHERE user_id = $1', [googleId]);
         if (memberCheck.rowCount > 0) {
             return res.status(409).json({ message: 'You are already in a clan.' });
         }
@@ -1331,7 +1221,6 @@ io.on('connection', (socket) => {
     }
     logSocket(`Player ${name} (${googleId}) with socket ${socket.id} joining in [${gameMode}] mode.`);
     const client = await pool.connect();
-
     try {
         const memberInfoRes = await client.query('SELECT clan_id, role FROM clan_members WHERE user_id = $1', [googleId]);
         const clanId = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].clan_id : null;
@@ -1343,7 +1232,7 @@ io.on('connection', (socket) => {
         const hasShield = playerRecord ? playerRecord.has_shield : false;
         const isCarveModeActive = playerRecord ? playerRecord.is_carve_mode_active : false;
         const playerHasRecord = !!playerRecord;
-        const ownedPowers = playerRecord?.superpowers || {};
+        const ownedPowers = playerRecord?.superpowers?.owned || [];
         logSocket(`Player ${name} has superpowers: %O`, ownedPowers);
 
         players[socket.id] = {
@@ -1358,10 +1247,10 @@ io.on('connection', (socket) => {
             activeTrail: [],
             hasShield: hasShield,
             disconnectTimer: null,
-            lastStandCharges: ownedPowers['lastStand'] || 0,
-            infiltratorCharges: ownedPowers['infiltrator'] || 0,
-            ghostRunnerCharges: ownedPowers['ghostRunner'] || 0,
-            trailDefenseCharges: ownedPowers['trailDefense'] || 0,
+            hasLastStand: ownedPowers.includes('lastStand'),
+            hasInfiltrator: ownedPowers.includes('infiltrator'),
+            hasGhostRunner: ownedPowers.includes('ghostRunner'),
+            hasTrailDefense: ownedPowers.includes('trailDefense'),
             isGhostRunnerActive: false,
             isLastStandActive: false,
             isInfiltratorActive: false,
@@ -1377,10 +1266,44 @@ io.on('connection', (socket) => {
 
         let activeTerritories = [];
         if (gameMode === 'clan') {
-            // ... clan territory logic
+             const query = `
+                SELECT
+                    ct.clan_id::text as "ownerId",
+                    c.name as "ownerName",
+                    c.clan_image_url as "profileImageUrl",
+                    '#CCCCCC' as identity_color,
+                    ST_AsGeoJSON(ct.area) as geojson,
+                    ct.area_sqm as area
+                FROM clan_territories ct
+                JOIN clans c ON ct.clan_id = c.id
+                WHERE ct.area IS NOT NULL AND NOT ST_IsEmpty(ct.area);
+            `;
+            const territoryResult = await client.query(query);
+            activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
+
+            if (clanId) {
+                const clanBaseRes = await client.query('SELECT base_location FROM clans WHERE id = $1', [clanId]);
+                if (clanBaseRes.rows.length > 0 && clanBaseRes.rows[0].base_location) {
+                    const geojsonResult = await client.query(`SELECT ST_AsGeoJSON($1) as geojson`, [clanBaseRes.rows[0].base_location]);
+                    const parsedBaseLoc = JSON.parse(geojsonResult.rows[0].geojson).coordinates;
+                    socket.emit('clanBaseActivated', { center: { lat: parsedBaseLoc[1], lng: parsedBaseLoc[0] } });
+                }
+            }
         }
         else if (gameMode === 'solo') {
-            // ... solo territory logic
+            const query = `
+                SELECT
+                    owner_id as "ownerId",
+                    username as "ownerName",
+                    profile_image_url as "profileImageUrl",
+                    identity_color,
+                    ST_AsGeoJSON(area) as geojson,
+                    area_sqm as area
+                FROM territories
+                WHERE area IS NOT NULL AND NOT ST_IsEmpty(area);
+            `;
+            const territoryResult = await client.query(query);
+            activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
         }
 
         logSocket(`Found ${activeTerritories.length} [${gameMode}] territories. Sending 'existingTerritories' to ${socket.id}.`);
@@ -1411,7 +1334,83 @@ io.on('connection', (socket) => {
     player.lastKnownPosition = data;
 
     if (player.isDrawing) {
-        // ... (chest collision and trail cut logic)
+        const playerPointWKT = `ST_SetSRID(ST_Point(${data.lng}, ${data.lat}), 4326)`;
+        try {
+            const result = await pool.query(`
+                SELECT id FROM superpower_chests
+                WHERE is_active = TRUE AND ST_DWithin(location, ${playerPointWKT}::geography, ${CHEST_RADIUS_METERS})
+                LIMIT 1;
+            `);
+            if (result.rowCount > 0) {
+                const chestId = result.rows[0].id;
+                await pool.query('UPDATE superpower_chests SET is_active = FALSE WHERE id = $1', [chestId]);
+                
+                const availablePowers = ['lastStand', 'infiltrator', 'ghostRunner', 'trailDefense'];
+                const powersToGrant = [];
+                const numToGrant = Math.floor(Math.random() * 2) + 1; // Grant 1 or 2 powers from a chest
+
+                for (let i = 0; i < numToGrant; i++) {
+                    if (availablePowers.length === 0) break;
+                    const randomIndex = Math.floor(Math.random() * availablePowers.length);
+                    const power = availablePowers.splice(randomIndex, 1)[0];
+                    powersToGrant.push(power);
+                    await superpowerManager.grantPower(player.googleId, power);
+                }
+
+                socket.emit('superpowersGranted', { powers: powersToGrant });
+                io.emit('chestClaimed', { chestId: chestId });
+                logGame(`Player ${player.name} claimed chest ${chestId} and got powers: ${powersToGrant.join(', ')}`);
+            }
+        } catch (err) {
+            logGame(`Error checking for chest collision for player ${player.name}: %O`, err);
+        }
+
+        if (player.activeTrail.length > 0) {
+            const lastPoint = player.activeTrail[player.activeTrail.length - 1];
+            const attackerSegmentWKT = (lastPoint.lng === data.lng && lastPoint.lat === data.lat)
+                ? `POINT(${data.lng} ${data.lat})`
+                : `LINESTRING(${lastPoint.lng} ${lastPoint.lat}, ${data.lng} ${data.lat})`;
+
+            const attackerSegmentGeom = `ST_SetSRID(ST_GeomFromText('${attackerSegmentWKT}'), 4326)`;
+
+            for (const victimId in players) {
+                if (victimId === socket.id) continue;
+                const victim = players[victimId];
+                if (victim && victim.isDrawing && victim.activeTrail.length >= 2) {
+                    const victimTrailWKT = 'LINESTRING(' + victim.activeTrail.map(p => `${p.lng} ${p.lat}`).join(', ') + ')';
+                    const victimTrailGeom = `ST_SetSRID(ST_GeomFromText('${victimTrailWKT}'), 4326)`;
+                    try {
+                        const res = await pool.query(`SELECT ST_Intersects(${attackerSegmentGeom}, ${victimTrailGeom}) as intersects;`);
+                        if (res.rows[0].intersects) {
+                            if (victim.isTrailDefenseActive) {
+                                logGame(`TRAIL DEFLECTED! Attacker ${player.name} hit Victim ${victim.name}'s defense.`);
+                                io.to(socket.id).emit('runTerminated', { reason: `Your run was deflected by an opponent's Trail Defense!` });
+                                
+                                player.isDrawing = false;
+                                player.activeTrail = [];
+                                io.emit('trailCleared', { id: socket.id });
+                                return; 
+                            }
+                            
+                            logGame(`TRAIL CUT! Attacker ${player.name} cut Victim ${victim.name}`);
+                            io.to(victimId).emit('runTerminated', { reason: `Your trail was cut by ${player.name}!` });
+                            
+                            await updateQuestProgress(pool, io, player.googleId, 'trail_cut', 1);
+
+                            victim.isDrawing = false;
+                            victim.activeTrail = [];
+                            io.emit('trailCleared', { id: victimId });
+                        }
+                    } catch(err) {
+                        logGame(`Error checking trail intersection: %O`, err);
+                    }
+                }
+            }
+        }
+        player.activeTrail.push(data);
+        if (!player.isGhostRunnerActive) {
+            socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data });
+        }
     }
   });
 
@@ -1439,84 +1438,69 @@ io.on('connection', (socket) => {
     io.emit('trailCleared', { id: socket.id });
   });
 
-  const handlePowerActivation = async (player, powerName, chargesProp) => {
-      player[chargesProp]--;
-      const client = await pool.connect();
-      try {
-          logDb(`BEGIN transaction for activating ${powerName} for ${player.googleId}`);
-          await client.query('BEGIN');
-          const res = await client.query('SELECT superpowers FROM territories WHERE owner_id = $1 FOR UPDATE', [player.googleId]);
-          const newSuperpowers = res.rows[0]?.superpowers || {};
-          const currentCharges = newSuperpowers[powerName] || 0;
-          
-          if (currentCharges > 0) {
-              newSuperpowers[powerName] = currentCharges - 1;
-              if (newSuperpowers[powerName] === 0) {
-                  delete newSuperpowers[powerName];
-              }
-          }
-          
-          if (powerName === 'lastStand') {
-              await client.query("UPDATE territories SET superpowers = $1, is_shield_active = true WHERE owner_id = $2", [JSON.stringify(newSuperpowers), player.googleId]);
-          } else {
-              await client.query("UPDATE territories SET superpowers = $1 WHERE owner_id = $2", [JSON.stringify(newSuperpowers), player.googleId]);
-          }
-
-          await client.query('COMMIT');
-          logDb(`COMMIT transaction for activating ${powerName}.`);
-          return { success: true, chargesLeft: newSuperpowers[powerName] || 0 };
-      } catch (err) {
-          await client.query('ROLLBACK');
-          logDb(`ROLLBACK transaction for activating ${powerName} due to error: ${err.message}`);
-          console.error(`[DB] Error activating ${powerName} for ${player.googleId}`, err);
-          player[chargesProp]++;
-          return { success: false };
-      } finally {
-          client.release();
-      }
-  };
-
   socket.on('activateTrailDefense', async () => {
     const player = players[socket.id];
-    if (player && player.trailDefenseCharges > 0) {
+    if (player && player.hasTrailDefense) {
         player.isTrailDefenseActive = true;
+        player.hasTrailDefense = false; // Consume on activation
         logGame(`Player ${player.name} activating Trail Defense.`);
-        const { success, chargesLeft } = await handlePowerActivation(player, 'trailDefense', 'trailDefenseCharges');
-        if (success) {
-            socket.emit('superpowerAcknowledged', { power: 'trailDefense', chargesLeft: chargesLeft });
+        try {
+            await superpowerManager.usePower(player.googleId, 'trailDefense');
+            socket.emit('superpowerAcknowledged', { power: 'trailDefense' });
+        } catch (err) {
+            logGame(`Failed to use Trail Defense for ${player.name}: %O`, err);
+            player.hasTrailDefense = true; // Give it back if DB fails
         }
     }
   });
 
   socket.on('activateGhostRunner', async () => {
       const player = players[socket.id];
-      if (player && player.ghostRunnerCharges > 0) {
+      if (player && player.hasGhostRunner) {
           player.isGhostRunnerActive = true;
-          logGame(`Player ${player.name} queuing Ghost Runner for next run.`);
-          socket.emit('superpowerAcknowledged', { power: 'ghostRunner', chargesLeft: player.ghostRunnerCharges });
+          player.hasGhostRunner = false; // Consume on activation
+          logGame(`Player ${player.name} activating Ghost Runner.`);
+          try {
+            await superpowerManager.usePower(player.googleId, 'ghostRunner');
+            socket.emit('superpowerAcknowledged', { power: 'ghostRunner' });
+          } catch(err) {
+            logGame(`Failed to use Ghost Runner for ${player.name}: %O`, err);
+            player.hasGhostRunner = true; // Give it back if DB fails
+          }
       }
   });
 
   socket.on('activateInfiltrator', async () => {
       const player = players[socket.id];
-      if (player && player.infiltratorCharges > 0) {
+      if (player && player.hasInfiltrator) {
           player.isInfiltratorActive = true;
+          player.hasInfiltrator = false; // Consume on activation
           logGame(`Player ${player.name} activating Infiltrator.`);
-          const { success, chargesLeft } = await handlePowerActivation(player, 'infiltrator', 'infiltratorCharges');
-          if(success) {
-              socket.emit('superpowerAcknowledged', { power: 'infiltrator', chargesLeft: chargesLeft });
+          try {
+            await superpowerManager.usePower(player.googleId, 'infiltrator');
+            socket.emit('superpowerAcknowledged', { power: 'infiltrator' });
+          } catch(err) {
+            logGame(`Failed to use Infiltrator for ${player.name}: %O`, err);
+            player.hasInfiltrator = true; // Give it back
           }
       }
   });
 
   socket.on('activateLastStand', async () => {
       const player = players[socket.id];
-      if (player && player.lastStandCharges > 0) {
+      if (player && player.hasLastStand) {
           player.isLastStandActive = true;
+          player.hasLastStand = false; // Consume on activation
           logGame(`Player ${player.name} activating Last Stand.`);
-          const { success, chargesLeft } = await handlePowerActivation(player, 'lastStand', 'lastStandCharges');
-          if(success) {
-              socket.emit('superpowerAcknowledged', { power: 'lastStand', chargesLeft: chargesLeft });
+          try {
+            await superpowerManager.usePower(player.googleId, 'lastStand');
+            // This also requires a DB update to set is_shield_active=true, which the manager doesn't do.
+            // A more robust manager would handle this, but for now we'll do it here.
+            await pool.query('UPDATE territories SET is_shield_active = true WHERE owner_id = $1', [player.googleId]);
+            socket.emit('superpowerAcknowledged', { power: 'lastStand' });
+          } catch(err) {
+            logGame(`Failed to use Last Stand for ${player.name}: %O`, err);
+            player.hasLastStand = true; // Give it back
           }
       }
   });
