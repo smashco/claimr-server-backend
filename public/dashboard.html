@@ -238,13 +238,13 @@
     </div>
 
     <!-- =================================================================== -->
-    <!-- NEW: Superpower Management Modal -->
+    <!-- Superpower Management Modal -->
     <!-- =================================================================== -->
     <div class="modal fade" id="superpowerModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="superpowerModalTitle">Manage Superpowers</h5>
+                    <h5 class="modal-title" id="superpowerModalTitle">Manage Powers for...</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
@@ -312,8 +312,6 @@
 
         async function fetchPlayers() {
             try {
-                // IMPORTANT: Assumes the /admin/api/players endpoint now returns
-                // a `superpowers` object (e.g., {"lastStand": 1}) for each player.
                 const players = await apiFetch('/admin/api/players');
                 renderPlayers(players);
             } catch (error) {
@@ -329,8 +327,7 @@
             players.forEach(player => {
                 const row = document.createElement('tr');
                 const areaKm2 = (player.area_sqm / 1000000).toFixed(6);
-                // Safely stringify the superpowers object to pass to the onclick handler
-                const superpowersJSON = JSON.stringify(player.superpowers || {});
+                const superpowersJSON = CSS.escape(JSON.stringify(player.superpowers || { owned: [] }));
 
                 row.innerHTML = `
                     <td><span class="badge ${player.isOnline ? 'bg-success' : 'bg-secondary'}">${player.isOnline ? 'Online' : 'Offline'}</span></td>
@@ -338,8 +335,7 @@
                     <td>${areaKm2}</td>
                     <td class="btn-group">
                         <a href="/admin/player_details.html?id=${player.owner_id}" class="btn btn-sm btn-primary">Details</a>
-                        <!-- NEW: Manage Powers button -->
-                        <button class="btn btn-sm btn-info" onclick='openSuperpowerModal("${player.owner_id}", "${player.username}", ${superpowersJSON})'>Powers</button>
+                        <button class="btn btn-sm btn-info" onclick="openSuperpowerModal('${player.owner_id}', '${player.username || 'N/A'}' , JSON.parse(this.dataset.superpowers))" data-superpowers='${superpowersJSON}'>Powers</button>
                         <button class="btn btn-sm btn-warning" onclick="performAction('${player.owner_id}', 'reset-territory', '${player.username}')">Reset</button>
                         <button class="btn btn-sm btn-danger" onclick="performAction('${player.owner_id}', 'delete', '${player.username}')">Delete</button>
                     </td>
@@ -354,7 +350,7 @@
         }
         
         // ===================================================================
-        // NEW: Functions to manage the superpower modal
+        // NEW/UPDATED: Functions to manage the superpower modal
         // ===================================================================
         function openSuperpowerModal(googleId, username, currentSuperpowers) {
             const modalTitle = document.getElementById('superpowerModalTitle');
@@ -363,43 +359,60 @@
             modalTitle.textContent = `Manage Powers for: ${username}`;
             modalList.innerHTML = ''; // Clear previous content
 
-            const allPowers = ['lastStand', 'infiltrator', 'ghostRunner', 'trailDefense'];
+            const allPowers = {
+                'lastStand': 'Last Stand',
+                'infiltrator': 'Infiltrator',
+                'ghostRunner': 'Ghost Runner',
+                'trailDefense': 'Trail Defense'
+            };
+            
+            const ownedPowers = currentSuperpowers?.owned || [];
 
-            allPowers.forEach(powerId => {
-                const currentCount = currentSuperpowers[powerId] || 0;
-                const powerName = powerId.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase()); // Format name for display
+            for (const [powerId, powerName] of Object.entries(allPowers)) {
+                const hasPower = ownedPowers.includes(powerId);
+                const currentCount = hasPower ? 1 : 0;
 
                 const item = document.createElement('div');
                 item.className = 'list-group-item d-flex justify-content-between align-items-center';
                 item.innerHTML = `
                     <div>
                         ${powerName}
-                        <span class="badge bg-primary rounded-pill ms-2">${currentCount}</span>
+                        <span id="power-count-${powerId}" class="badge ${hasPower ? 'bg-success' : 'bg-secondary'} rounded-pill ms-2">${currentCount}</span>
                     </div>
                     <div class="btn-group">
-                        <button class="btn btn-sm btn-success" onclick="manageSuperpower('${googleId}', '${username}', '${powerId}', 'grant')">Grant (+1)</button>
-                        <button class="btn btn-sm btn-warning" onclick="manageSuperpower('${googleId}', '${username}', '${powerId}', 'revoke')" ${currentCount === 0 ? 'disabled' : ''}>Revoke (-1)</button>
+                        <button class="btn btn-sm btn-success" onclick="manageSuperpower('${googleId}', '${powerId}', 'grant')">Grant (+1)</button>
+                        <button class="btn btn-sm btn-warning" onclick="manageSuperpower('${googleId}', '${powerId}', 'revoke')" ${!hasPower ? 'disabled' : ''}>Revoke (-1)</button>
                     </div>
                 `;
                 modalList.appendChild(item);
-            });
+            }
             
             superpowerModalInstance.show();
         }
 
-        async function manageSuperpower(googleId, username, powerId, action) {
+        async function manageSuperpower(googleId, powerId, action) {
             try {
                 const result = await apiFetch(`/admin/api/players/${googleId}/manage-superpower`, {
                     method: 'POST',
                     body: { powerId, action }
                 });
-                alert(result.message);
                 
-                // Refresh the modal content with the new inventory
-                openSuperpowerModal(googleId, username, result.newInventory);
-                
-                // Also refresh the main player list in the background
+                // Refresh the main player list in the background to get updated data for everyone
                 fetchPlayers();
+                
+                // Update the modal UI immediately for instant feedback
+                const countElement = document.getElementById(`power-count-${powerId}`);
+                const revokeButton = countElement.closest('.list-group-item').querySelector('button.btn-warning');
+                
+                const hasPower = result.newInventory?.owned?.includes(powerId);
+                
+                if (countElement) {
+                    countElement.textContent = hasPower ? '1' : '0';
+                    countElement.className = `badge ${hasPower ? 'bg-success' : 'bg-secondary'} rounded-pill ms-2`;
+                }
+                if (revokeButton) {
+                    revokeButton.disabled = !hasPower;
+                }
 
             } catch (error) {
                 alert(`Error: ${error.message}`);
