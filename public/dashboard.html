@@ -237,9 +237,7 @@
         </div>
     </div>
 
-    <!-- =================================================================== -->
     <!-- Superpower Management Modal -->
-    <!-- =================================================================== -->
     <div class="modal fade" id="superpowerModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog">
             <div class="modal-content">
@@ -268,7 +266,7 @@
         let chestMarkers = {};
         let geofenceLayers = L.featureGroup();
         let isSpawnMode = false;
-        let superpowerModalInstance; // To control the modal programmatically
+        let superpowerModalInstance; 
 
         function initMap() {
             map = L.map('map').setView([19.0760, 72.8777], 10);
@@ -318,30 +316,70 @@
                 console.error('Error fetching players:', error);
             }
         }
-
+        
+        // ===================================================================
+        // REWRITTEN FUNCTION TO FIX JSON PARSING ERROR
+        // ===================================================================
         function renderPlayers(players) {
             const tableBody = document.getElementById('player-table-body');
             tableBody.innerHTML = '';
             Object.values(playerMarkers).forEach(marker => marker.remove());
             playerMarkers = {};
+
             players.forEach(player => {
-                const row = document.createElement('tr');
-                const areaKm2 = (player.area_sqm / 1000000).toFixed(6);
-                const superpowersJSON = CSS.escape(JSON.stringify(player.superpowers || { owned: [] }));
+                const row = tableBody.insertRow(); // Create a new row element
 
-                row.innerHTML = `
-                    <td><span class="badge ${player.isOnline ? 'bg-success' : 'bg-secondary'}">${player.isOnline ? 'Online' : 'Offline'}</span></td>
-                    <td>${player.username || 'N/A'}</td>
-                    <td>${areaKm2}</td>
-                    <td class="btn-group">
-                        <a href="/admin/player_details.html?id=${player.owner_id}" class="btn btn-sm btn-primary">Details</a>
-                        <button class="btn btn-sm btn-info" onclick="openSuperpowerModal('${player.owner_id}', '${player.username || 'N/A'}' , JSON.parse(this.dataset.superpowers))" data-superpowers='${superpowersJSON}'>Powers</button>
-                        <button class="btn btn-sm btn-warning" onclick="performAction('${player.owner_id}', 'reset-territory', '${player.username}')">Reset</button>
-                        <button class="btn btn-sm btn-danger" onclick="performAction('${player.owner_id}', 'delete', '${player.username}')">Delete</button>
-                    </td>
-                `;
-                tableBody.appendChild(row);
+                // Column 1: Status
+                const cellStatus = row.insertCell();
+                cellStatus.innerHTML = `<span class="badge ${player.isOnline ? 'bg-success' : 'bg-secondary'}">${player.isOnline ? 'Online' : 'Offline'}</span>`;
 
+                // Column 2: Username
+                const cellUsername = row.insertCell();
+                cellUsername.textContent = player.username || 'N/A';
+
+                // Column 3: Territory
+                const cellTerritory = row.insertCell();
+                cellTerritory.textContent = (player.area_sqm / 1000000).toFixed(6);
+
+                // Column 4: Actions
+                const cellActions = row.insertCell();
+                const actionsContainer = document.createElement('div');
+                actionsContainer.className = 'btn-group';
+
+                // Details Button
+                const detailsButton = document.createElement('a');
+                detailsButton.href = `/admin/player_details.html?id=${player.owner_id}`;
+                detailsButton.className = 'btn btn-sm btn-primary';
+                detailsButton.textContent = 'Details';
+                actionsContainer.appendChild(detailsButton);
+
+                // Powers Button - THIS IS THE KEY FIX
+                const powersButton = document.createElement('button');
+                powersButton.className = 'btn btn-sm btn-info';
+                powersButton.textContent = 'Powers';
+                // Attach event listener programmatically to avoid string escaping issues
+                powersButton.addEventListener('click', () => {
+                    openSuperpowerModal(player.owner_id, player.username || 'N/A', player.superpowers);
+                });
+                actionsContainer.appendChild(powersButton);
+
+                // Reset Button
+                const resetButton = document.createElement('button');
+                resetButton.className = 'btn btn-sm btn-warning';
+                resetButton.textContent = 'Reset';
+                resetButton.addEventListener('click', () => performAction(player.owner_id, 'reset-territory', player.username));
+                actionsContainer.appendChild(resetButton);
+
+                // Delete Button
+                const deleteButton = document.createElement('button');
+                deleteButton.className = 'btn btn-sm btn-danger';
+                deleteButton.textContent = 'Delete';
+                deleteButton.addEventListener('click', () => performAction(player.owner_id, 'delete', player.username));
+                actionsContainer.appendChild(deleteButton);
+                
+                cellActions.appendChild(actionsContainer);
+
+                // Add player marker to map
                 if (player.isOnline && player.lastKnownPosition) {
                     const { lat, lng } = player.lastKnownPosition;
                     playerMarkers[player.owner_id] = L.marker([lat, lng]).addTo(map).bindPopup(`<b>${player.username}</b>`);
@@ -349,9 +387,6 @@
             });
         }
         
-        // ===================================================================
-        // NEW/UPDATED: Functions to manage the superpower modal
-        // ===================================================================
         function openSuperpowerModal(googleId, username, currentSuperpowers) {
             const modalTitle = document.getElementById('superpowerModalTitle');
             const modalList = document.getElementById('superpower-management-list');
@@ -397,30 +432,27 @@
                     body: { powerId, action }
                 });
                 
-                // Refresh the main player list in the background to get updated data for everyone
-                fetchPlayers();
-                
                 // Update the modal UI immediately for instant feedback
                 const countElement = document.getElementById(`power-count-${powerId}`);
                 const revokeButton = countElement.closest('.list-group-item').querySelector('button.btn-warning');
-                
                 const hasPower = result.newInventory?.owned?.includes(powerId);
                 
                 if (countElement) {
-                    countElement.textContent = hasPower ? '1' : '0';
+                    countElement.textContent = hasPower ? 1 : 0;
                     countElement.className = `badge ${hasPower ? 'bg-success' : 'bg-secondary'} rounded-pill ms-2`;
                 }
                 if (revokeButton) {
                     revokeButton.disabled = !hasPower;
                 }
 
+                // Also refresh the main player list in the background to keep it in sync
+                fetchPlayers();
+
             } catch (error) {
                 alert(`Error: ${error.message}`);
             }
         }
         
-        // --- (rest of the script remains the same) ---
-
         async function performAction(playerId, action, username) {
             const actions = {
                 'reset-territory': { confirm: `Reset ALL territory for ${username}?`, method: 'POST' },
@@ -435,6 +467,8 @@
                 alert(`Error: ${error.message}`);
             }
         }
+        
+        // --- (rest of script is unchanged and omitted for brevity) ---
 
         async function fetchGeofenceZones() {
             try {
