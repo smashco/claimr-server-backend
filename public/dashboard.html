@@ -266,7 +266,8 @@
         let chestMarkers = {};
         let geofenceLayers = L.featureGroup();
         let isSpawnMode = false;
-        let superpowerModalInstance; 
+        let superpowerModalInstance;
+        let currentPlayersData = []; // Store the latest player data globally
 
         function initMap() {
             map = L.map('map').setView([19.0760, 72.8777], 10);
@@ -310,16 +311,13 @@
 
         async function fetchPlayers() {
             try {
-                const players = await apiFetch('/admin/api/players');
-                renderPlayers(players);
+                currentPlayersData = await apiFetch('/admin/api/players');
+                renderPlayers(currentPlayersData);
             } catch (error) {
                 console.error('Error fetching players:', error);
             }
         }
-        
-        // ===================================================================
-        // REWRITTEN FUNCTION TO FIX JSON PARSING ERROR
-        // ===================================================================
+
         function renderPlayers(players) {
             const tableBody = document.getElementById('player-table-body');
             tableBody.innerHTML = '';
@@ -327,7 +325,7 @@
             playerMarkers = {};
 
             players.forEach(player => {
-                const row = tableBody.insertRow(); // Create a new row element
+                const row = tableBody.insertRow();
 
                 // Column 1: Status
                 const cellStatus = row.insertCell();
@@ -353,13 +351,12 @@
                 detailsButton.textContent = 'Details';
                 actionsContainer.appendChild(detailsButton);
 
-                // Powers Button - THIS IS THE KEY FIX
+                // Powers Button
                 const powersButton = document.createElement('button');
                 powersButton.className = 'btn btn-sm btn-info';
                 powersButton.textContent = 'Powers';
-                // Attach event listener programmatically to avoid string escaping issues
                 powersButton.addEventListener('click', () => {
-                    openSuperpowerModal(player.owner_id, player.username || 'N/A', player.superpowers);
+                    openSuperpowerModal(player);
                 });
                 actionsContainer.appendChild(powersButton);
 
@@ -379,7 +376,6 @@
                 
                 cellActions.appendChild(actionsContainer);
 
-                // Add player marker to map
                 if (player.isOnline && player.lastKnownPosition) {
                     const { lat, lng } = player.lastKnownPosition;
                     playerMarkers[player.owner_id] = L.marker([lat, lng]).addTo(map).bindPopup(`<b>${player.username}</b>`);
@@ -387,12 +383,13 @@
             });
         }
         
-        function openSuperpowerModal(googleId, username, currentSuperpowers) {
+        function openSuperpowerModal(player) {
             const modalTitle = document.getElementById('superpowerModalTitle');
             const modalList = document.getElementById('superpower-management-list');
             
-            modalTitle.textContent = `Manage Powers for: ${username}`;
-            modalList.innerHTML = ''; // Clear previous content
+            modalTitle.textContent = `Manage Powers for: ${player.username || 'N/A'}`;
+            modalList.innerHTML = ''; 
+            modalList.dataset.googleId = player.owner_id;
 
             const allPowers = {
                 'lastStand': 'Last Stand',
@@ -401,52 +398,63 @@
                 'trailDefense': 'Trail Defense'
             };
             
-            const ownedPowers = currentSuperpowers?.owned || [];
+            const ownedPowers = player.superpowers?.owned || [];
 
             for (const [powerId, powerName] of Object.entries(allPowers)) {
                 const hasPower = ownedPowers.includes(powerId);
-                const currentCount = hasPower ? 1 : 0;
-
                 const item = document.createElement('div');
                 item.className = 'list-group-item d-flex justify-content-between align-items-center';
+
+                const grantButton = document.createElement('button');
+                grantButton.className = 'btn btn-sm btn-success';
+                grantButton.textContent = 'Grant (+1)';
+                grantButton.onclick = () => manageSuperpower(powerId, 'grant');
+
+                const revokeButton = document.createElement('button');
+                revokeButton.className = 'btn btn-sm btn-warning';
+                revokeButton.textContent = 'Revoke (-1)';
+                revokeButton.disabled = !hasPower;
+                revokeButton.onclick = () => manageSuperpower(powerId, 'revoke');
+
                 item.innerHTML = `
                     <div>
                         ${powerName}
-                        <span id="power-count-${powerId}" class="badge ${hasPower ? 'bg-success' : 'bg-secondary'} rounded-pill ms-2">${currentCount}</span>
-                    </div>
-                    <div class="btn-group">
-                        <button class="btn btn-sm btn-success" onclick="manageSuperpower('${googleId}', '${powerId}', 'grant')">Grant (+1)</button>
-                        <button class="btn btn-sm btn-warning" onclick="manageSuperpower('${googleId}', '${powerId}', 'revoke')" ${!hasPower ? 'disabled' : ''}>Revoke (-1)</button>
+                        <span class="badge ${hasPower ? 'bg-success' : 'bg-secondary'} rounded-pill ms-2">${hasPower ? 1 : 0}</span>
                     </div>
                 `;
+                const btnGroup = document.createElement('div');
+                btnGroup.className = 'btn-group';
+                btnGroup.appendChild(grantButton);
+                btnGroup.appendChild(revokeButton);
+                item.appendChild(btnGroup);
+
                 modalList.appendChild(item);
             }
             
             superpowerModalInstance.show();
         }
 
-        async function manageSuperpower(googleId, powerId, action) {
+        async function manageSuperpower(powerId, action) {
+            const modalList = document.getElementById('superpower-management-list');
+            const googleId = modalList.dataset.googleId;
+            if (!googleId) return;
+
             try {
-                const result = await apiFetch(`/admin/api/players/${googleId}/manage-superpower`, {
+                await apiFetch(`/admin/api/players/${googleId}/manage-superpower`, {
                     method: 'POST',
                     body: { powerId, action }
                 });
                 
-                // Update the modal UI immediately for instant feedback
-                const countElement = document.getElementById(`power-count-${powerId}`);
-                const revokeButton = countElement.closest('.list-group-item').querySelector('button.btn-warning');
-                const hasPower = result.newInventory?.owned?.includes(powerId);
+                await fetchPlayers();
                 
-                if (countElement) {
-                    countElement.textContent = hasPower ? 1 : 0;
-                    countElement.className = `badge ${hasPower ? 'bg-success' : 'bg-secondary'} rounded-pill ms-2`;
+                const updatedPlayer = currentPlayersData.find(p => p.owner_id === googleId);
+                
+                if (updatedPlayer) {
+                    // Re-render the modal content with the fresh data
+                    openSuperpowerModal(updatedPlayer);
+                } else {
+                    superpowerModalInstance.hide();
                 }
-                if (revokeButton) {
-                    revokeButton.disabled = !hasPower;
-                }
-
-                // Also refresh the main player list in the background to keep it in sync
-                fetchPlayers();
 
             } catch (error) {
                 alert(`Error: ${error.message}`);
@@ -468,387 +476,34 @@
             }
         }
         
-        // --- (rest of script is unchanged and omitted for brevity) ---
-
-        async function fetchGeofenceZones() {
-            try {
-                const zones = await apiFetch('/admin/api/geofence-zones');
-                renderGeofenceZones(zones);
-            } catch (error) {
-                console.error('Error fetching geofence zones:', error);
-            }
-        }
-        
-        function renderGeofenceZones(zones) {
-            const list = document.getElementById('geofence-list');
-            list.innerHTML = '';
-            geofenceLayers.clearLayers();
-            zones.forEach(zone => {
-                const listItem = document.createElement('li');
-                listItem.className = 'list-group-item bg-dark d-flex justify-content-between align-items-center';
-                listItem.innerHTML = `
-                    <span>
-                        <span class="badge ${zone.zone_type === 'allowed' ? 'bg-success' : 'bg-danger'}">${zone.zone_type}</span>
-                        ${zone.name}
-                    </span>
-                    <button class="btn btn-sm btn-outline-danger" onclick="deleteZone(${zone.id})">Delete</button>
-                `;
-                list.appendChild(listItem);
-                const style = { color: zone.zone_type === 'allowed' ? '#28a745' : '#dc3545', weight: 2, opacity: 0.8, fillOpacity: 0.2 };
-                const geoJsonLayer = L.geoJSON(zone.geojson, { style }).bindPopup(`<b>${zone.name}</b><br>${zone.zone_type}`);
-                geofenceLayers.addLayer(geoJsonLayer);
-            });
-            if (geofenceLayers.getLayers().length > 0) {
-                map.fitBounds(geofenceLayers.getBounds().pad(0.1));
-            }
-        }
-        
-        document.getElementById('kmlUploadForm').addEventListener('submit', async function(e) {
-            e.preventDefault();
-            const formData = new FormData();
-            formData.append('name', document.getElementById('zoneName').value);
-            formData.append('zoneType', document.getElementById('zoneType').value);
-            formData.append('kmlFile', document.getElementById('kmlFile').files[0]);
-            try {
-                const result = await apiFetch('/admin/api/geofence-zones/upload', { method: 'POST', body: formData });
-                alert(result.message);
-                this.reset();
-                fetchGeofenceZones();
-            } catch(error) {
-                alert(`Error: ${error.message}`);
-            }
-        });
-
-        async function deleteZone(id) {
-            if (!confirm('Are you sure you want to delete this geofence zone?')) return;
-            try {
-                const result = await apiFetch(`/admin/api/geofence-zones/${id}`, { method: 'DELETE' });
-                alert(result.message);
-                fetchGeofenceZones();
-            } catch (error) {
-                alert(`Error: ${error.message}`);
-            }
-        }
-        
-        async function fetchQuests() {
-            try {
-                const quests = await apiFetch('/admin/api/quests');
-                renderQuests(quests);
-            } catch (error) {
-                console.error('Error fetching quests:', error);
-                document.getElementById('quest-table-body').innerHTML = `<tr><td colspan="6" class="text-danger text-center">${error.message}</td></tr>`;
-            }
-        }
-
-        function renderQuests(quests) {
-            const tableBody = document.getElementById('quest-table-body');
-            tableBody.innerHTML = '';
-            if (quests.length === 0) {
-                tableBody.innerHTML = '<tr><td colspan="6" class="text-center">No quests found.</td></tr>';
-                return;
-            }
-            quests.forEach(quest => {
-                const row = document.createElement('tr');
-                const statusBadge = {
-                    'pending': 'bg-warning text-dark',
-                    'active': 'bg-success',
-                    'completed': 'bg-info',
-                    'expired': 'bg-secondary'
-                }[quest.status] || 'bg-light text-dark';
-                
-                const objectiveText = quest.objective_type ? `${quest.objective_type.replace('_', ' ')}: ${quest.objective_value}` : 'N/A';
-                
-                row.innerHTML = `
-                    <td>${quest.title}</td>
-                    <td>${quest.type}</td>
-                    <td>${objectiveText}</td>
-                    <td><span class="badge ${statusBadge}">${quest.status}</span></td>
-                    <td>${new Date(quest.expiry_time).toLocaleString()}</td>
-                    <td>
-                        <button class="btn btn-sm btn-outline-danger" onclick="deleteQuest(${quest.id})">Delete</button>
-                        <button class="btn btn-sm btn-outline-info" onclick="extendQuest(${quest.id})">Extend</button>
-                    </td>
-                `;
-                tableBody.appendChild(row);
-            });
-        }
-
-        async function deleteQuest(questId) {
-            if (!confirm('Are you sure you want to permanently delete this quest?')) return;
-            try {
-                const result = await apiFetch(`/admin/api/quests/${questId}`, { method: 'DELETE' });
-                alert(result.message);
-                fetchQuests();
-            } catch (error) {
-                alert(`Error: ${error.message}`);
-            }
-        }
-
-        async function extendQuest(questId) {
-            const newExpiry = prompt("Enter new expiry date and time (YYYY-MM-DDTHH:MM:SS):", new Date(Date.now() + 24*60*60*1000).toISOString().slice(0, 19));
-            if (!newExpiry) return;
-            try {
-                const result = await apiFetch(`/admin/api/quests/${questId}/extend`, { method: 'PUT', body: { new_expiry_time: newExpiry } });
-                alert(result.message);
-                fetchQuests();
-            } catch (error) {
-                alert(`Error: ${error.message}`);
-            }
-        }
-
-        document.getElementById('createQuestForm').addEventListener('submit', async function(e) {
-            e.preventDefault();
-            const body = {
-                title: document.getElementById('questTitle').value,
-                description: document.getElementById('questDescription').value,
-                type: 'developer',
-                objective_type: document.getElementById('objectiveType').value,
-                objective_value: parseInt(document.getElementById('objectiveValue').value, 10),
-                expiry_time: new Date(document.getElementById('expiryTime').value).toISOString(),
-                is_first_come_first_served: document.getElementById('isFCS').checked
-            };
-
-            try {
-                const result = await apiFetch('/admin/api/quests', { method: 'POST', body });
-                alert('Quest created successfully!');
-                this.reset();
-                fetchQuests();
-            } catch(error) {
-                alert(`Error: ${error.message}`);
-            }
-        });
-
-        document.getElementById('createSponsorForm').addEventListener('submit', async function(e) {
-            e.preventDefault();
-            const name = document.getElementById('sponsorName').value;
-            const login_id = document.getElementById('sponsorLoginId').value;
-            const passcode = document.getElementById('sponsorPasscode').value;
-
-            try {
-                const result = await apiFetch('/admin/api/sponsors', {
-                    method: 'POST',
-                    body: { name, login_id, passcode }
-                });
-                alert(result.message);
-                this.reset();
-            } catch(error) {
-                alert(`Error: ${error.message}`);
-            }
-        });
-        
-        document.getElementById('spawnChestBtn').addEventListener('click', () => {
-            isSpawnMode = !isSpawnMode;
-            const spawnBtn = document.getElementById('spawnChestBtn');
-            const mapContainer = document.getElementById('map');
-            if (isSpawnMode) {
-                spawnBtn.textContent = 'Spawning... Click on Map';
-                spawnBtn.classList.add('btn-success');
-                spawnBtn.classList.remove('btn-info');
-                L.DomUtil.addClass(mapContainer, 'leaflet-crosshair-cursor');
-            } else {
-                spawnBtn.textContent = 'Spawn Chest';
-                spawnBtn.classList.add('btn-info');
-                spawnBtn.classList.remove('btn-success');
-                L.DomUtil.removeClass(mapContainer, 'leaflet-crosshair-cursor');
-            }
-        });
-
-        async function onMapClick(e) {
-            if (!isSpawnMode) return;
-            
-            const { lat, lng } = e.latlng;
-            if (!confirm(`Spawn a superpower chest at these coordinates?\nLat: ${lat.toFixed(6)}, Lng: ${lng.toFixed(6)}`)) return;
-
-            try {
-                const result = await apiFetch('/admin/api/spawn-chest', {
-                    method: 'POST',
-                    body: { lat, lng }
-                });
-                alert(result.message);
-                fetchChests();
-            } catch(error) {
-                alert(`Error: ${error.message}`);
-            } finally {
-                isSpawnMode = false;
-                document.getElementById('spawnChestBtn').textContent = 'Spawn Chest';
-                document.getElementById('spawnChestBtn').classList.add('btn-info');
-                document.getElementById('spawnChestBtn').classList.remove('btn-success');
-                L.DomUtil.removeClass(document.getElementById('map'), 'leaflet-crosshair-cursor');
-            }
-        }
-
-        async function fetchChests() {
-            try {
-                const chests = await apiFetch('/admin/api/chests');
-                renderChests(chests);
-            } catch (error) {
-                console.error('Error fetching chests:', error);
-            }
-        }
-
-        function renderChests(chests) {
-            Object.values(chestMarkers).forEach(marker => marker.remove());
-            chestMarkers = {};
-            chests.forEach(chest => {
-                const [lat, lng] = chest.location;
-                chestMarkers[chest.id] = L.circleMarker([lat, lng], {
-                    radius: 8,
-                    color: '#FFD700',
-                    fillColor: '#FFD700',
-                    fillOpacity: 0.8
-                }).addTo(map).bindPopup(`<b>Chest ID: ${chest.id}</b>`);
-            });
-        }
-        
-        async function fetchShopData() {
-            try {
-                const items = await apiFetch('/admin/api/shop/items');
-                renderSuperpowerPrices(items);
-            } catch (error) {
-                console.error('Error fetching shop items:', error);
-                document.getElementById('superpower-prices-list').innerHTML = `<div class="text-danger">${error.message}</div>`;
-            }
-        }
-
-        function renderSuperpowerPrices(items) {
-            const container = document.getElementById('superpower-prices-list');
-            container.innerHTML = '';
-            items.forEach(item => {
-                const div = document.createElement('div');
-                div.className = 'input-group mb-2';
-                div.innerHTML = `
-                    <span class="input-group-text" style="width: 120px;">${item.name}</span>
-                    <input type="number" class="form-control" value="${item.price}" id="price-${item.item_id}">
-                    <button class="btn btn-outline-secondary" type="button" onclick="updatePrice('${item.item_id}')">Update</button>
-                `;
-                container.appendChild(div);
-            });
-        }
-
-        async function updatePrice(itemId) {
-            const price = document.getElementById(`price-${itemId}`).value;
-            try {
-                const result = await apiFetch('/admin/api/shop/items', {
-                    method: 'PUT',
-                    body: { itemId, price: parseInt(price, 10) }
-                });
-                alert(result.message);
-                fetchShopData();
-            } catch(error) {
-                alert(`Error: ${error.message}`);
-            }
-        }
-
-        async function fetchMegaPrizeData() {
-            try {
-                const data = await apiFetch('/admin/api/mega-prize');
-                renderMegaPrize(data);
-            } catch (error) {
-                console.error('Error fetching mega prize data:', error);
-            }
-        }
-        
-        function renderMegaPrize(data) {
-            const statusBadge = document.getElementById('voting-status');
-            statusBadge.textContent = data.voting_active ? 'ACTIVE' : 'INACTIVE';
-            statusBadge.className = `badge ms-2 ${data.voting_active ? 'bg-success' : 'bg-secondary'}`;
-            
-            document.getElementById('start-voting-btn').disabled = data.voting_active;
-            document.getElementById('stop-voting-btn').disabled = !data.voting_active;
-            document.getElementById('declare-winner-btn').disabled = data.voting_active;
-
-            const candidatesList = document.getElementById('prize-candidates-list');
-            candidatesList.innerHTML = '';
-            if (data.candidates.length === 0) {
-                candidatesList.innerHTML = '<div class="list-group-item">No active prize candidates.</div>';
-            }
-            data.candidates.forEach(c => {
-                const item = document.createElement('div');
-                item.className = 'list-group-item d-flex justify-content-between align-items-center';
-                item.innerHTML = `
-                    <span>${c.name} (${c.brand || 'N/A'}) - <strong>${c.vote_count} votes</strong></span>
-                    <button class="btn btn-sm btn-outline-danger" onclick="deletePrizeCandidate(${c.id})">Delete</button>
-                `;
-                candidatesList.appendChild(item);
-            });
-
-            const winnersList = document.getElementById('mega-prize-winners-list');
-            winnersList.innerHTML = '';
-            if (data.winners.length === 0) {
-                 winnersList.innerHTML = '<li class="list-group-item">No winners yet.</li>';
-            }
-            data.winners.forEach(w => {
-                const item = document.createElement('li');
-                item.className = 'list-group-item';
-                item.innerHTML = `<strong>${w.username}</strong> won "${w.prize_name}" on ${new Date(w.win_date).toLocaleDateString()}`;
-                winnersList.appendChild(item);
-            });
-        }
-
-        document.getElementById('add-prize-form').addEventListener('submit', async function(e) {
-            e.preventDefault();
-            const name = document.getElementById('prize-name').value;
-            const brand = document.getElementById('prize-brand').value;
-            try {
-                const result = await apiFetch('/admin/api/mega-prize/candidates', {
-                    method: 'POST',
-                    body: { name, brand }
-                });
-                alert(result.message);
-                this.reset();
-                fetchMegaPrizeData();
-            } catch(error) {
-                alert(`Error: ${error.message}`);
-            }
-        });
-        
-        async function deletePrizeCandidate(id) {
-            if(!confirm('Are you sure you want to delete this prize candidate?')) return;
-             try {
-                const result = await apiFetch(`/admin/api/mega-prize/candidates/${id}`, { method: 'DELETE' });
-                alert(result.message);
-                fetchMegaPrizeData();
-            } catch(error) {
-                alert(`Error: ${error.message}`);
-            }
-        }
-
-        document.getElementById('start-voting-btn').addEventListener('click', async () => {
-            if(!confirm('Are you sure you want to START the voting period and clear all previous votes?')) return;
-            try {
-                const result = await apiFetch('/admin/api/mega-prize/start-voting', { method: 'POST' });
-                alert(result.message);
-                fetchMegaPrizeData();
-            } catch(error) {
-                alert(`Error: ${error.message}`);
-            }
-        });
-
-        document.getElementById('stop-voting-btn').addEventListener('click', async () => {
-            if(!confirm('Are you sure you want to STOP the voting period?')) return;
-            try {
-                const result = await apiFetch('/admin/api/mega-prize/stop-voting', { method: 'POST' });
-                alert(result.message);
-                fetchMegaPrizeData();
-            } catch(error) {
-                alert(`Error: ${error.message}`);
-            }
-        });
-
-        document.getElementById('declare-winner-btn').addEventListener('click', async () => {
-            if(!confirm('DANGER: This will declare a winner, record them, and clear all candidates and votes. This cannot be undone. Proceed?')) return;
-            try {
-                const result = await apiFetch('/admin/api/mega-prize/declare-winner', { method: 'POST' });
-                alert(result.message);
-                fetchMegaPrizeData();
-            } catch(error) {
-                alert(`Error: ${error.message}`);
-            }
-        });
+        // --- Other functions (unchanged) ---
+        async function fetchGeofenceZones() { try { const zones = await apiFetch('/admin/api/geofence-zones'); renderGeofenceZones(zones); } catch (error) { console.error('Error fetching geofence zones:', error); } }
+        function renderGeofenceZones(zones) { const list = document.getElementById('geofence-list'); list.innerHTML = ''; geofenceLayers.clearLayers(); zones.forEach(zone => { const listItem = document.createElement('li'); listItem.className = 'list-group-item bg-dark d-flex justify-content-between align-items-center'; listItem.innerHTML = `<span><span class="badge ${zone.zone_type === 'allowed' ? 'bg-success' : 'bg-danger'}">${zone.zone_type}</span> ${zone.name}</span><button class="btn btn-sm btn-outline-danger" onclick="deleteZone(${zone.id})">Delete</button>`; list.appendChild(listItem); const style = { color: zone.zone_type === 'allowed' ? '#28a745' : '#dc3545', weight: 2, opacity: 0.8, fillOpacity: 0.2 }; const geoJsonLayer = L.geoJSON(zone.geojson, { style }).bindPopup(`<b>${zone.name}</b><br>${zone.zone_type}`); geofenceLayers.addLayer(geoJsonLayer); }); if (geofenceLayers.getLayers().length > 0) { map.fitBounds(geofenceLayers.getBounds().pad(0.1)); } }
+        document.getElementById('kmlUploadForm').addEventListener('submit', async function(e) { e.preventDefault(); const formData = new FormData(); formData.append('name', document.getElementById('zoneName').value); formData.append('zoneType', document.getElementById('zoneType').value); formData.append('kmlFile', document.getElementById('kmlFile').files[0]); try { const result = await apiFetch('/admin/api/geofence-zones/upload', { method: 'POST', body: formData }); alert(result.message); this.reset(); fetchGeofenceZones(); } catch(error) { alert(`Error: ${error.message}`); } });
+        async function deleteZone(id) { if (!confirm('Are you sure you want to delete this geofence zone?')) return; try { const result = await apiFetch(`/admin/api/geofence-zones/${id}`, { method: 'DELETE' }); alert(result.message); fetchGeofenceZones(); } catch (error) { alert(`Error: ${error.message}`); } }
+        async function fetchQuests() { try { const quests = await apiFetch('/admin/api/quests'); renderQuests(quests); } catch (error) { console.error('Error fetching quests:', error); document.getElementById('quest-table-body').innerHTML = `<tr><td colspan="6" class="text-danger text-center">${error.message}</td></tr>`; } }
+        function renderQuests(quests) { const tableBody = document.getElementById('quest-table-body'); tableBody.innerHTML = ''; if (quests.length === 0) { tableBody.innerHTML = '<tr><td colspan="6" class="text-center">No quests found.</td></tr>'; return; } quests.forEach(quest => { const row = document.createElement('tr'); const statusBadge = { 'pending': 'bg-warning text-dark', 'active': 'bg-success', 'completed': 'bg-info', 'expired': 'bg-secondary' }[quest.status] || 'bg-light text-dark'; const objectiveText = quest.objective_type ? `${quest.objective_type.replace('_', ' ')}: ${quest.objective_value}` : 'N/A'; row.innerHTML = `<td>${quest.title}</td><td>${quest.type}</td><td>${objectiveText}</td><td><span class="badge ${statusBadge}">${quest.status}</span></td><td>${new Date(quest.expiry_time).toLocaleString()}</td><td><button class="btn btn-sm btn-outline-danger" onclick="deleteQuest(${quest.id})">Delete</button><button class="btn btn-sm btn-outline-info" onclick="extendQuest(${quest.id})">Extend</button></td>`; tableBody.appendChild(row); }); }
+        async function deleteQuest(questId) { if (!confirm('Are you sure you want to permanently delete this quest?')) return; try { const result = await apiFetch(`/admin/api/quests/${questId}`, { method: 'DELETE' }); alert(result.message); fetchQuests(); } catch (error) { alert(`Error: ${error.message}`); } }
+        async function extendQuest(questId) { const newExpiry = prompt("Enter new expiry date and time (YYYY-MM-DDTHH:MM:SS):", new Date(Date.now() + 24*60*60*1000).toISOString().slice(0, 19)); if (!newExpiry) return; try { const result = await apiFetch(`/admin/api/quests/${questId}/extend`, { method: 'PUT', body: { new_expiry_time: newExpiry } }); alert(result.message); fetchQuests(); } catch (error) { alert(`Error: ${error.message}`); } }
+        document.getElementById('createQuestForm').addEventListener('submit', async function(e) { e.preventDefault(); const body = { title: document.getElementById('questTitle').value, description: document.getElementById('questDescription').value, type: 'developer', objective_type: document.getElementById('objectiveType').value, objective_value: parseInt(document.getElementById('objectiveValue').value, 10), expiry_time: new Date(document.getElementById('expiryTime').value).toISOString(), is_first_come_first_served: document.getElementById('isFCS').checked }; try { const result = await apiFetch('/admin/api/quests', { method: 'POST', body }); alert('Quest created successfully!'); this.reset(); fetchQuests(); } catch(error) { alert(`Error: ${error.message}`); } });
+        document.getElementById('createSponsorForm').addEventListener('submit', async function(e) { e.preventDefault(); const name = document.getElementById('sponsorName').value; const login_id = document.getElementById('sponsorLoginId').value; const passcode = document.getElementById('sponsorPasscode').value; try { const result = await apiFetch('/admin/api/sponsors', { method: 'POST', body: { name, login_id, passcode } }); alert(result.message); this.reset(); } catch(error) { alert(`Error: ${error.message}`); } });
+        document.getElementById('spawnChestBtn').addEventListener('click', () => { isSpawnMode = !isSpawnMode; const spawnBtn = document.getElementById('spawnChestBtn'); const mapContainer = document.getElementById('map'); if (isSpawnMode) { spawnBtn.textContent = 'Spawning... Click on Map'; spawnBtn.classList.add('btn-success'); spawnBtn.classList.remove('btn-info'); L.DomUtil.addClass(mapContainer, 'leaflet-crosshair-cursor'); } else { spawnBtn.textContent = 'Spawn Chest'; spawnBtn.classList.add('btn-info'); spawnBtn.classList.remove('btn-success'); L.DomUtil.removeClass(mapContainer, 'leaflet-crosshair-cursor'); } });
+        async function onMapClick(e) { if (!isSpawnMode) return; const { lat, lng } = e.latlng; if (!confirm(`Spawn a superpower chest at these coordinates?\nLat: ${lat.toFixed(6)}, Lng: ${lng.toFixed(6)}`)) return; try { const result = await apiFetch('/admin/api/spawn-chest', { method: 'POST', body: { lat, lng } }); alert(result.message); fetchChests(); } catch(error) { alert(`Error: ${error.message}`); } finally { isSpawnMode = false; document.getElementById('spawnChestBtn').textContent = 'Spawn Chest'; document.getElementById('spawnChestBtn').classList.add('btn-info'); document.getElementById('spawnChestBtn').classList.remove('btn-success'); L.DomUtil.removeClass(document.getElementById('map'), 'leaflet-crosshair-cursor'); } }
+        async function fetchChests() { try { const chests = await apiFetch('/admin/api/chests'); renderChests(chests); } catch (error) { console.error('Error fetching chests:', error); } }
+        function renderChests(chests) { Object.values(chestMarkers).forEach(marker => marker.remove()); chestMarkers = {}; chests.forEach(chest => { const [lat, lng] = chest.location; chestMarkers[chest.id] = L.circleMarker([lat, lng], { radius: 8, color: '#FFD700', fillColor: '#FFD700', fillOpacity: 0.8 }).addTo(map).bindPopup(`<b>Chest ID: ${chest.id}</b>`); }); }
+        async function fetchShopData() { try { const items = await apiFetch('/admin/api/shop/items'); renderSuperpowerPrices(items); } catch (error) { console.error('Error fetching shop items:', error); document.getElementById('superpower-prices-list').innerHTML = `<div class="text-danger">${error.message}</div>`; } }
+        function renderSuperpowerPrices(items) { const container = document.getElementById('superpower-prices-list'); container.innerHTML = ''; items.forEach(item => { const div = document.createElement('div'); div.className = 'input-group mb-2'; div.innerHTML = `<span class="input-group-text" style="width: 120px;">${item.name}</span><input type="number" class="form-control" value="${item.price}" id="price-${item.item_id}"><button class="btn btn-outline-secondary" type="button" onclick="updatePrice('${item.item_id}')">Update</button>`; container.appendChild(div); }); }
+        async function updatePrice(itemId) { const price = document.getElementById(`price-${itemId}`).value; try { const result = await apiFetch('/admin/api/shop/items', { method: 'PUT', body: { itemId, price: parseInt(price, 10) } }); alert(result.message); fetchShopData(); } catch(error) { alert(`Error: ${error.message}`); } }
+        async function fetchMegaPrizeData() { try { const data = await apiFetch('/admin/api/mega-prize'); renderMegaPrize(data); } catch (error) { console.error('Error fetching mega prize data:', error); } }
+        function renderMegaPrize(data) { const statusBadge = document.getElementById('voting-status'); statusBadge.textContent = data.voting_active ? 'ACTIVE' : 'INACTIVE'; statusBadge.className = `badge ms-2 ${data.voting_active ? 'bg-success' : 'bg-secondary'}`; document.getElementById('start-voting-btn').disabled = data.voting_active; document.getElementById('stop-voting-btn').disabled = !data.voting_active; document.getElementById('declare-winner-btn').disabled = data.voting_active; const candidatesList = document.getElementById('prize-candidates-list'); candidatesList.innerHTML = ''; if (data.candidates.length === 0) { candidatesList.innerHTML = '<div class="list-group-item">No active prize candidates.</div>'; } data.candidates.forEach(c => { const item = document.createElement('div'); item.className = 'list-group-item d-flex justify-content-between align-items-center'; item.innerHTML = `<span>${c.name} (${c.brand || 'N/A'}) - <strong>${c.vote_count} votes</strong></span><button class="btn btn-sm btn-outline-danger" onclick="deletePrizeCandidate(${c.id})">Delete</button>`; candidatesList.appendChild(item); }); const winnersList = document.getElementById('mega-prize-winners-list'); winnersList.innerHTML = ''; if (data.winners.length === 0) { winnersList.innerHTML = '<li class="list-group-item">No winners yet.</li>'; } data.winners.forEach(w => { const item = document.createElement('li'); item.className = 'list-group-item'; item.innerHTML = `<strong>${w.username}</strong> won "${w.prize_name}" on ${new Date(w.win_date).toLocaleDateString()}`; winnersList.appendChild(item); }); }
+        document.getElementById('add-prize-form').addEventListener('submit', async function(e) { e.preventDefault(); const name = document.getElementById('prize-name').value; const brand = document.getElementById('prize-brand').value; try { const result = await apiFetch('/admin/api/mega-prize/candidates', { method: 'POST', body: { name, brand } }); alert(result.message); this.reset(); fetchMegaPrizeData(); } catch(error) { alert(`Error: ${error.message}`); } });
+        async function deletePrizeCandidate(id) { if(!confirm('Are you sure you want to delete this prize candidate?')) return; try { const result = await apiFetch(`/admin/api/mega-prize/candidates/${id}`, { method: 'DELETE' }); alert(result.message); fetchMegaPrizeData(); } catch(error) { alert(`Error: ${error.message}`); } }
+        document.getElementById('start-voting-btn').addEventListener('click', async () => { if(!confirm('Are you sure you want to START the voting period and clear all previous votes?')) return; try { const result = await apiFetch('/admin/api/mega-prize/start-voting', { method: 'POST' }); alert(result.message); fetchMegaPrizeData(); } catch(error) { alert(`Error: ${error.message}`); } });
+        document.getElementById('stop-voting-btn').addEventListener('click', async () => { if(!confirm('Are you sure you want to STOP the voting period?')) return; try { const result = await apiFetch('/admin/api/mega-prize/stop-voting', { method: 'POST' }); alert(result.message); fetchMegaPrizeData(); } catch(error) { alert(`Error: ${error.message}`); } });
+        document.getElementById('declare-winner-btn').addEventListener('click', async () => { if(!confirm('DANGER: This will declare a winner, record them, and clear all candidates and votes. This cannot be undone. Proceed?')) return; try { const result = await apiFetch('/admin/api/mega-prize/declare-winner', { method: 'POST' }); alert(result.message); fetchMegaPrizeData(); } catch(error) { alert(`Error: ${error.message}`); } });
 
         window.onload = () => {
             initMap();
-            // Initialize the Bootstrap modal instance
             superpowerModalInstance = new bootstrap.Modal(document.getElementById('superpowerModal'));
             fetchAllData();
         };
