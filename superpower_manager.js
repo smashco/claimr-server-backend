@@ -2,8 +2,8 @@
 
 require('dotenv').config();
 const debug = require('debug')('server:superpower');
-const logPayment = require('debug')('server:payment'); // Use the payment debugger
-const logDb = require('debug')('server:db');         // Use the DB debugger
+const logPayment = require('debug')('server:payment');
+const logDb = require('debug')('server:db');
 const crypto = require('crypto');
 
 class SuperpowerManager {
@@ -59,9 +59,6 @@ class SuperpowerManager {
         }
     }
 
-    // =======================================================================//
-    // ===================== MODIFIED FUNCTION STARTS HERE =====================//
-    // =======================================================================//
     async verifyAndGrantPower(googleId, itemId, paymentDetails) {
         logPayment(`[MANAGER] Verifying payment for user ${googleId} for item '${itemId}'`);
         const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = paymentDetails;
@@ -71,78 +68,118 @@ class SuperpowerManager {
 
         if (expectedSignature !== razorpay_signature) {
             logPayment(`[MANAGER-FAIL] Payment verification FAILED for user ${googleId}. Mismatched signatures.`);
-            throw new Error('Payment verification failed: Invalid signature.');
+            throw new Error('Payment verification failed.');
         }
 
         logPayment(`[MANAGER] Signature verified. Proceeding to grant power '${itemId}' to user ${googleId}.`);
-        
-        // FIX: Await the grantPower function and store its result to return it.
         const newInventory = await this.grantPower(googleId, itemId);
-        
         logPayment(`[MANAGER] Payment verified and power '${itemId}' granted. Final inventory: %O`, newInventory);
-        
-        // FIX: Return the updated inventory so server.js can use it.
         return newInventory;
     }
-
-    async usePower(googleId, powerId) {
-        debug(`User ${googleId} is using power '${powerId}'. Revoking from inventory.`);
-        return await this.revokePower(googleId, powerId);
-    }
     
+    // =======================================================================//
+    // ===================== MODIFIED & NEW FUNCTIONS ========================//
+    // =======================================================================//
+
+    /**
+     * Activates a power's effect. For Last Stand, this only turns on the shield flag.
+     * For instant-use powers, it will consume them immediately.
+     */
+    async usePower(googleId, powerId) {
+        debug(`User ${googleId} is ACTIVATING power '${powerId}'.`);
+
+        if (powerId === 'lastStand') {
+            // For Last Stand, we ONLY set the active flag. We DO NOT remove it from inventory.
+            const client = await this.pool.connect();
+            try {
+                await client.query('BEGIN');
+                logDb(`Setting is_shield_active=true for user ${googleId}`);
+                await client.query("UPDATE territories SET is_shield_active = true WHERE owner_id = $1", [googleId]);
+                await client.query('COMMIT');
+                debug(`Power '${powerId}' is now ACTIVE for user ${googleId}. It remains in their inventory.`);
+                const userRes = await client.query("SELECT superpowers FROM territories WHERE owner_id = $1", [googleId]);
+                return userRes.rows[0].superpowers;
+            } catch (err) {
+                await client.query('ROLLBACK');
+                debug(`Error activating power for ${googleId}: %O`, err);
+                throw err;
+            } finally {
+                client.release();
+            }
+        } else {
+            // For other powers like Ghost Runner, activation IS consumption.
+            debug(`Instantly CONSUMING power '${powerId}' for user ${googleId} upon activation.`);
+            return await this.revokePower(googleId, powerId);
+        }
+    }
+
+    /**
+     * Consumes a power from inventory. This is called when a power's effect is used up,
+     * such as a shield blocking an attack. Runs within an existing transaction.
+     */
+    async consumePower(googleId, powerId, client) {
+        debug(`CONSUMING power '${powerId}' for user ${googleId} as part of a transaction.`);
+        
+        const userRes = await client.query("SELECT superpowers FROM territories WHERE owner_id = $1 FOR UPDATE", [googleId]);
+        if (userRes.rowCount === 0) {
+            debug(`Cannot consume power for non-existent user ${googleId}.`);
+            return { owned: [] };
+        }
+        
+        const currentSuperpowers = userRes.rows[0].superpowers || { owned: [] };
+        let ownedList = currentSuperpowers.owned || [];
+        const updatedOwnedList = ownedList.filter(p => p !== powerId);
+        
+        logDb(`Consuming '${powerId}'. Old inventory: [${ownedList.join(', ')}], New: [${updatedOwnedList.join(', ')}]`);
+
+        const { rows: [updated] } = await client.query(
+            "UPDATE territories SET superpowers = $1 WHERE owner_id = $2 RETURNING superpowers",
+            [JSON.stringify({ owned: updatedOwnedList }), googleId]
+        );
+        
+        if (powerId === 'lastStand') {
+            await client.query("UPDATE territories SET is_shield_active = false WHERE owner_id = $1", [googleId]);
+            logDb(`Deactivated shield for ${googleId} after consumption.`);
+        }
+        
+        return updated.superpowers;
+    }
+
     async grantPower(googleId, powerId) {
         logDb(`[GRANT-POWER] Granting '${powerId}' to user ${googleId}.`);
         const client = await this.pool.connect();
         try {
-            logDb(`[GRANT-POWER] BEGIN transaction for user ${googleId}.`);
             await client.query('BEGIN');
-            
-            logDb(`[GRANT-POWER] Fetching current superpowers for ${googleId} with row lock.`);
             let userRes = await client.query("SELECT superpowers FROM territories WHERE owner_id = $1 FOR UPDATE", [googleId]);
-            
             if (userRes.rowCount === 0) {
-                logDb(`[GRANT-POWER] User ${googleId} not found. This should not happen in a purchase flow. Rolling back.`);
                 await client.query('ROLLBACK');
                 throw new Error(`User ${googleId} does not exist.`);
             }
 
             const currentSuperpowers = userRes.rows[0].superpowers || { owned: [] };
             const ownedList = currentSuperpowers.owned || [];
-            logDb(`[GRANT-POWER] Current inventory for ${googleId}: [${ownedList.join(', ')}]`);
             
-            if (ownedList.includes(powerId)) {
-                logDb(`[GRANT-POWER] User ${googleId} already owns '${powerId}'. No changes needed. Committing transaction.`);
-            } else {
+            if (!ownedList.includes(powerId)) {
                 ownedList.push(powerId);
-                logDb(`[GRANT-POWER] New inventory for ${googleId}: [${ownedList.join(', ')}]`);
             }
             
             const finalInventory = { owned: ownedList };
-            logDb(`[GRANT-POWER] Executing UPDATE query for ${googleId}...`);
             const { rows: [updated] } = await client.query(
                 "UPDATE territories SET superpowers = $1 WHERE owner_id = $2 RETURNING superpowers",
                 [JSON.stringify(finalInventory), googleId]
             );
             
-            logDb(`[GRANT-POWER] COMMIT transaction for ${googleId}.`);
             await client.query('COMMIT');
-            
             logDb(`[GRANT-POWER] SUCCESS. Inventory for ${googleId} is now saved as: %O`, updated.superpowers);
-            
             return updated.superpowers;
         } catch (err) {
-            logDb(`[GRANT-POWER-ERROR] An error occurred. Rolling back transaction for ${googleId}. Error: ${err.message}`);
             await client.query('ROLLBACK');
             debug(`Error details for grantPower: %O`, err);
             throw err;
         } finally {
-            logDb(`[GRANT-POWER] Releasing database client for user ${googleId}.`);
             client.release();
         }
     }
-    // =======================================================================//
-    // ====================== MODIFIED FUNCTION ENDS HERE ======================//
-    // =======================================================================//
 
     async revokePower(googleId, powerId) {
         debug(`Revoking power '${powerId}' from user ${googleId}`);
@@ -151,14 +188,12 @@ class SuperpowerManager {
             await client.query('BEGIN');
             const userRes = await client.query("SELECT superpowers FROM territories WHERE owner_id = $1 FOR UPDATE", [googleId]);
             if (userRes.rowCount === 0) {
-                debug(`Cannot revoke power from non-existent user ${googleId}.`);
                 await client.query('ROLLBACK');
                 return { owned: [] };
             }
             
             const currentSuperpowers = userRes.rows[0].superpowers || { owned: [] };
             let ownedList = currentSuperpowers.owned || [];
-            
             const updatedOwnedList = ownedList.filter(p => p !== powerId);
             
             const { rows: [updated] } = await client.query(
@@ -166,7 +201,7 @@ class SuperpowerManager {
                 [JSON.stringify({ owned: updatedOwnedList }), googleId]
             );
             await client.query('COMMIT');
-            logDb(`COMMIT successful. Superpower inventory for ${googleId} revoked and saved to database: %O`, updated.superpowers);
+            logDb(`COMMIT successful. Superpower inventory for ${googleId} revoked and saved: %O`, updated.superpowers);
             return updated.superpowers;
         } catch (err) {
             await client.query('ROLLBACK');
