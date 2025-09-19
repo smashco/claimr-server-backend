@@ -4,6 +4,8 @@
  * @description Handles tracking and completion of player quests.
  */
 
+const debug = require('debug')('server:game');
+
 const QUEST_TYPES = {
     MAKE_TRAIL: 'MAKE_TRAIL',       // Target: distance in meters
     ATTACK_BASE: 'ATTACK_BASE',     // Target: number of bases
@@ -17,15 +19,18 @@ const QUEST_TYPES = {
  * @param {string} userId - The Google ID of the player.
  * @param {string} questType - The type of quest action (e.g., 'ATTACK_BASE').
  * @param {number} value - The value to add to the progress (e.g., 1 for one attack, or distance for a trail).
- * @param {object} client - The PostgreSQL client.
+ * @param {object} client - The PostgreSQL client for the current transaction.
  * @param {object} io - The Socket.IO server instance.
  * @param {object} players - The server's map of active players.
  */
 async function updateQuestProgress(userId, questType, value, client, io, players) {
     if (!userId || !questType || value === undefined) {
         console.warn(`[QUEST] Aborting updateQuestProgress due to invalid parameters: userId=${userId}, questType=${questType}, value=${value}`);
+        debug(`[QUEST] Aborting updateQuestProgress due to invalid parameters: userId=${userId}, questType=${questType}, value=${value}`);
         return;
     }
+
+    debug(`[QUEST] Updating progress for user ${userId}, type: ${questType}, value: ${value}`);
 
     try {
         // Find all active quests of the specified type that aren't already won
@@ -35,12 +40,13 @@ async function updateQuestProgress(userId, questType, value, client, io, players
         );
 
         if (questRes.rowCount === 0) {
-            // No active quest for this action, so do nothing.
+            debug(`[QUEST] No active quests of type '${questType}' found for user ${userId}.`);
             return;
         }
 
-        // --- THE FIX IS HERE: The winner check logic is now INSIDE the loop ---
         for (const quest of questRes.rows) {
+            debug(`[QUEST] Processing quest "${quest.title}" (ID: ${quest.id}) for user ${userId}.`);
+            
             const progressRes = await client.query(
                 `INSERT INTO quest_progress (quest_id, user_id, current_value)
                  VALUES ($1, $2, $3)
@@ -51,7 +57,7 @@ async function updateQuestProgress(userId, questType, value, client, io, players
             );
 
             const newProgress = progressRes.rows[0].current_value;
-            console.log(`[QUEST] User ${userId} progress for quest "${quest.title}": ${newProgress}/${quest.target_value}`);
+            debug(`[QUEST] User ${userId} progress for quest "${quest.title}" is now: ${newProgress}/${quest.target_value}`);
 
             const playerSocketId = Object.keys(players).find(id => players[id]?.googleId === userId);
             if (playerSocketId) {
@@ -59,13 +65,15 @@ async function updateQuestProgress(userId, questType, value, client, io, players
                     questId: quest.id,
                     currentProgress: newProgress
                 });
+                debug(`[QUEST] Emitted progress update to socket ${playerSocketId}`);
             }
             
-            // CHECK FOR WINNER IMMEDIATELY AFTER UPDATING THIS SPECIFIC QUEST
             if (newProgress >= quest.target_value) {
+                debug(`[QUEST] User ${userId} has met the target for quest ${quest.id}. Attempting to declare winner.`);
                 // Use a transaction to prevent race conditions for the winner.
-                // We will use the same client connection passed into this function.
-                await client.query('BEGIN');
+                // NOTE: This function is already expected to be inside a transaction from the caller.
+                // We will add a savepoint to isolate this part of the logic.
+                await client.query('SAVEPOINT declare_winner');
                 try {
                     // Lock the quest row to ensure only one process can declare a winner.
                     const winnerCheck = await client.query(
@@ -73,7 +81,6 @@ async function updateQuestProgress(userId, questType, value, client, io, players
                         [quest.id]
                     );
 
-                    // Double-check that another process hasn't declared a winner in the meantime.
                     if (winnerCheck.rows[0].winner_id === null) {
                         // We have a winner!
                         await client.query(
@@ -84,37 +91,30 @@ async function updateQuestProgress(userId, questType, value, client, io, players
                         const playerInfo = await client.query('SELECT username FROM territories WHERE owner_id = $1', [userId]);
                         const winnerName = playerInfo.rows.length > 0 ? playerInfo.rows[0].username : 'Unknown Player';
 
-                        console.log(`[QUEST] WINNER! ${winnerName} has completed the quest: "${quest.title}"`);
+                        debug(`[QUEST] WINNER DECLARED! ${winnerName} has completed the quest: "${quest.title}"`);
                         
-                        // Emit to everyone that the quest is over and who won
                         io.emit('questCompleted', {
                             questId: quest.id,
                             title: quest.title,
                             winnerName: winnerName
                         });
                         
-                        // Also broadcast a general quest update to refresh lists in the app and admin panel
                         io.emit('questUpdate'); 
-
-                        await client.query('COMMIT');
+                        
+                        await client.query('RELEASE SAVEPOINT declare_winner');
                     } else {
-                        // Someone else won just before we could commit.
-                        await client.query('ROLLBACK');
-                        console.log(`[QUEST] User ${userId} completed quest "${quest.title}", but a winner was already declared.`);
+                        await client.query('ROLLBACK TO SAVEPOINT declare_winner');
+                        debug(`[QUEST] User ${userId} completed quest "${quest.title}", but a winner was already declared.`);
                     }
                 } catch (transactionError) {
-                    await client.query('ROLLBACK');
-                    console.error('[QUEST] FATAL: Error during winner declaration transaction, rolling back.', transactionError);
+                    await client.query('ROLLBACK TO SAVEPOINT declare_winner');
+                    console.error('[QUEST] FATAL: Error during winner declaration savepoint, rolling back to savepoint.', transactionError);
                 }
             }
         }
-        // --- END OF FIX ---
         
     } catch (err) {
         console.error('[QUEST] Error during main quest progress update logic:', err);
-        // If an error happens here, a transaction might be open. It's safer to attempt a rollback.
-        // Although the transaction logic is now nested, this is a good fail-safe.
-        try { await client.query('ROLLBACK'); } catch (rollbackErr) { /* ignore */ }
     }
 }
 

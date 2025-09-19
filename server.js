@@ -1354,7 +1354,7 @@ io.on('connection', (socket) => {
                 
                 const availablePowers = ['lastStand', 'infiltrator', 'ghostRunner', 'trailDefense'];
                 const powersToGrant = [];
-                const numToGrant = Math.floor(Math.random() * 2) + 1; // Grant 1 or 2 powers from a chest
+                const numToGrant = Math.floor(Math.random() * 2) + 1;
 
                 for (let i = 0; i < numToGrant; i++) {
                     if (availablePowers.length === 0) break;
@@ -1449,14 +1449,14 @@ io.on('connection', (socket) => {
     const player = players[socket.id];
     if (player && player.hasTrailDefense) {
         player.isTrailDefenseActive = true;
-        player.hasTrailDefense = false; // Consume on activation
+        player.hasTrailDefense = false;
         logGame(`Player ${player.name} activating Trail Defense.`);
         try {
             await superpowerManager.usePower(player.googleId, 'trailDefense');
             socket.emit('superpowerAcknowledged', { power: 'trailDefense' });
         } catch (err) {
             logGame(`Failed to use Trail Defense for ${player.name}: %O`, err);
-            player.hasTrailDefense = true; // Give it back if DB fails
+            player.hasTrailDefense = true;
         }
     }
   });
@@ -1465,14 +1465,14 @@ io.on('connection', (socket) => {
       const player = players[socket.id];
       if (player && player.hasGhostRunner) {
           player.isGhostRunnerActive = true;
-          player.hasGhostRunner = false; // Consume on activation
+          player.hasGhostRunner = false;
           logGame(`Player ${player.name} activating Ghost Runner.`);
           try {
             await superpowerManager.usePower(player.googleId, 'ghostRunner');
             socket.emit('superpowerAcknowledged', { power: 'ghostRunner' });
           } catch(err) {
             logGame(`Failed to use Ghost Runner for ${player.name}: %O`, err);
-            player.hasGhostRunner = true; // Give it back if DB fails
+            player.hasGhostRunner = true;
           }
       }
   });
@@ -1481,14 +1481,14 @@ io.on('connection', (socket) => {
       const player = players[socket.id];
       if (player && player.hasInfiltrator) {
           player.isInfiltratorActive = true;
-          player.hasInfiltrator = false; // Consume on activation
+          player.hasInfiltrator = false;
           logGame(`Player ${player.name} activating Infiltrator.`);
           try {
             await superpowerManager.usePower(player.googleId, 'infiltrator');
             socket.emit('superpowerAcknowledged', { power: 'infiltrator' });
           } catch(err) {
             logGame(`Failed to use Infiltrator for ${player.name}: %O`, err);
-            player.hasInfiltrator = true; // Give it back
+            player.hasInfiltrator = true;
           }
       }
   });
@@ -1497,7 +1497,7 @@ io.on('connection', (socket) => {
       const player = players[socket.id];
       if (player && player.hasLastStand) {
           player.isLastStandActive = true;
-          player.hasLastStand = false; // Consume on activation
+          player.hasLastStand = false;
           logGame(`Player ${player.name} activating Last Stand.`);
           try {
             await superpowerManager.usePower(player.googleId, 'lastStand');
@@ -1505,7 +1505,7 @@ io.on('connection', (socket) => {
             socket.emit('superpowerAcknowledged', { power: 'lastStand' });
           } catch(err) {
             logGame(`Failed to use Last Stand for ${player.name}: %O`, err);
-            player.hasLastStand = true; // Give it back
+            player.hasLastStand = true;
           }
       }
   });
@@ -1595,4 +1595,4 @@ const main = async () => {
 };
 
 setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
-main();
+main();```
