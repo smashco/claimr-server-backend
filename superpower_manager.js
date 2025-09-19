@@ -2,6 +2,7 @@
 
 require('dotenv').config();
 const debug = require('debug')('server:superpower');
+const dbDebug = require('debug')('server:db'); // Import the DB debugger
 const crypto = require('crypto');
 
 class SuperpowerManager {
@@ -16,12 +17,6 @@ class SuperpowerManager {
         }
     }
 
-    /**
-     * Creates a Razorpay order for a superpower, but only if the user does not already own it.
-     * @param {string} googleId - The Google ID of the user.
-     * @param {string} itemId - The ID of the superpower to purchase (e.g., 'lastStand').
-     * @returns {Promise<object>} The Razorpay order details.
-     */
     async createPurchaseOrder(googleId, itemId) {
         debug(`Attempting to create purchase order for item '${itemId}' for user ${googleId}`);
         if (!this.razorpay) {
@@ -37,7 +32,7 @@ class SuperpowerManager {
             }
         }
 
-        const amount = 2900; // Price in paise (e.g., ₹29.00)
+        const amount = 2900;
         const currency = 'INR';
         const options = {
             amount,
@@ -63,13 +58,6 @@ class SuperpowerManager {
         }
     }
 
-    /**
-     * Verifies a Razorpay payment and grants a unique superpower to the user.
-     * @param {string} googleId - The user's Google ID.
-     * @param {string} itemId - The superpower ID.
-     * @param {object} paymentDetails - Contains razorpay_order_id, razorpay_payment_id, razorpay_signature.
-     * @returns {Promise<void>}
-     */
     async verifyAndGrantPower(googleId, itemId, paymentDetails) {
         debug(`Verifying payment for user ${googleId} for item '${itemId}'`);
         const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = paymentDetails;
@@ -86,23 +74,11 @@ class SuperpowerManager {
         debug(`Payment verified and power '${itemId}' granted to user ${googleId}.`);
     }
 
-    /**
-     * Removes a superpower from a user's inventory after it has been used.
-     * @param {string} googleId - The user's Google ID.
-     * @param {string} powerId - The superpower ID to remove.
-     * @returns {Promise<object>} The user's new superpower inventory.
-     */
     async usePower(googleId, powerId) {
         debug(`User ${googleId} is using power '${powerId}'. Removing from inventory.`);
         return await this.revokePower(googleId, powerId);
     }
     
-    /**
-     * Grants a superpower to a user. Creates a placeholder profile if the user doesn't exist.
-     * @param {string} googleId - The user's Google ID.
-     * @param {string} powerId - The superpower ID to grant.
-     * @returns {Promise<object>} The user's new superpower inventory.
-     */
     async grantPower(googleId, powerId) {
         debug(`Granting power '${powerId}' to user ${googleId}`);
         const client = await this.pool.connect();
@@ -125,12 +101,19 @@ class SuperpowerManager {
                 debug(`User ${googleId} already owns '${powerId}', no changes made.`);
             }
             
+            const finalInventory = { owned: ownedList };
             const { rows: [updated] } = await client.query(
                 "UPDATE territories SET superpowers = $1 WHERE owner_id = $2 RETURNING superpowers",
-                [JSON.stringify({ owned: ownedList }), googleId]
+                [JSON.stringify(finalInventory), googleId]
             );
+            
             await client.query('COMMIT');
-            debug(`Successfully granted power. New inventory for ${googleId}: %O`, updated.superpowers);
+
+            // ===================================================================
+            // NEW DEBUG LOG
+            // ===================================================================
+            dbDebug(`COMMIT successful. Superpower inventory for ${googleId} saved to database: %O`, updated.superpowers);
+            
             return updated.superpowers;
         } catch (err) {
             await client.query('ROLLBACK');
@@ -141,12 +124,6 @@ class SuperpowerManager {
         }
     }
 
-    /**
-     * Revokes a superpower from a user (Admin action or post-use).
-     * @param {string} googleId - The user's Google ID.
-     * @param {string} powerId - The superpower ID to revoke.
-     * @returns {Promise<object>} The user's new superpower inventory.
-     */
     async revokePower(googleId, powerId) {
         debug(`Revoking power '${powerId}' from user ${googleId}`);
         const client = await this.pool.connect();
@@ -169,7 +146,7 @@ class SuperpowerManager {
                 [JSON.stringify({ owned: updatedOwnedList }), googleId]
             );
             await client.query('COMMIT');
-            debug(`Successfully revoked power. New inventory for ${googleId}: %O`, updated.superpowers);
+            dbDebug(`COMMIT successful. Superpower inventory for ${googleId} revoked and saved to database: %O`, updated.superpowers);
             return updated.superpowers;
         } catch (err) {
             await client.query('ROLLBACK');
