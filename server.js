@@ -129,11 +129,13 @@ const pool = new Pool({
 });
 
 // Instantiate the manager
-const superpowerManager = new SuperpowerManager(pool, razorpay);
+const superpowerManager = new SuperpowerManager(pool, razorpay, io, () => players);
+
 
 const geofenceService = new GeofenceService(pool);
 const players = {};
 
+// --- (setupDatabase function remains exactly the same, so it's omitted for brevity) ---
 const setupDatabase = async () => {
   const client = await pool.connect();
   logDb('Connected to database for setup.');
@@ -205,7 +207,7 @@ const setupDatabase = async () => {
         description TEXT,
         clan_image_url TEXT,
         leader_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-        base_location GEOMETRY(POINT, 4326),
+        base_location GEOMETry(POINT, 4326),
         has_shield BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
@@ -403,6 +405,8 @@ const setupDatabase = async () => {
   }
 };
 
+
+// --- (authenticate, checkAdminAuth, and all other routes remain the same) ---
 const authenticate = async (req, res, next) => {
   logAuth('Attempting to authenticate request for:', req.originalUrl);
   const authHeader = req.headers.authorization;
@@ -791,31 +795,69 @@ app.post('/shop/create-order', authenticate, async (req, res) => {
     }
 });
   
+// =======================================================================//
+// ===================== MODIFIED ROUTE STARTS HERE ======================//
+// =======================================================================//
 app.post('/verify-payment', async (req, res) => {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, googleId, purchaseType, itemId } = req.body;
-    logPayment(`Verifying payment for user ${googleId}, type: ${purchaseType}, item: ${itemId}, order: ${razorpay_order_id}`);
+    
+    logPayment(`[START] Received payment verification request for user: ${googleId}`);
+    logPayment(`  - Type: ${purchaseType}`);
+    logPayment(`  - Item ID: ${itemId}`);
+    logPayment(`  - Order ID: ${razorpay_order_id}`);
     
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !googleId) {
-        logPayment(`Payment verification failed for ${googleId}: Missing required data.`);
+        logPayment(`[FAIL] Payment verification for ${googleId} failed: Missing required data.`);
         return res.status(400).json({ error: 'Missing required payment verification data.' });
     }
     
     try {
+        let newInventory;
         if (purchaseType === 'superpower' && itemId) {
-            await superpowerManager.verifyAndGrantPower(googleId, itemId, { razorpay_order_id, razorpay_payment_id, razorpay_signature });
+            logPayment(`Calling SuperpowerManager.verifyAndGrantPower for user ${googleId}, item ${itemId}.`);
+            newInventory = await superpowerManager.verifyAndGrantPower(googleId, itemId, { razorpay_order_id, razorpay_payment_id, razorpay_signature });
+            logPayment(`[SUCCESS] SuperpowerManager.verifyAndGrantPower completed for user ${googleId}.`);
+            
+            // Notify the player in real-time if they are online
+            const playerSocketId = Object.keys(players).find(id => players[id].googleId === googleId);
+            if (playerSocketId) {
+                const onlinePlayer = players[playerSocketId];
+                const ownedList = newInventory.owned || [];
+
+                // Update the server's in-memory state for the player
+                onlinePlayer.hasLastStand = ownedList.includes('lastStand');
+                onlinePlayer.hasInfiltrator = ownedList.includes('infiltrator');
+                onlinePlayer.hasGhostRunner = ownedList.includes('ghostRunner');
+                onlinePlayer.hasTrailDefense = ownedList.includes('trailDefense');
+                
+                io.to(playerSocketId).emit('superpowerInventoryUpdated', newInventory);
+                logSocket(`[NOTIFIED] Sent 'superpowerInventoryUpdated' to player ${googleId} (${playerSocketId}) after purchase.`);
+            } else {
+                logSocket(`[INFO] Player ${googleId} is not online. Could not send real-time inventory update after purchase.`);
+            }
+
         } else if (purchaseType === 'subscription') {
-            logPayment(`Subscription logic for ${googleId}.`);
+            logPayment(`Processing subscription logic for ${googleId}.`);
             await pool.query("UPDATE territories SET is_paid = TRUE, subscription_status = 'active' WHERE owner_id = $1", [googleId]);
+            logPayment(`[SUCCESS] Subscription activated for ${googleId} in DB.`);
         } else {
-             throw new Error("Invalid purchase type");
+             throw new Error("Invalid purchase type specified: " + purchaseType);
         }
+
+        logPayment(`[END] Successfully verified payment for user ${googleId}. Sending 200 OK.`);
         res.status(200).json({ success: true, message: 'Payment verified successfully.' });
+
     } catch (err) {
-        logPayment(`Payment verification failed for ${googleId}: %O`, err);
+        logPayment(`[ERROR] Payment verification failed for ${googleId}. Error: %O`, err);
         res.status(500).json({ error: err.message || 'Server error while verifying payment.' });
     }
 });
+// =======================================================================//
+// ====================== MODIFIED ROUTE ENDS HERE =======================//
+// =======================================================================//
 
+
+// --- (Rest of the routes and the io.on('connection') logic remain the same) ---
 app.get('/subscription/status', authenticate, async (req, res) => {
     logPayment(`Fetching subscription status for user ${req.user.googleId}`);
     try {
@@ -1583,6 +1625,7 @@ io.on('connection', (socket) => {
     }
   });
 });
+
 
 const main = async () => {
   server.listen(PORT, '0.0.0.0', () => {
