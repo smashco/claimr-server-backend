@@ -129,10 +129,13 @@ const pool = new Pool({
 });
 
 // Instantiate the manager
-const superpowerManager = new SuperpowerManager(pool, razorpay);
+const superpowerManager = new SuperpowerManager(pool, razorpay, io, () => players);
+
+
 const geofenceService = new GeofenceService(pool);
 const players = {};
 
+// --- (setupDatabase function remains exactly the same, so it's omitted for brevity) ---
 const setupDatabase = async () => {
   const client = await pool.connect();
   logDb('Connected to database for setup.');
@@ -204,7 +207,7 @@ const setupDatabase = async () => {
         description TEXT,
         clan_image_url TEXT,
         leader_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-        base_location GEOMETRY(POINT, 4326),
+        base_location GEOMETry(POINT, 4326),
         has_shield BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
@@ -402,6 +405,8 @@ const setupDatabase = async () => {
   }
 };
 
+
+// --- (authenticate, checkAdminAuth, and all other routes remain the same) ---
 const authenticate = async (req, res, next) => {
   logAuth('Attempting to authenticate request for:', req.originalUrl);
   const authHeader = req.headers.authorization;
@@ -790,11 +795,16 @@ app.post('/shop/create-order', authenticate, async (req, res) => {
     }
 });
   
+// =======================================================================//
+// ===================== MODIFIED ROUTE STARTS HERE ======================//
+// =======================================================================//
 app.post('/verify-payment', async (req, res) => {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, googleId, purchaseType, itemId } = req.body;
     
     logPayment(`[START] Received payment verification request for user: ${googleId}`);
-    logPayment(`  - Type: ${purchaseType}, Item ID: ${itemId}, Order ID: ${razorpay_order_id}`);
+    logPayment(`  - Type: ${purchaseType}`);
+    logPayment(`  - Item ID: ${itemId}`);
+    logPayment(`  - Order ID: ${razorpay_order_id}`);
     
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !googleId) {
         logPayment(`[FAIL] Payment verification for ${googleId} failed: Missing required data.`);
@@ -808,10 +818,13 @@ app.post('/verify-payment', async (req, res) => {
             newInventory = await superpowerManager.verifyAndGrantPower(googleId, itemId, { razorpay_order_id, razorpay_payment_id, razorpay_signature });
             logPayment(`[SUCCESS] SuperpowerManager.verifyAndGrantPower completed for user ${googleId}.`);
             
+            // Notify the player in real-time if they are online
             const playerSocketId = Object.keys(players).find(id => players[id].googleId === googleId);
             if (playerSocketId) {
                 const onlinePlayer = players[playerSocketId];
                 const ownedList = newInventory.owned || [];
+
+                // Update the server's in-memory state for the player
                 onlinePlayer.hasLastStand = ownedList.includes('lastStand');
                 onlinePlayer.hasInfiltrator = ownedList.includes('infiltrator');
                 onlinePlayer.hasGhostRunner = ownedList.includes('ghostRunner');
@@ -839,7 +852,12 @@ app.post('/verify-payment', async (req, res) => {
         res.status(500).json({ error: err.message || 'Server error while verifying payment.' });
     }
 });
+// =======================================================================//
+// ====================== MODIFIED ROUTE ENDS HERE =======================//
+// =======================================================================//
 
+
+// --- (Rest of the routes and the io.on('connection') logic remain the same) ---
 app.get('/subscription/status', authenticate, async (req, res) => {
     logPayment(`Fetching subscription status for user ${req.user.googleId}`);
     try {
@@ -925,6 +943,7 @@ app.post('/clans', authenticate, async (req, res) => {
     if (!name || !tag || !leaderId) return res.status(400).json({ error: 'Name, tag, and leaderId are required.' });
     const client = await pool.connect();
     try {
+        logDb(`BEGIN transaction for creating clan by ${leaderId}`);
         await client.query('BEGIN');
         const memberCheck = await client.query('SELECT 1 FROM clan_members WHERE user_id = $1', [leaderId]);
         if (memberCheck.rowCount > 0) {
@@ -937,9 +956,11 @@ app.post('/clans', authenticate, async (req, res) => {
         await client.query('INSERT INTO clan_members(clan_id, user_id, role) VALUES($1, $2, $3)', [newClan.id, leaderId, 'leader']);
         await client.query(`INSERT INTO clan_territories (clan_id, area, area_sqm) VALUES ($1, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), 0);`, [newClan.id]);
         await client.query('COMMIT');
+        logDb(`COMMIT transaction for creating clan by ${leaderId}`);
         res.status(201).json({id: newClan.id.toString(), name: newClan.name, tag: newClan.tag, role: 'leader', base_is_set: false});
     } catch (err) {
         await client.query('ROLLBACK');
+        logDb(`ROLLBACK transaction for creating clan due to error: ${err.message}`);
         if (err.code === '23505') return res.status(409).json({ message: 'A clan with that name or tag already exists.' });
         logApi(`Error creating clan for ${leaderId}: %O`, err);
         res.status(500).json({ message: 'Server error while creating clan.' });
@@ -1031,6 +1052,7 @@ app.post('/clans/:id/set-base', authenticate, async (req, res) => {
 
     const client = await pool.connect();
     try {
+        logDb(`BEGIN transaction for setting clan base by ${leaderId}`);
         await client.query('BEGIN');
         const checkLeader = await client.query('SELECT 1 FROM clans WHERE id = $1 AND leader_id = $2', [id, leaderId]);
         if (checkLeader.rowCount === 0) {
@@ -1052,7 +1074,8 @@ app.post('/clans/:id/set-base', authenticate, async (req, res) => {
             ON CONFLICT (clan_id) DO UPDATE
             SET area = ST_GeomFromGeoJSON($2), area_sqm = $3;
         `, [id, initialAreaGeoJSON, initialBaseArea]);
-        
+        logApi(`Clan base for clan ${id} established. Initial territory created with area ${initialBaseArea} sqm.`);
+
         const clanMembers = await client.query('SELECT user_id FROM clan_members WHERE clan_id = $1', [id]);
         for (const memberRow of clanMembers.rows) {
             const memberSocketId = Object.keys(players).find(sockId => players[sockId].googleId === memberRow.user_id);
@@ -1061,9 +1084,11 @@ app.post('/clans/:id/set-base', authenticate, async (req, res) => {
             }
         }
         await client.query('COMMIT');
+        logDb(`COMMIT transaction for setting clan base.`);
         res.sendStatus(200);
     } catch (err) {
         await client.query('ROLLBACK');
+        logDb(`ROLLBACK transaction for setting clan base due to error: ${err.message}`);
         logApi(`Error setting clan base for clan ${id}: %O`, err);
         res.status(500).json({ error: 'Failed to set clan base.' });
     } finally {
@@ -1076,6 +1101,7 @@ app.delete('/clans/members/me', authenticate, async (req, res) => {
     logApi(`User ${googleId} attempting to leave their clan.`);
     const client = await pool.connect();
     try {
+        logDb(`BEGIN transaction for leaving clan by ${googleId}`);
         await client.query('BEGIN');
         const memberInfoRes = await client.query(`SELECT clan_id, role, (SELECT COUNT(*) FROM clan_members WHERE clan_id = cm.clan_id) as member_count FROM clan_members cm WHERE user_id = $1`, [googleId]);
         if (memberInfoRes.rowCount === 0) {
@@ -1094,9 +1120,11 @@ app.delete('/clans/members/me', authenticate, async (req, res) => {
             await client.query('DELETE FROM clan_members WHERE user_id = $1', [googleId]);
         }
         await client.query('COMMIT');
+        logDb(`COMMIT transaction for leaving clan.`);
         res.status(200).json({ message: "Successfully left the clan." });
     } catch (err) {
         await client.query('ROLLBACK');
+        logDb(`ROLLBACK transaction for leaving clan due to error: ${err.message}`);
         logApi(`Error leaving clan for ${googleId}: %O`, err);
         res.status(500).json({ message: 'Server error while leaving clan.' });
     } finally {
@@ -1152,6 +1180,7 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
     }
     const client = await pool.connect();
     try {
+        logDb(`BEGIN transaction for managing join request ${requestId}`);
         await client.query('BEGIN');
         const requestResult = await client.query(`SELECT cjr.clan_id, cjr.user_id as applicant_google_id, c.leader_id FROM clan_join_requests cjr JOIN clans c ON cjr.clan_id = c.id WHERE cjr.id = $1;`, [requestId]);
         if (requestResult.rowCount === 0) {
@@ -1185,9 +1214,11 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
             }
         }
         await client.query('COMMIT');
+        logDb(`COMMIT transaction for managing join request.`);
         res.status(200).json({ message: `Request successfully ${status}.` });
     } catch (err) {
         await client.query('ROLLBACK');
+        logDb(`ROLLBACK transaction for managing join request due to error: ${err.message}`);
         logApi(`Error managing join request ${requestId}: %O`, err);
         res.status(500).json({ message: 'Server error while managing request.' });
     } finally {
@@ -1196,7 +1227,8 @@ app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
 });
 
 async function broadcastAllPlayers() {
-    if (Object.keys(players).length === 0) return;
+    const playerIds = Object.keys(players);
+    if (playerIds.length === 0) return;
     const googleIds = Object.values(players).map(p => p.googleId).filter(id => id);
     if (googleIds.length === 0) return;
     try {
@@ -1232,35 +1264,293 @@ io.on('connection', (socket) => {
   }
 
   socket.on('playerJoined', async ({ googleId, name, gameMode }) => {
-    // ... (full logic from previous versions)
+    if (!googleId || !gameMode) {
+        logSocket(`Invalid playerJoined event from ${socket.id}. Missing googleId or gameMode.`);
+        return;
+    }
+    logSocket(`Player ${name} (${googleId}) with socket ${socket.id} joining in [${gameMode}] mode.`);
+    const client = await pool.connect();
+    try {
+        const memberInfoRes = await client.query('SELECT clan_id, role FROM clan_members WHERE user_id = $1', [googleId]);
+        const clanId = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].clan_id : null;
+        const role = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].role : null;
+
+        const playerProfileRes = await client.query('SELECT has_shield, is_carve_mode_active, username IS NOT NULL as has_record, superpowers FROM territories WHERE owner_id = $1', [googleId]);
+        
+        const playerRecord = playerProfileRes.rows[0];
+        const hasShield = playerRecord ? playerRecord.has_shield : false;
+        const isCarveModeActive = playerRecord ? playerRecord.is_carve_mode_active : false;
+        const playerHasRecord = !!playerRecord;
+        const ownedPowers = playerRecord?.superpowers?.owned || [];
+        logSocket(`Player ${name} has superpowers: %O`, ownedPowers);
+
+        players[socket.id] = {
+            id: socket.id,
+            name,
+            googleId,
+            clanId,
+            role,
+            gameMode,
+            lastKnownPosition: null,
+            isDrawing: false,
+            activeTrail: [],
+            hasShield: hasShield,
+            disconnectTimer: null,
+            hasLastStand: ownedPowers.includes('lastStand'),
+            hasInfiltrator: ownedPowers.includes('infiltrator'),
+            hasGhostRunner: ownedPowers.includes('ghostRunner'),
+            hasTrailDefense: ownedPowers.includes('trailDefense'),
+            isGhostRunnerActive: false,
+            isLastStandActive: false,
+            isInfiltratorActive: false,
+            isTrailDefenseActive: false,
+            isCarveModeActive: isCarveModeActive,
+        };
+
+        const geofencePolygons = await geofenceService.getGeofencePolygons();
+        socket.emit('geofenceUpdate', geofencePolygons);
+        
+        const chests = await client.query(`SELECT id, ST_AsGeoJSON(location) as location FROM superpower_chests WHERE is_active = TRUE`);
+        socket.emit('activeChests', chests.rows.map(c => ({ id: c.id, location: JSON.parse(c.location).coordinates.reverse() })));
+
+        let activeTerritories = [];
+        if (gameMode === 'clan') {
+             const query = `
+                SELECT
+                    ct.clan_id::text as "ownerId",
+                    c.name as "ownerName",
+                    c.clan_image_url as "profileImageUrl",
+                    '#CCCCCC' as identity_color,
+                    ST_AsGeoJSON(ct.area) as geojson,
+                    ct.area_sqm as area
+                FROM clan_territories ct
+                JOIN clans c ON ct.clan_id = c.id
+                WHERE ct.area IS NOT NULL AND NOT ST_IsEmpty(ct.area);
+            `;
+            const territoryResult = await client.query(query);
+            activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
+
+            if (clanId) {
+                const clanBaseRes = await client.query('SELECT base_location FROM clans WHERE id = $1', [clanId]);
+                if (clanBaseRes.rows.length > 0 && clanBaseRes.rows[0].base_location) {
+                    const geojsonResult = await client.query(`SELECT ST_AsGeoJSON($1) as geojson`, [clanBaseRes.rows[0].base_location]);
+                    const parsedBaseLoc = JSON.parse(geojsonResult.rows[0].geojson).coordinates;
+                    socket.emit('clanBaseActivated', { center: { lat: parsedBaseLoc[1], lng: parsedBaseLoc[0] } });
+                }
+            }
+        }
+        else if (gameMode === 'solo') {
+            const query = `
+                SELECT
+                    owner_id as "ownerId",
+                    username as "ownerName",
+                    profile_image_url as "profileImageUrl",
+                    identity_color,
+                    ST_AsGeoJSON(area) as geojson,
+                    area_sqm as area
+                FROM territories
+                WHERE area IS NOT NULL AND NOT ST_IsEmpty(area);
+            `;
+            const territoryResult = await client.query(query);
+            activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
+        }
+
+        logSocket(`Found ${activeTerritories.length} [${gameMode}] territories. Sending 'existingTerritories' to ${socket.id}.`);
+        socket.emit('existingTerritories', { territories: activeTerritories, playerHasRecord: playerHasRecord });
+
+        const activeTrails = [];
+        for (const playerId in players) {
+          if (players[playerId].isDrawing && players[playerId].activeTrail.length > 0 && players[playerId].gameMode === gameMode) {
+            activeTrails.push({ id: playerId, trail: players[playerId].activeTrail });
+          }
+        }
+        if (activeTrails.length > 0) {
+          socket.emit('existingLiveTrails', activeTrails);
+        }
+
+    } catch (err) {
+      logSocket(`FATAL ERROR in playerJoined for ${socket.id}: %O`, err);
+      socket.emit('error', { message: 'Failed to load game state.' });
+    } finally {
+        client.release();
+    }
   });
 
   socket.on('locationUpdate', async (data) => {
-    // ... (full logic from previous versions)
-  });
-
-  socket.on('startDrawingTrail', async () => {
-    // ... (full logic from previous versions)
-  });
-
-  socket.on('stopDrawingTrail', async () => {
-    // ... (full logic from previous versions)
-  });
-
-  socket.on('activateLastStand', async () => {
     const player = players[socket.id];
-    if (player) {
-        logGame(`Player ${player.name} is activating Last Stand.`);
+    if (!player || !player.googleId) return;
+
+    player.lastKnownPosition = data;
+
+    if (player.isDrawing) {
+        const playerPointWKT = `ST_SetSRID(ST_Point(${data.lng}, ${data.lat}), 4326)`;
         try {
-            await superpowerManager.usePower(player.googleId, 'lastStand');
-            socket.emit('superpowerAcknowledged', { power: 'lastStand' });
-        } catch(err) {
-            logGame(`Failed to activate Last Stand for ${player.name}: %O`, err);
+            const result = await pool.query(`
+                SELECT id FROM superpower_chests
+                WHERE is_active = TRUE AND ST_DWithin(location, ${playerPointWKT}::geography, ${CHEST_RADIUS_METERS})
+                LIMIT 1;
+            `);
+            if (result.rowCount > 0) {
+                const chestId = result.rows[0].id;
+                await pool.query('UPDATE superpower_chests SET is_active = FALSE WHERE id = $1', [chestId]);
+                
+                const availablePowers = ['lastStand', 'infiltrator', 'ghostRunner', 'trailDefense'];
+                const powersToGrant = [];
+                const numToGrant = Math.floor(Math.random() * 2) + 1;
+
+                for (let i = 0; i < numToGrant; i++) {
+                    if (availablePowers.length === 0) break;
+                    const randomIndex = Math.floor(Math.random() * availablePowers.length);
+                    const power = availablePowers.splice(randomIndex, 1)[0];
+                    powersToGrant.push(power);
+                    await superpowerManager.grantPower(player.googleId, power);
+                }
+
+                socket.emit('superpowersGranted', { powers: powersToGrant });
+                io.emit('chestClaimed', { chestId: chestId });
+                logGame(`Player ${player.name} claimed chest ${chestId} and got powers: ${powersToGrant.join(', ')}`);
+            }
+        } catch (err) {
+            logGame(`Error checking for chest collision for player ${player.name}: %O`, err);
+        }
+
+        if (player.activeTrail.length > 0) {
+            const lastPoint = player.activeTrail[player.activeTrail.length - 1];
+            const attackerSegmentWKT = (lastPoint.lng === data.lng && lastPoint.lat === data.lat)
+                ? `POINT(${data.lng} ${data.lat})`
+                : `LINESTRING(${lastPoint.lng} ${lastPoint.lat}, ${data.lng} ${data.lat})`;
+
+            const attackerSegmentGeom = `ST_SetSRID(ST_GeomFromText('${attackerSegmentWKT}'), 4326)`;
+
+            for (const victimId in players) {
+                if (victimId === socket.id) continue;
+                const victim = players[victimId];
+                if (victim && victim.isDrawing && victim.activeTrail.length >= 2) {
+                    const victimTrailWKT = 'LINESTRING(' + victim.activeTrail.map(p => `${p.lng} ${p.lat}`).join(', ') + ')';
+                    const victimTrailGeom = `ST_SetSRID(ST_GeomFromText('${victimTrailWKT}'), 4326)`;
+                    try {
+                        const res = await pool.query(`SELECT ST_Intersects(${attackerSegmentGeom}, ${victimTrailGeom}) as intersects;`);
+                        if (res.rows[0].intersects) {
+                            if (victim.isTrailDefenseActive) {
+                                logGame(`TRAIL DEFLECTED! Attacker ${player.name} hit Victim ${victim.name}'s defense.`);
+                                io.to(socket.id).emit('runTerminated', { reason: `Your run was deflected by an opponent's Trail Defense!` });
+                                
+                                player.isDrawing = false;
+                                player.activeTrail = [];
+                                io.emit('trailCleared', { id: socket.id });
+                                return; 
+                            }
+                            
+                            logGame(`TRAIL CUT! Attacker ${player.name} cut Victim ${victim.name}`);
+                            io.to(victimId).emit('runTerminated', { reason: `Your trail was cut by ${player.name}!` });
+                            
+                            await updateQuestProgress(pool, io, player.googleId, 'trail_cut', 1);
+
+                            victim.isDrawing = false;
+                            victim.activeTrail = [];
+                            io.emit('trailCleared', { id: victimId });
+                        }
+                    } catch(err) {
+                        logGame(`Error checking trail intersection: %O`, err);
+                    }
+                }
+            }
+        }
+        player.activeTrail.push(data);
+        if (!player.isGhostRunnerActive) {
+            socket.broadcast.emit('trailPointAdded', { id: socket.id, point: data });
         }
     }
   });
-  
-  // ... other superpower listeners
+
+  socket.on('startDrawingTrail', async () => {
+    const player = players[socket.id];
+    if (!player || player.gameMode === 'spectator' || player.isDrawing) return;
+    
+    player.isDrawing = true;
+    player.activeTrail = [];
+    logGame(`Player ${player.name} (${socket.id}) started drawing trail. Ghost Runner: ${player.isGhostRunnerActive}`);
+    if (!player.isGhostRunnerActive) {
+      socket.broadcast.emit('trailStarted', { id: socket.id, name: player.name });
+    }
+  });
+
+  socket.on('stopDrawingTrail', async () => {
+    const player = players[socket.id];
+    if (!player) return;
+    logGame(`Player ${player.name} (${socket.id}) stopped drawing trail (run ended).`);
+    player.isDrawing = false;
+    player.activeTrail = [];
+    player.isGhostRunnerActive = false;
+    player.isLastStandActive = false;
+    player.isTrailDefenseActive = false;
+    io.emit('trailCleared', { id: socket.id });
+  });
+
+  socket.on('activateTrailDefense', async () => {
+    const player = players[socket.id];
+    if (player && player.hasTrailDefense) {
+        player.isTrailDefenseActive = true;
+        player.hasTrailDefense = false;
+        logGame(`Player ${player.name} activating Trail Defense.`);
+        try {
+            await superpowerManager.usePower(player.googleId, 'trailDefense');
+            socket.emit('superpowerAcknowledged', { power: 'trailDefense' });
+        } catch (err) {
+            logGame(`Failed to use Trail Defense for ${player.name}: %O`, err);
+            player.hasTrailDefense = true;
+        }
+    }
+  });
+
+  socket.on('activateGhostRunner', async () => {
+      const player = players[socket.id];
+      if (player && player.hasGhostRunner) {
+          player.isGhostRunnerActive = true;
+          player.hasGhostRunner = false;
+          logGame(`Player ${player.name} activating Ghost Runner.`);
+          try {
+            await superpowerManager.usePower(player.googleId, 'ghostRunner');
+            socket.emit('superpowerAcknowledged', { power: 'ghostRunner' });
+          } catch(err) {
+            logGame(`Failed to use Ghost Runner for ${player.name}: %O`, err);
+            player.hasGhostRunner = true;
+          }
+      }
+  });
+
+  socket.on('activateInfiltrator', async () => {
+      const player = players[socket.id];
+      if (player && player.hasInfiltrator) {
+          player.isInfiltratorActive = true;
+          player.hasInfiltrator = false;
+          logGame(`Player ${player.name} activating Infiltrator.`);
+          try {
+            await superpowerManager.usePower(player.googleId, 'infiltrator');
+            socket.emit('superpowerAcknowledged', { power: 'infiltrator' });
+          } catch(err) {
+            logGame(`Failed to use Infiltrator for ${player.name}: %O`, err);
+            player.hasInfiltrator = true;
+          }
+      }
+  });
+
+  socket.on('activateLastStand', async () => {
+      const player = players[socket.id];
+      if (player && player.hasLastStand) {
+          player.isLastStandActive = true;
+          player.hasLastStand = false;
+          logGame(`Player ${player.name} activating Last Stand.`);
+          try {
+            await superpowerManager.usePower(player.googleId, 'lastStand');
+            await pool.query('UPDATE territories SET is_shield_active = true WHERE owner_id = $1', [player.googleId]);
+            socket.emit('superpowerAcknowledged', { power: 'lastStand' });
+          } catch(err) {
+            logGame(`Failed to use Last Stand for ${player.name}: %O`, err);
+            player.hasLastStand = true;
+          }
+      }
+  });
 
   socket.on('claimTerritory', async (req) => {
     const player = players[socket.id];
@@ -1272,38 +1562,37 @@ io.on('connection', (socket) => {
     const { gameMode, trail, baseClaim } = req;
     const client = await pool.connect();
     try {
-        await client.query('BEGIN');
         logDb(`BEGIN transaction for claim by ${player.name}.`);
+        await client.query('BEGIN');
         let result;
-
         if (gameMode === 'solo') {
-            result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client, superpowerManager);
+            result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client);
         } else if (gameMode === 'clan') {
-            result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client, superpowerManager);
+            result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client);
         }
-
-        if (result === null) {
+        if (!result) {
             await client.query('ROLLBACK');
-            logDb(`ROLLBACK transaction for claim by ${player.name}, handler returned null (claim stopped).`);
+            logDb(`ROLLBACK transaction for claim by ${player.name}, handler returned no result.`);
             return;
         }
-        
         const { finalTotalArea, areaClaimed, ownerIdsToUpdate } = result;
         await client.query('COMMIT');
         logDb(`COMMIT transaction for claim by ${player.name}.`);
-        
         socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
         
-        const ownerIds = Array.from(ownerIdsToUpdate);
-        if (ownerIds.length > 0) {
-            const queryResult = await pool.query(`SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", identity_color, ST_AsGeoJSON(area) as geojson, area_sqm as area FROM territories WHERE owner_id = ANY($1::varchar[]);`, [ownerIds]);
-            io.emit('batchTerritoryUpdate', queryResult.rows.map(r => ({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
+        const soloOwnersToUpdate = ownerIdsToUpdate.filter(id => typeof id === 'string');
+        let batchUpdateData = [];
+        if (soloOwnersToUpdate.length > 0) {
+            const soloQueryResult = await client.query(`SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", identity_color, ST_AsGeoJSON(area) as geojson, area_sqm as area FROM territories WHERE owner_id = ANY($1::varchar[]);`, [soloOwnersToUpdate]);
+            batchUpdateData = batchUpdateData.concat(soloQueryResult.rows.map(r => ({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
+        }
+        if (batchUpdateData.length > 0) {
+            io.emit('batchTerritoryUpdate', batchUpdateData);
         }
 
         player.isDrawing = false;
         player.activeTrail = [];
         io.emit('trailCleared', { id: socket.id });
-
     } catch (err) {
         await client.query('ROLLBACK');
         logDb(`ROLLBACK transaction for claim by ${player.name} due to error: ${err.message}`);
@@ -1317,9 +1606,22 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     const player = players[socket.id];
     if (player) {
-      logSocket(`User ${player?.name || 'Unknown'} disconnected: ${socket.id}.`);
-      delete players[socket.id];
-      io.emit('playerLeft', { id: socket.id });
+      logSocket(`User ${player?.name || 'Unknown'} disconnected: ${socket.id}. Was drawing: ${player.isDrawing}`);
+      if (player.isDrawing) {
+        player.disconnectTimer = setTimeout(() => {
+            logSocket(`Disconnect timer expired for ${player.name}. Clearing trail and player data.`);
+            if(players[socket.id]) {
+                delete players[socket.id];
+            }
+            io.emit('trailCleared', { id: socket.id });
+            io.emit('playerLeft', { id: socket.id });
+        }, DISCONNECT_TRAIL_PERSIST_SECONDS * 1000);
+      } else {
+        delete players[socket.id];
+        io.emit('playerLeft', { id: socket.id });
+      }
+    } else {
+        logSocket(`Unknown user disconnected: ${socket.id}`);
     }
   });
 });
@@ -1336,5 +1638,4 @@ const main = async () => {
 };
 
 setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
-
 main();
