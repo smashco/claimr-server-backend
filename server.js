@@ -903,7 +903,8 @@ app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
     const options = {
         amount: SUBSCRIPTION_AMOUNT_PAISE,
         currency: "INR",
-        receipt: `sub_receipt_${googleId}_${Date.now()}`,
+        // --- THIS IS THE FIX: Generate a shorter, unique receipt ID ---
+        receipt: `sub_${googleId.slice(-8)}_${crypto.randomBytes(4).toString('hex')}`,
         notes: {
             googleId: googleId,
             purchaseType: 'subscription'
