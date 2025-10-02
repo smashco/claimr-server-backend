@@ -1,4 +1,5 @@
 
+
 /*
 ================================================================================
 HOW TO USE DEBUGGING:
@@ -917,6 +918,9 @@ app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
     }
 });
 
+// =======================================================================//
+// =================== GEOFENCE ONBOARDING FIX STARTS HERE ===============//
+// =======================================================================//
 app.get('/geofence/onboarding-check', async (req, res) => {
     const { lat, lng } = req.query;
     logApi(`Geofence onboarding check for lat: ${lat}, lng: ${lng}`);
@@ -926,18 +930,9 @@ app.get('/geofence/onboarding-check', async (req, res) => {
     }
 
     try {
-        const pointWKT = `POINT(${parseFloat(lng)} ${parseFloat(lat)})`;
-        const query = `
-            SELECT EXISTS (
-                SELECT 1
-                FROM geofence_zones
-                WHERE zone_type = 'allowed'
-                AND ST_Contains(geom, ST_SetSRID(ST_GeomFromText($1), 4326))
-            ) as is_allowed;
-        `;
-        const result = await pool.query(query, [pointWKT]);
-        const isAllowed = result.rows[0].is_allowed;
-
+        // Use the centralized and correct logic from the service
+        const isAllowed = await geofenceService.isLocationValid(parseFloat(lat), parseFloat(lng));
+        
         logApi(`Geofence check result for (${lat}, ${lng}): ${isAllowed}`);
         res.json({ isAllowed });
 
@@ -946,6 +941,9 @@ app.get('/geofence/onboarding-check', async (req, res) => {
         res.status(500).json({ isAllowed: false, error: 'Server error during geofence check.' });
     }
 });
+// =======================================================================//
+// =================== GEOFENCE ONBOARDING FIX ENDS HERE =================//
+// =======================================================================//
 
 app.get('/leaderboard', async (req, res) => {
     logApi('Fetching player leaderboard.');
@@ -1688,3 +1686,4 @@ const main = async () => {
 
 setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
 main();
+
