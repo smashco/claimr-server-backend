@@ -1,3 +1,4 @@
+
 /*
 ================================================================================
 HOW TO USE DEBUGGING:
@@ -135,7 +136,6 @@ const superpowerManager = new SuperpowerManager(pool, razorpay, io, () => player
 const geofenceService = new GeofenceService(pool);
 const players = {};
 
-// --- (setupDatabase function remains exactly the same, so it's omitted for brevity) ---
 const setupDatabase = async () => {
   const client = await pool.connect();
   logDb('Connected to database for setup.');
@@ -405,8 +405,6 @@ const setupDatabase = async () => {
   }
 };
 
-
-// --- (authenticate, checkAdminAuth, and all other routes remain the same) ---
 const authenticate = async (req, res, next) => {
   logAuth('Attempting to authenticate request for:', req.originalUrl);
   const authHeader = req.headers.authorization;
@@ -794,10 +792,7 @@ app.post('/shop/create-order', authenticate, async (req, res) => {
         res.status(err.message.includes('already own') ? 409 : 500).json({ message: err.message });
     }
 });
-  
-// =======================================================================//
-// ===================== MODIFIED ROUTE STARTS HERE ======================//
-// =======================================================================//
+
 app.post('/verify-payment', async (req, res) => {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, googleId, purchaseType, itemId } = req.body;
     
@@ -818,13 +813,11 @@ app.post('/verify-payment', async (req, res) => {
             newInventory = await superpowerManager.verifyAndGrantPower(googleId, itemId, { razorpay_order_id, razorpay_payment_id, razorpay_signature });
             logPayment(`[SUCCESS] SuperpowerManager.verifyAndGrantPower completed for user ${googleId}.`);
             
-            // Notify the player in real-time if they are online
             const playerSocketId = Object.keys(players).find(id => players[id].googleId === googleId);
             if (playerSocketId) {
                 const onlinePlayer = players[playerSocketId];
                 const ownedList = newInventory.owned || [];
 
-                // Update the server's in-memory state for the player
                 onlinePlayer.hasLastStand = ownedList.includes('lastStand');
                 onlinePlayer.hasInfiltrator = ownedList.includes('infiltrator');
                 onlinePlayer.hasGhostRunner = ownedList.includes('ghostRunner');
@@ -852,12 +845,7 @@ app.post('/verify-payment', async (req, res) => {
         res.status(500).json({ error: err.message || 'Server error while verifying payment.' });
     }
 });
-// =======================================================================//
-// ====================== MODIFIED ROUTE ENDS HERE =======================//
-// =======================================================================//
 
-
-// --- (Rest of the routes and the io.on('connection') logic remain the same) ---
 app.get('/subscription/status', authenticate, async (req, res) => {
     logPayment(`Fetching subscription status for user ${req.user.googleId}`);
     try {
@@ -897,6 +885,43 @@ app.post('/subscription/cancel', authenticate, async (req, res) => {
         res.status(500).json({ error: 'Server error while cancelling.' });
     }
 });
+
+// =======================================================================//
+// =================== ERROR FIX & PRICE CHANGE STARTS HERE ==============//
+// =======================================================================//
+app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
+    const { googleId } = req.user;
+    const SUBSCRIPTION_AMOUNT_PAISE = 6900; // ₹69 in paise
+
+    logPayment(`User ${googleId} requesting to create subscription order.`);
+
+    if (!razorpay) {
+        logPayment('[FAIL] Razorpay is not initialized. Cannot create order.');
+        return res.status(500).json({ message: 'Payment gateway is not configured.' });
+    }
+
+    const options = {
+        amount: SUBSCRIPTION_AMOUNT_PAISE,
+        currency: "INR",
+        receipt: `sub_receipt_${googleId}_${Date.now()}`,
+        notes: {
+            googleId: googleId,
+            purchaseType: 'subscription'
+        }
+    };
+
+    try {
+        const order = await razorpay.orders.create(options);
+        logPayment(`[SUCCESS] Created subscription order ${order.id} for user ${googleId}.`);
+        res.json({ orderId: order.id, amount: order.amount });
+    } catch (error) {
+        logPayment(`[ERROR] Razorpay order creation failed for ${googleId}: %O`, error);
+        res.status(500).json({ message: 'Failed to create payment order.' });
+    }
+});
+// =======================================================================//
+// ==================== ERROR FIX & PRICE CHANGE ENDS HERE ===============//
+// =======================================================================//
 
 app.get('/leaderboard', async (req, res) => {
     logApi('Fetching player leaderboard.');
