@@ -886,9 +886,6 @@ app.post('/subscription/cancel', authenticate, async (req, res) => {
     }
 });
 
-// =======================================================================//
-// =================== ERROR FIX & PRICE CHANGE STARTS HERE ==============//
-// =======================================================================//
 app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
     const { googleId } = req.user;
     const SUBSCRIPTION_AMOUNT_PAISE = 6900; // ₹69 in paise
@@ -903,7 +900,6 @@ app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
     const options = {
         amount: SUBSCRIPTION_AMOUNT_PAISE,
         currency: "INR",
-        // --- THIS IS THE FIX: Generate a shorter, unique receipt ID ---
         receipt: `sub_${googleId.slice(-8)}_${crypto.randomBytes(4).toString('hex')}`,
         notes: {
             googleId: googleId,
@@ -920,9 +916,36 @@ app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
         res.status(500).json({ message: 'Failed to create payment order.' });
     }
 });
-// =======================================================================//
-// ==================== ERROR FIX & PRICE CHANGE ENDS HERE ===============//
-// =======================================================================//
+
+app.get('/geofence/onboarding-check', async (req, res) => {
+    const { lat, lng } = req.query;
+    logApi(`Geofence onboarding check for lat: ${lat}, lng: ${lng}`);
+
+    if (!lat || !lng) {
+        return res.status(400).json({ error: 'Latitude and longitude are required.' });
+    }
+
+    try {
+        const pointWKT = `POINT(${parseFloat(lng)} ${parseFloat(lat)})`;
+        const query = `
+            SELECT EXISTS (
+                SELECT 1
+                FROM geofence_zones
+                WHERE zone_type = 'allowed'
+                AND ST_Contains(geom, ST_SetSRID(ST_GeomFromText($1), 4326))
+            ) as is_allowed;
+        `;
+        const result = await pool.query(query, [pointWKT]);
+        const isAllowed = result.rows[0].is_allowed;
+
+        logApi(`Geofence check result for (${lat}, ${lng}): ${isAllowed}`);
+        res.json({ isAllowed });
+
+    } catch (err) {
+        logApi(`Error during geofence onboarding check: %O`, err);
+        res.status(500).json({ isAllowed: false, error: 'Server error during geofence check.' });
+    }
+});
 
 app.get('/leaderboard', async (req, res) => {
     logApi('Fetching player leaderboard.');
