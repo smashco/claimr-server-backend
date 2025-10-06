@@ -1,5 +1,3 @@
-
-
 /*
 ================================================================================
 HOW TO USE DEBUGGING:
@@ -273,6 +271,9 @@ const setupDatabase = async () => {
     `);
     logDb('"sponsors" table is ready.');
 
+    // =======================================================================//
+    // ==================== UPDATED QUEST TABLE SCHEMA =======================//
+    // =======================================================================//
     await client.query(`
         CREATE TABLE IF NOT EXISTS quests (
             id SERIAL PRIMARY KEY,
@@ -318,6 +319,9 @@ const setupDatabase = async () => {
       );
     `);
     logDb('"quest_entries" table is ready.');
+    // =======================================================================//
+    // ==================== END OF QUEST TABLE SCHEMA ========================//
+    // =======================================================================//
 
     await client.query(`
         CREATE TABLE IF NOT EXISTS superpower_chests (
@@ -918,9 +922,6 @@ app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
     }
 });
 
-// =======================================================================//
-// =================== GEOFENCE ONBOARDING FIX STARTS HERE ===============//
-// =======================================================================//
 app.get('/geofence/onboarding-check', async (req, res) => {
     const { lat, lng } = req.query;
     logApi(`Geofence onboarding check for lat: ${lat}, lng: ${lng}`);
@@ -930,7 +931,6 @@ app.get('/geofence/onboarding-check', async (req, res) => {
     }
 
     try {
-        // Use the centralized and correct logic from the service
         const isAllowed = await geofenceService.isLocationValid(parseFloat(lat), parseFloat(lng));
         
         logApi(`Geofence check result for (${lat}, ${lng}): ${isAllowed}`);
@@ -941,9 +941,6 @@ app.get('/geofence/onboarding-check', async (req, res) => {
         res.status(500).json({ isAllowed: false, error: 'Server error during geofence check.' });
     }
 });
-// =======================================================================//
-// =================== GEOFENCE ONBOARDING FIX ENDS HERE =================//
-// =======================================================================//
 
 app.get('/leaderboard', async (req, res) => {
     logApi('Fetching player leaderboard.');
@@ -1686,4 +1683,3 @@ const main = async () => {
 
 setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
 main();
-
