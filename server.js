@@ -271,15 +271,12 @@ const setupDatabase = async () => {
     `);
     logDb('"sponsors" table is ready.');
 
-    // =======================================================================//
-    // ==================== UPDATED QUEST TABLE SCHEMA =======================//
-    // =======================================================================//
     await client.query(`
         CREATE TABLE IF NOT EXISTS quests (
             id SERIAL PRIMARY KEY,
             title VARCHAR(150) NOT NULL,
             description TEXT NOT NULL,
-            type VARCHAR(20) NOT NULL,
+            type VARCHAR(20) NOT NULL, -- THIS COLUMN WAS MISSING
             objective_type VARCHAR(50),
             objective_value INT,
             status VARCHAR(20) NOT NULL DEFAULT 'pending',
@@ -292,6 +289,18 @@ const setupDatabase = async () => {
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
     `);
+    // Attempt to add the column if the table already exists but the column doesn't
+    try {
+      await client.query("ALTER TABLE quests ADD COLUMN type VARCHAR(20) NOT NULL DEFAULT 'admin'");
+      logDb('Patched "quests" table with missing "type" column.');
+    } catch (e) {
+      if (e.code !== '42701') { // 42701 is "duplicate column" error, which we can ignore
+        throw e;
+      }
+    }
+    // =======================================================================//
+    // ===================== END OF DATABASE SCHEMA FIX ======================//
+    // =======================================================================//
     logDb('"quests" table is ready.');
 
     await client.query(`
@@ -409,6 +418,8 @@ const setupDatabase = async () => {
     logDb('Database connection released after setup.');
   }
 };
+
+// ... (rest of server.js remains the same) ...
 
 const authenticate = async (req, res, next) => {
   logAuth('Attempting to authenticate request for:', req.originalUrl);
