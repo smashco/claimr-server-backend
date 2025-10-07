@@ -271,12 +271,15 @@ const setupDatabase = async () => {
     `);
     logDb('"sponsors" table is ready.');
 
+    // =======================================================================//
+    // ====================== DATABASE SCHEMA FIX HERE =======================//
+    // =======================================================================//
     await client.query(`
         CREATE TABLE IF NOT EXISTS quests (
             id SERIAL PRIMARY KEY,
             title VARCHAR(150) NOT NULL,
             description TEXT NOT NULL,
-            type VARCHAR(20) NOT NULL, -- THIS COLUMN WAS MISSING
+            type VARCHAR(20) NOT NULL,
             objective_type VARCHAR(50),
             objective_value INT,
             status VARCHAR(20) NOT NULL DEFAULT 'pending',
@@ -289,19 +292,31 @@ const setupDatabase = async () => {
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
     `);
-    // Attempt to add the column if the table already exists but the column doesn't
-    try {
-      await client.query("ALTER TABLE quests ADD COLUMN type VARCHAR(20) NOT NULL DEFAULT 'admin'");
-      logDb('Patched "quests" table with missing "type" column.');
-    } catch (e) {
-      if (e.code !== '42701') { // 42701 is "duplicate column" error, which we can ignore
-        throw e;
+    logDb('"quests" table creation/check complete.');
+
+    // Patching logic to add all potentially missing columns to the existing table
+    const columnsToAdd = [
+      { name: 'type', type: "VARCHAR(20) NOT NULL DEFAULT 'admin'" },
+      { name: 'objective_type', type: 'VARCHAR(50)' },
+      { name: 'objective_value', type: 'INT' },
+      { name: 'is_first_come_first_served', type: 'BOOLEAN DEFAULT FALSE' },
+      { name: 'winner_user_id', type: 'VARCHAR(255) REFERENCES territories(owner_id)' },
+      { name: 'launch_time', type: 'TIMESTAMP WITH TIME ZONE' },
+    ];
+
+    for (const col of columnsToAdd) {
+      try {
+        await client.query(`ALTER TABLE quests ADD COLUMN ${col.name} ${col.type}`);
+        logDb(`Patched "quests" table with missing "${col.name}" column.`);
+      } catch (e) {
+        if (e.code !== '42701') { // 42701 is "duplicate column", which we ignore
+          throw e;
+        }
       }
     }
     // =======================================================================//
     // ===================== END OF DATABASE SCHEMA FIX ======================//
     // =======================================================================//
-    logDb('"quests" table is ready.');
 
     await client.query(`
         CREATE TABLE IF NOT EXISTS quest_progress (
@@ -328,9 +343,6 @@ const setupDatabase = async () => {
       );
     `);
     logDb('"quest_entries" table is ready.');
-    // =======================================================================//
-    // ==================== END OF QUEST TABLE SCHEMA ========================//
-    // =======================================================================//
 
     await client.query(`
         CREATE TABLE IF NOT EXISTS superpower_chests (
