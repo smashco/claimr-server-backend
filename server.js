@@ -294,7 +294,7 @@ const setupDatabase = async () => {
     `);
     logDb('"quests" table creation/check complete.');
 
-    // Patching logic to add all potentially missing columns to the existing table
+    // This block will now patch all potentially missing columns.
     const columnsToAdd = [
       { name: 'type', type: "VARCHAR(20) NOT NULL DEFAULT 'admin'" },
       { name: 'objective_type', type: 'VARCHAR(50)' },
@@ -302,6 +302,7 @@ const setupDatabase = async () => {
       { name: 'is_first_come_first_served', type: 'BOOLEAN DEFAULT FALSE' },
       { name: 'winner_user_id', type: 'VARCHAR(255) REFERENCES territories(owner_id)' },
       { name: 'launch_time', type: 'TIMESTAMP WITH TIME ZONE' },
+      { name: 'expiry_time', type: 'TIMESTAMP WITH TIME ZONE' }
     ];
 
     for (const col of columnsToAdd) {
@@ -309,8 +310,8 @@ const setupDatabase = async () => {
         await client.query(`ALTER TABLE quests ADD COLUMN ${col.name} ${col.type}`);
         logDb(`Patched "quests" table with missing "${col.name}" column.`);
       } catch (e) {
-        if (e.code !== '42701') { // 42701 is "duplicate column", which we ignore
-          throw e;
+        if (e.code !== '42701') { // 42701 is "duplicate column", which we can safely ignore
+          throw e; // Throw any other error
         }
       }
     }
