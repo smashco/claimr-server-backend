@@ -14,7 +14,6 @@ module.exports = (pool, io, geofenceService, players) => {
    // --- Player Management ---
    router.get('/players', async (req, res) => {
        try {
-           // UPDATED QUERY: Removed "currency" from the selection
            const result = await pool.query('SELECT owner_id, username, area_sqm, superpowers FROM territories ORDER BY username');
            const playersList = result.rows.map(dbPlayer => {
                const onlinePlayer = Object.values(players).find(p => p.googleId === dbPlayer.owner_id);
@@ -47,7 +46,7 @@ module.exports = (pool, io, geofenceService, players) => {
    });
 
 
-   router.post('/player/:id/reset-territory', async (req, res) => { // Made route more specific
+   router.post('/player/:id/reset-territory', async (req, res) => {
        const { id } = req.params;
        try {
            await pool.query("UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), area_sqm = 0 WHERE owner_id = $1", [id]);
@@ -77,9 +76,10 @@ module.exports = (pool, io, geofenceService, players) => {
    router.get('/quests', async (req, res) => {
        try {
            const result = await pool.query(`
-               SELECT q.*, s.name as sponsor_name
+               SELECT q.*, s.name as sponsor_name, t.username as winner_username
                FROM quests q
                LEFT JOIN sponsors s ON q.sponsor_id = s.id
+               LEFT JOIN territories t ON q.winner_user_id = t.owner_id
                ORDER BY q.created_at DESC
            `);
            res.json(result.rows);
@@ -89,13 +89,17 @@ module.exports = (pool, io, geofenceService, players) => {
        }
    });
 
-
+    // =======================================================================//
+    // ======================== QUEST CREATION FIX HERE ======================//
+    // =======================================================================//
    router.post('/quests', async (req, res) => {
+       // The 'type' from the form is now correctly mapped to the 'quest_type' database column.
        const { title, description, type, objective_type, objective_value, is_first_come_first_served, launch_time, expiry_time, sponsor_id, google_form_url } = req.body;
        if (!title || !description || !type || !objective_type || !objective_value || !expiry_time) {
            return res.status(400).json({ message: 'Missing required quest fields.' });
        }
        try {
+           // The INSERT statement now correctly includes the 'type' column.
            const newQuest = await pool.query(
                `INSERT INTO quests (title, description, type, objective_type, objective_value, is_first_come_first_served, launch_time, expiry_time, sponsor_id, google_form_url, status)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active') RETURNING *`,
@@ -108,6 +112,9 @@ module.exports = (pool, io, geofenceService, players) => {
            res.status(500).json({ message: 'Server error while creating quest.' });
        }
    });
+    // =======================================================================//
+    // ====================== END OF QUEST CREATION FIX ======================//
+    // =======================================================================//
   
    router.delete('/quests/:id', async (req, res) => {
        try {
@@ -225,7 +232,7 @@ module.exports = (pool, io, geofenceService, players) => {
        }
    });
   
-   // --- NEW SHOP & PRIZE MANAGEMENT APIS ---
+   // --- SHOP & PRIZE MANAGEMENT APIS ---
    router.get('/shop/items', async (req, res) => {
        try {
            const result = await pool.query('SELECT item_id, name, price FROM shop_items WHERE item_type = $1 ORDER BY price ASC', ['superpower']);
@@ -245,7 +252,7 @@ module.exports = (pool, io, geofenceService, players) => {
        try {
            await pool.query('UPDATE shop_items SET price = $1 WHERE item_id = $2', [price, itemId]);
            res.json({ message: `Price for ${itemId} updated to ${price} G.` });
-       } catch (err) {
+       } catch(error) {
            console.error('[Admin API] Error updating item price:', err);
            res.status(500).json({ message: 'Failed to update item price.' });
        }
