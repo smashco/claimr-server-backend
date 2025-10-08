@@ -279,7 +279,7 @@ const setupDatabase = async () => {
             id SERIAL PRIMARY KEY,
             title VARCHAR(150) NOT NULL,
             description TEXT NOT NULL,
-            type VARCHAR(20),
+            type VARCHAR(20) NOT NULL, 
             objective_type VARCHAR(50),
             objective_value INT,
             status VARCHAR(20) NOT NULL DEFAULT 'pending',
@@ -293,34 +293,6 @@ const setupDatabase = async () => {
         );
     `);
     logDb('"quests" table creation/check complete.');
-
-    // This block will now patch all potentially missing columns to the existing table.
-    const columnsToPatch = [
-        { name: 'type', type: 'VARCHAR(20)'},
-        { name: 'objective_type', type: 'VARCHAR(50)' },
-        { name: 'objective_value', type: 'INT' },
-        { name: 'is_first_come_first_served', type: 'BOOLEAN DEFAULT FALSE' },
-        { name: 'winner_user_id', type: 'VARCHAR(255) REFERENCES territories(owner_id)' },
-        { name: 'launch_time', type: 'TIMESTAMP WITH TIME ZONE' },
-        { name: 'expiry_time', type: 'TIMESTAMP WITH TIME ZONE' }
-    ];
-
-    for (const col of columnsToPatch) {
-        try {
-            await client.query(`ALTER TABLE quests ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`);
-            logDb(`Ensured column "${col.name}" exists in "quests" table.`);
-        } catch (e) {
-            logDb(`Could not patch column ${col.name}. It might exist or there was an error: ${e.message}`);
-        }
-    }
-    
-    // Now, ensure 'type' is NOT NULL after patching
-    try {
-      await client.query(`ALTER TABLE quests ALTER COLUMN type SET NOT NULL;`);
-      logDb(`Ensured "type" column in "quests" is NOT NULL.`);
-    } catch(e) {
-      logDb(`Could not set NOT NULL on "type" column, likely already set.`);
-    }
     // =======================================================================//
     // ===================== END OF DATABASE SCHEMA FIX ======================//
     // =======================================================================//
