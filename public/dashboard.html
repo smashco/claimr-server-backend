@@ -31,9 +31,7 @@
            </div>
        </div>
 
-
        <div id="map"></div>
-
 
        <ul class="nav nav-tabs" id="myTab" role="tablist">
            <li class="nav-item" role="presentation">
@@ -49,7 +47,6 @@
                <button class="nav-link" id="shop-tab" data-bs-toggle="tab" data-bs-target="#shop-tab-pane" type="button" role="tab">Shop & Prizes</button>
            </li>
        </ul>
-
 
        <div class="tab-content" id="myTabContent">
            <div class="tab-pane fade show active" id="players-tab-pane" role="tabpanel">
@@ -69,7 +66,6 @@
                    </div>
                </div>
            </div>
-
 
            <div class="tab-pane fade" id="geofence-tab-pane" role="tabpanel">
                 <div class="card p-3">
@@ -99,13 +95,15 @@
                </div>
            </div>
 
-
            <div class="tab-pane fade p-3" id="quests-tab-pane" role="tabpanel">
                <div class="row">
                    <div class="col-md-4">
+                        <!-- =======================================================================// -->
+                        <!-- ===================== NEW QUEST FORM STARTS HERE ======================// -->
+                        <!-- =======================================================================// -->
                         <div class="card">
                            <div class="card-body">
-                               <h5 class="card-title">Create Developer Quest</h5>
+                               <h5 class="card-title">Create Admin Quest</h5>
                                <form id="createQuestForm">
                                    <div class="mb-3">
                                        <label for="questTitle" class="form-label">Title</label>
@@ -118,29 +116,37 @@
                                    <div class="mb-3">
                                        <label for="objectiveType" class="form-label">Objective Type</label>
                                        <select class="form-select" id="objectiveType" required>
-                                           <option value="claim_area">Claim Area (sqm)</option>
-                                           <option value="trail_cut">Trail Cut (count)</option>
-                                           <option value="qr_scan">QR Scan (count)</option>
+                                           <option value="cover_area">Cover New Area</option>
+                                           <option value="run_trail">Run a Trail</option>
+                                           <option value="steal_area">Steal Area</option>
+                                           <option value="trail_cut">Cut Trails</option>
                                        </select>
                                    </div>
                                    <div class="mb-3">
-                                       <label for="objectiveValue" class="form-label">Objective Value</label>
+                                       <label for="objectiveValue" class="form-label" id="objectiveValueLabel">Objective Value</label>
                                        <input type="number" class="form-control" id="objectiveValue" required>
                                    </div>
                                    <div class="mb-3">
-                                       <label for="expiryTime" class="form-label">Expiry Time</label>
+                                       <label for="questReward" class="form-label">Reward Description</label>
+                                       <input type="text" class="form-control" id="questReward" placeholder="e.g., 100 G-Coins" required>
+                                   </div>
+                                   <div class="mb-3">
+                                       <label for="expiryTime" class="form-label">Expiry Time (24 Hours Recommended)</label>
                                        <input type="datetime-local" class="form-control" id="expiryTime" required>
                                    </div>
                                    <div class="form-check mb-3">
                                        <input class="form-check-input" type="checkbox" id="isFCS">
                                        <label class="form-check-label" for="isFCS">
-                                           First Come, First Served (Ends after first completion)
+                                           First Come, First Served (Quest ends after one winner)
                                        </label>
                                    </div>
                                    <button type="submit" class="btn btn-primary">Create and Launch Quest</button>
                                </form>
                            </div>
                        </div>
+                       <!-- =======================================================================// -->
+                       <!-- ====================== NEW QUEST FORM ENDS HERE =======================// -->
+                       <!-- =======================================================================// -->
                         <div class="card">
                            <div class="card-body">
                                <h5 class="card-title">Create Sponsor Account</h5>
@@ -182,7 +188,6 @@
                    </div>
                </div>
            </div>
-
 
            <div class="tab-pane fade p-3" id="shop-tab-pane" role="tabpanel">
                <div class="row">
@@ -243,7 +248,6 @@
        </div>
    </div>
 
-
    <!-- Superpower Management Modal -->
    <div class="modal fade" id="superpowerModal" tabindex="-1" aria-hidden="true">
        <div class="modal-dialog">
@@ -265,7 +269,6 @@
        </div>
    </div>
 
-
    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
    <script>
@@ -275,7 +278,7 @@
        let geofenceLayers = L.featureGroup();
        let isSpawnMode = false;
        let superpowerModalInstance;
-       let currentPlayersData = []; // Store the latest player data globally
+       let currentPlayersData = [];
 
 
        function initMap() {
@@ -340,64 +343,36 @@
 
            players.forEach(player => {
                const row = tableBody.insertRow();
-
-
-               // Column 1: Status
-               const cellStatus = row.insertCell();
+               cellStatus = row.insertCell();
                cellStatus.innerHTML = `<span class="badge ${player.isOnline ? 'bg-success' : 'bg-secondary'}">${player.isOnline ? 'Online' : 'Offline'}</span>`;
-
-
-               // Column 2: Username
-               const cellUsername = row.insertCell();
+               cellUsername = row.insertCell();
                cellUsername.textContent = player.username || 'N/A';
-
-
-               // Column 3: Territory
-               const cellTerritory = row.insertCell();
+               cellTerritory = row.insertCell();
                cellTerritory.textContent = (player.area_sqm / 1000000).toFixed(6);
-
-
-               // Column 4: Actions
-               const cellActions = row.insertCell();
+               cellActions = row.insertCell();
                const actionsContainer = document.createElement('div');
                actionsContainer.className = 'btn-group';
-
-
-               // Details Button
                const detailsButton = document.createElement('a');
                detailsButton.href = `/admin/player_details.html?id=${player.owner_id}`;
                detailsButton.className = 'btn btn-sm btn-primary';
                detailsButton.textContent = 'Details';
                actionsContainer.appendChild(detailsButton);
-
-
-               // Powers Button
                const powersButton = document.createElement('button');
                powersButton.className = 'btn btn-sm btn-info';
                powersButton.textContent = 'Powers';
-               powersButton.addEventListener('click', () => {
-                   openSuperpowerModal(player);
-               });
+               powersButton.addEventListener('click', () => { openSuperpowerModal(player); });
                actionsContainer.appendChild(powersButton);
-
-
-               // Reset Button
                const resetButton = document.createElement('button');
                resetButton.className = 'btn btn-sm btn-warning';
                resetButton.textContent = 'Reset';
                resetButton.addEventListener('click', () => performAction(player.owner_id, 'reset-territory', player.username));
                actionsContainer.appendChild(resetButton);
-
-
-               // Delete Button
                const deleteButton = document.createElement('button');
                deleteButton.className = 'btn btn-sm btn-danger';
                deleteButton.textContent = 'Delete';
                deleteButton.addEventListener('click', () => performAction(player.owner_id, 'delete', player.username));
                actionsContainer.appendChild(deleteButton);
-              
                cellActions.appendChild(actionsContainer);
-
 
                if (player.isOnline && player.lastKnownPosition) {
                    const { lat, lng } = player.lastKnownPosition;
@@ -429,34 +404,21 @@
                const hasPower = ownedPowers.includes(powerId);
                const item = document.createElement('div');
                item.className = 'list-group-item d-flex justify-content-between align-items-center';
-
-
                const grantButton = document.createElement('button');
                grantButton.className = 'btn btn-sm btn-success';
                grantButton.textContent = 'Grant (+1)';
                grantButton.onclick = () => manageSuperpower(powerId, 'grant');
-
-
                const revokeButton = document.createElement('button');
                revokeButton.className = 'btn btn-sm btn-warning';
                revokeButton.textContent = 'Revoke (-1)';
                revokeButton.disabled = !hasPower;
                revokeButton.onclick = () => manageSuperpower(powerId, 'revoke');
-
-
-               item.innerHTML = `
-                   <div>
-                       ${powerName}
-                       <span class="badge ${hasPower ? 'bg-success' : 'bg-secondary'} rounded-pill ms-2">${hasPower ? 1 : 0}</span>
-                   </div>
-               `;
+               item.innerHTML = `<div>${powerName} <span class="badge ${hasPower ? 'bg-success' : 'bg-secondary'} rounded-pill ms-2">${hasPower ? 1 : 0}</span></div>`;
                const btnGroup = document.createElement('div');
                btnGroup.className = 'btn-group';
                btnGroup.appendChild(grantButton);
                btnGroup.appendChild(revokeButton);
                item.appendChild(btnGroup);
-
-
                modalList.appendChild(item);
            }
           
@@ -475,19 +437,13 @@
                    method: 'POST',
                    body: { powerId, action }
                });
-              
                await fetchPlayers();
-              
                const updatedPlayer = currentPlayersData.find(p => p.owner_id === googleId);
-              
                if (updatedPlayer) {
-                   // Re-render the modal content with the fresh data
                    openSuperpowerModal(updatedPlayer);
                } else {
                    superpowerModalInstance.hide();
                }
-
-
            } catch (error) {
                alert(`Error: ${error.message}`);
            }
@@ -514,17 +470,57 @@
        async function deleteZone(id) { if (!confirm('Are you sure you want to delete this geofence zone?')) return; try { const result = await apiFetch(`/admin/api/geofence-zones/${id}`, { method: 'DELETE' }); alert(result.message); fetchGeofenceZones(); } catch (error) { alert(`Error: ${error.message}`); } }
        async function fetchQuests() { try { const quests = await apiFetch('/admin/api/quests'); renderQuests(quests); } catch (error) { console.error('Error fetching quests:', error); document.getElementById('quest-table-body').innerHTML = `<tr><td colspan="6" class="text-danger text-center">${error.message}</td></tr>`; } }
        
-       // =======================================================================//
-       // =================== UPDATED QUEST RENDERING FUNCTION ==================//
-       // =======================================================================//
        function renderQuests(quests) { const tableBody = document.getElementById('quest-table-body'); tableBody.innerHTML = ''; if (quests.length === 0) { tableBody.innerHTML = '<tr><td colspan="6" class="text-center">No quests found.</td></tr>'; return; } quests.forEach(quest => { const row = document.createElement('tr'); const statusBadge = { 'pending': 'bg-warning text-dark', 'active': 'bg-success', 'completed': 'bg-info', 'expired': 'bg-secondary' }[quest.status] || 'bg-light text-dark'; const objectiveText = quest.objective_type ? `${quest.objective_type.replace('_', ' ')}: ${quest.objective_value}` : 'N/A'; let statusHtml; if (quest.winner_username) { statusHtml = `<span class="badge bg-primary">WINNER: ${quest.winner_username}</span>`; } else { statusHtml = `<span class="badge ${statusBadge}">${quest.status}</span>`; } row.innerHTML = `<td>${quest.title}</td><td>${quest.type}</td><td>${objectiveText}</td><td>${statusHtml}</td><td>${new Date(quest.expiry_time).toLocaleString()}</td><td><button class="btn btn-sm btn-outline-danger" onclick="deleteQuest(${quest.id})">Delete</button><button class="btn btn-sm btn-outline-info" onclick="extendQuest(${quest.id})">Extend</button></td>`; tableBody.appendChild(row); }); }
-       // =======================================================================//
-       // =================== END OF UPDATED QUEST FUNCTION =====================//
-       // =======================================================================//
 
        async function deleteQuest(questId) { if (!confirm('Are you sure you want to permanently delete this quest?')) return; try { const result = await apiFetch(`/admin/api/quests/${questId}`, { method: 'DELETE' }); alert(result.message); fetchQuests(); } catch (error) { alert(`Error: ${error.message}`); } }
        async function extendQuest(questId) { const newExpiry = prompt("Enter new expiry date and time (YYYY-MM-DDTHH:MM:SS):", new Date(Date.now() + 24*60*60*1000).toISOString().slice(0, 19)); if (!newExpiry) return; try { const result = await apiFetch(`/admin/api/quests/${questId}/extend`, { method: 'PUT', body: { new_expiry_time: newExpiry } }); alert(result.message); fetchQuests(); } catch (error) { alert(`Error: ${error.message}`); } }
-       document.getElementById('createQuestForm').addEventListener('submit', async function(e) { e.preventDefault(); const body = { title: document.getElementById('questTitle').value, description: document.getElementById('questDescription').value, type: 'developer', objective_type: document.getElementById('objectiveType').value, objective_value: parseInt(document.getElementById('objectiveValue').value, 10), expiry_time: new Date(document.getElementById('expiryTime').value).toISOString(), is_first_come_first_served: document.getElementById('isFCS').checked }; try { const result = await apiFetch('/admin/api/quests', { method: 'POST', body }); alert('Quest created successfully!'); this.reset(); fetchQuests(); } catch(error) { alert(`Error: ${error.message}`); } });
+       
+       // =======================================================================//
+       // ===================== NEW QUEST FORM JAVASCRIPT =====================//
+       // =======================================================================//
+       document.getElementById('objectiveType').addEventListener('change', function() {
+           const label = document.getElementById('objectiveValueLabel');
+           switch(this.value) {
+               case 'cover_area':
+               case 'steal_area':
+                   label.textContent = 'Objective Value (sqkm)';
+                   break;
+               case 'run_trail':
+                   label.textContent = 'Objective Value (km)';
+                   break;
+               case 'trail_cut':
+                   label.textContent = 'Objective Value (Number of Cuts)';
+                   break;
+               default:
+                   label.textContent = 'Objective Value';
+           }
+       });
+
+       document.getElementById('createQuestForm').addEventListener('submit', async function(e) {
+           e.preventDefault();
+           const body = {
+               title: document.getElementById('questTitle').value,
+               description: document.getElementById('questDescription').value,
+               type: 'admin', // This is an admin quest form
+               objective_type: document.getElementById('objectiveType').value,
+               objective_value: parseInt(document.getElementById('objectiveValue').value, 10),
+               reward_description: document.getElementById('questReward').value,
+               expiry_time: new Date(document.getElementById('expiryTime').value).toISOString(),
+               is_first_come_first_served: document.getElementById('isFCS').checked
+           };
+           try {
+               const result = await apiFetch('/admin/api/quests', { method: 'POST', body });
+               alert('Quest created successfully!');
+               this.reset();
+               fetchQuests();
+           } catch(error) {
+               alert(`Error: ${error.message}`);
+           }
+       });
+       // =======================================================================//
+       // =================== END OF NEW QUEST FORM JAVASCRIPT ==================//
+       // =======================================================================//
+
        document.getElementById('createSponsorForm').addEventListener('submit', async function(e) { e.preventDefault(); const name = document.getElementById('sponsorName').value; const login_id = document.getElementById('sponsorLoginId').value; const passcode = document.getElementById('sponsorPasscode').value; try { const result = await apiFetch('/admin/api/sponsors', { method: 'POST', body: { name, login_id, passcode } }); alert(result.message); this.reset(); } catch(error) { alert(`Error: ${error.message}`); } });
        document.getElementById('spawnChestBtn').addEventListener('click', () => { isSpawnMode = !isSpawnMode; const spawnBtn = document.getElementById('spawnChestBtn'); const mapContainer = document.getElementById('map'); if (isSpawnMode) { spawnBtn.textContent = 'Spawning... Click on Map'; spawnBtn.classList.add('btn-success'); spawnBtn.classList.remove('btn-info'); L.DomUtil.addClass(mapContainer, 'leaflet-crosshair-cursor'); } else { spawnBtn.textContent = 'Spawn Chest'; spawnBtn.classList.add('btn-info'); spawnBtn.classList.remove('btn-success'); L.DomUtil.removeClass(mapContainer, 'leaflet-crosshair-cursor'); } });
        async function onMapClick(e) { if (!isSpawnMode) return; const { lat, lng } = e.latlng; if (!confirm(`Spawn a superpower chest at these coordinates?\nLat: ${lat.toFixed(6)}, Lng: ${lng.toFixed(6)}`)) return; try { const result = await apiFetch('/admin/api/spawn-chest', { method: 'POST', body: { lat, lng } }); alert(result.message); fetchChests(); } catch(error) { alert(`Error: ${error.message}`); } finally { isSpawnMode = false; document.getElementById('spawnChestBtn').textContent = 'Spawn Chest'; document.getElementById('spawnChestBtn').classList.add('btn-info'); document.getElementById('spawnChestBtn').classList.remove('btn-success'); L.DomUtil.removeClass(document.getElementById('map'), 'leaflet-crosshair-cursor'); } }

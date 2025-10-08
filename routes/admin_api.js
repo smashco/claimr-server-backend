@@ -89,34 +89,29 @@ module.exports = (pool, io, geofenceService, players) => {
        }
    });
 
-    // =======================================================================//
-    // ======================== QUEST CREATION FIX HERE ======================//
-    // =======================================================================//
    router.post('/quests', async (req, res) => {
-       const { title, description, objective_type, objective_value, is_first_come_first_served, expiry_time } = req.body;
+       const { title, description, objective_type, objective_value, reward_description, is_first_come_first_served, expiry_time } = req.body;
        
-       if (!title || !description || !objective_type || !objective_value || !expiry_time) {
-           return res.status(400).json({ message: 'Missing required quest fields for admin quest.' });
+       if (!title || !description || !objective_type || !objective_value || !expiry_time || !reward_description) {
+           return res.status(400).json({ message: 'All quest fields are required.' });
        }
        
        try {
-           // The 'type' is now hardcoded to 'admin' for quests created through this form.
-           // The 'objective_type' from the form is correctly inserted into the 'objective_type' column.
            const newQuest = await pool.query(
-               `INSERT INTO quests (title, description, type, objective_type, objective_value, is_first_come_first_served, expiry_time, status)
-                VALUES ($1, $2, 'admin', $3, $4, $5, $6, 'active') RETURNING *`,
-               [title, description, objective_type, objective_value, !!is_first_come_first_served, expiry_time]
+               `INSERT INTO quests (title, description, reward_description, type, objective_type, objective_value, is_first_come_first_served, expiry_time, status)
+                VALUES ($1, $2, $3, 'admin', $4, $5, $6, $7, 'active') RETURNING *`,
+               [title, description, reward_description, objective_type, objective_value, !!is_first_come_first_served, expiry_time]
            );
+           
+           // Notify all connected clients that a new quest is live
            io.emit('newQuestLaunched', newQuest.rows[0]);
+           
            res.status(201).json(newQuest.rows[0]);
        } catch (err) {
            console.error('[API/Admin] Error creating quest:', err);
            res.status(500).json({ message: 'Server error while creating quest.' });
        }
    });
-    // =======================================================================//
-    // ====================== END OF QUEST CREATION FIX ======================//
-    // =======================================================================//
   
    router.delete('/quests/:id', async (req, res) => {
        try {
