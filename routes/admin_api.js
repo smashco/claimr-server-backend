@@ -93,17 +93,19 @@ module.exports = (pool, io, geofenceService, players) => {
     // ======================== QUEST CREATION FIX HERE ======================//
     // =======================================================================//
    router.post('/quests', async (req, res) => {
-       // The 'type' from the form is now correctly mapped to the 'quest_type' database column.
-       const { title, description, type, objective_type, objective_value, is_first_come_first_served, launch_time, expiry_time, sponsor_id, google_form_url } = req.body;
-       if (!title || !description || !type || !objective_type || !objective_value || !expiry_time) {
-           return res.status(400).json({ message: 'Missing required quest fields.' });
+       const { title, description, objective_type, objective_value, is_first_come_first_served, expiry_time } = req.body;
+       
+       if (!title || !description || !objective_type || !objective_value || !expiry_time) {
+           return res.status(400).json({ message: 'Missing required quest fields for admin quest.' });
        }
+       
        try {
-           // The INSERT statement now correctly includes the 'type' column.
+           // The 'type' is now hardcoded to 'admin' for quests created through this form.
+           // The 'objective_type' from the form is correctly inserted into the 'objective_type' column.
            const newQuest = await pool.query(
-               `INSERT INTO quests (title, description, type, objective_type, objective_value, is_first_come_first_served, launch_time, expiry_time, sponsor_id, google_form_url, status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active') RETURNING *`,
-               [title, description, type, objective_type, objective_value, !!is_first_come_first_served, launch_time, expiry_time, sponsor_id || null, google_form_url || null]
+               `INSERT INTO quests (title, description, type, objective_type, objective_value, is_first_come_first_served, expiry_time, status)
+                VALUES ($1, $2, 'admin', $3, $4, $5, $6, 'active') RETURNING *`,
+               [title, description, objective_type, objective_value, !!is_first_come_first_served, expiry_time]
            );
            io.emit('newQuestLaunched', newQuest.rows[0]);
            res.status(201).json(newQuest.rows[0]);
