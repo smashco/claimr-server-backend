@@ -271,15 +271,11 @@ const setupDatabase = async () => {
     `);
     logDb('"sponsors" table is ready.');
 
-    // =======================================================================//
-    // ====================== DATABASE SCHEMA FIX HERE =======================//
-    // =======================================================================//
     await client.query(`
         CREATE TABLE IF NOT EXISTS quests (
             id SERIAL PRIMARY KEY,
             title VARCHAR(150) NOT NULL,
             description TEXT NOT NULL,
-            reward_description TEXT,
             type VARCHAR(20) NOT NULL, 
             objective_type VARCHAR(50),
             objective_value INT,
@@ -295,6 +291,14 @@ const setupDatabase = async () => {
         );
     `);
     logDb('"quests" table creation/check complete.');
+
+    // =======================================================================//
+    // ====================== DATABASE SCHEMA FIX HERE =======================//
+    // =======================================================================//
+    // This line ensures the column exists, even if the table was created before
+    // this column was added to the script.
+    await client.query('ALTER TABLE quests ADD COLUMN IF NOT EXISTS reward_description TEXT;');
+    logDb('Ensured "reward_description" column exists in "quests" table.');
     // =======================================================================//
     // ===================== END OF DATABASE SCHEMA FIX ======================//
     // =======================================================================//
