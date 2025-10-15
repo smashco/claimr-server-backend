@@ -19,7 +19,7 @@ const QUEST_TYPES = {
 /**
 * Updates a player's progress for a specific type of quest.
 * @param {string} userId - The Google ID of the player.
-* @param {string} questType - The type of quest action (e.g., 'ATTACK_BASE').
+* @param {string} questType - The type of quest action (e.g., 'claim_area', 'run_trail'). This corresponds to 'objective_type' in the DB.
 * @param {number} value - The value to add to the progress (e.g., 1 for one attack, or distance for a trail).
 * @param {object} client - The PostgreSQL client for the current transaction.
 * @param {object} io - The Socket.IO server instance.
@@ -40,9 +40,9 @@ async function updateQuestProgress(userId, questType, value, client, io, players
        // =======================================================================//
        // ========================== FIX STARTS HERE ==========================//
        // =======================================================================//
-       // The column name was incorrect. It should be 'objective_value', not 'target_value'.
+       // The column name for the quest's objective is 'objective_type', not 'quest_type'.
        const questRes = await client.query(
-           `SELECT id, title, objective_value FROM quests WHERE quest_type = $1 AND is_active = true AND expires_at > NOW() AND winner_id IS NULL`,
+           `SELECT id, title, objective_value FROM quests WHERE objective_type = $1 AND status = 'active' AND expiry_time > NOW() AND winner_user_id IS NULL`,
            [questType]
        );
        // =======================================================================//
@@ -60,21 +60,16 @@ async function updateQuestProgress(userId, questType, value, client, io, players
            debug(`[QUEST] Processing quest "${quest.title}" (ID: ${quest.id}) for user ${userId}.`);
           
            const progressRes = await client.query(
-               `INSERT INTO quest_progress (quest_id, user_id, current_value)
+               `INSERT INTO quest_progress (quest_id, user_id, progress)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (quest_id, user_id) DO UPDATE
-                SET current_value = quest_progress.current_value + $3
-                RETURNING current_value`,
+                SET progress = quest_progress.progress + $3
+                RETURNING progress`,
                [quest.id, userId, value]
            );
 
 
-           const newProgress = progressRes.rows[0].current_value;
-           
-           // =======================================================================//
-           // ========================== FIX STARTS HERE ==========================//
-           // =======================================================================//
-           // Use the correct field name from the query result.
+           const newProgress = progressRes.rows[0].progress;
            debug(`[QUEST] User ${userId} progress for quest "${quest.title}" is now: ${newProgress}/${quest.objective_value}`);
 
 
@@ -88,26 +83,18 @@ async function updateQuestProgress(userId, questType, value, client, io, players
            }
           
            if (newProgress >= quest.objective_value) {
-           // =======================================================================//
-           // =========================== FIX ENDS HERE ===========================//
-           // =======================================================================//
                debug(`[QUEST] User ${userId} has met the target for quest ${quest.id}. Attempting to declare winner.`);
-               // Use a transaction to prevent race conditions for the winner.
-               // NOTE: This function is already expected to be inside a transaction from the caller.
-               // We will add a savepoint to isolate this part of the logic.
                await client.query('SAVEPOINT declare_winner');
                try {
-                   // Lock the quest row to ensure only one process can declare a winner.
                    const winnerCheck = await client.query(
-                       'SELECT winner_id FROM quests WHERE id = $1 FOR UPDATE',
+                       'SELECT winner_user_id FROM quests WHERE id = $1 FOR UPDATE',
                        [quest.id]
                    );
 
 
-                   if (winnerCheck.rows[0].winner_id === null) {
-                       // We have a winner!
+                   if (winnerCheck.rows[0].winner_user_id === null) {
                        await client.query(
-                           'UPDATE quests SET winner_id = $1, is_active = false WHERE id = $2',
+                           'UPDATE quests SET winner_user_id = $1, status = \'completed\' WHERE id = $2',
                            [userId, quest.id]
                        );
                       
