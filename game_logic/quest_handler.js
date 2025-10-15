@@ -1,4 +1,3 @@
-// game_logic/quest_handler.js
 /**
 * @file game_logic/quest_handler.js
 * @description Handles tracking and completion of player quests.
@@ -38,11 +37,17 @@ async function updateQuestProgress(userId, questType, value, client, io, players
 
 
    try {
-       // Find all active quests of the specified type that aren't already won
+       // =======================================================================//
+       // ========================== FIX STARTS HERE ==========================//
+       // =======================================================================//
+       // The column name was incorrect. It should be 'objective_value', not 'target_value'.
        const questRes = await client.query(
-           `SELECT id, title, target_value FROM quests WHERE quest_type = $1 AND is_active = true AND expires_at > NOW() AND winner_id IS NULL`,
+           `SELECT id, title, objective_value FROM quests WHERE quest_type = $1 AND is_active = true AND expires_at > NOW() AND winner_id IS NULL`,
            [questType]
        );
+       // =======================================================================//
+       // =========================== FIX ENDS HERE ===========================//
+       // =======================================================================//
 
 
        if (questRes.rowCount === 0) {
@@ -65,7 +70,12 @@ async function updateQuestProgress(userId, questType, value, client, io, players
 
 
            const newProgress = progressRes.rows[0].current_value;
-           debug(`[QUEST] User ${userId} progress for quest "${quest.title}" is now: ${newProgress}/${quest.target_value}`);
+           
+           // =======================================================================//
+           // ========================== FIX STARTS HERE ==========================//
+           // =======================================================================//
+           // Use the correct field name from the query result.
+           debug(`[QUEST] User ${userId} progress for quest "${quest.title}" is now: ${newProgress}/${quest.objective_value}`);
 
 
            const playerSocketId = Object.keys(players).find(id => players[id]?.googleId === userId);
@@ -77,7 +87,10 @@ async function updateQuestProgress(userId, questType, value, client, io, players
                debug(`[QUEST] Emitted progress update to socket ${playerSocketId}`);
            }
           
-           if (newProgress >= quest.target_value) {
+           if (newProgress >= quest.objective_value) {
+           // =======================================================================//
+           // =========================== FIX ENDS HERE ===========================//
+           // =======================================================================//
                debug(`[QUEST] User ${userId} has met the target for quest ${quest.id}. Attempting to declare winner.`);
                // Use a transaction to prevent race conditions for the winner.
                // NOTE: This function is already expected to be inside a transaction from the caller.
