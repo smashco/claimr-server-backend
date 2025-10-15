@@ -206,7 +206,7 @@ const setupDatabase = async () => {
         description TEXT,
         clan_image_url TEXT,
         leader_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-        base_location GEOMETry(POINT, 4326),
+        base_location GEOMETRY(POINT, 4326),
         has_shield BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
@@ -292,16 +292,11 @@ const setupDatabase = async () => {
     `);
     logDb('"quests" table creation/check complete.');
 
-    // =======================================================================//
-    // ====================== DATABASE SCHEMA FIX HERE =======================//
-    // =======================================================================//
-    // This line ensures the column exists, even if the table was created before
-    // this column was added to the script.
+    await client.query('ALTER TABLE quests ADD COLUMN IF NOT EXISTS requires_qr_validation BOOLEAN DEFAULT FALSE;');
+    logDb('Ensured "requires_qr_validation" column exists in "quests" table.');
+
     await client.query('ALTER TABLE quests ADD COLUMN IF NOT EXISTS reward_description TEXT;');
     logDb('Ensured "reward_description" column exists in "quests" table.');
-    // =======================================================================//
-    // ===================== END OF DATABASE SCHEMA FIX ======================//
-    // =======================================================================//
 
     await client.query(`
         CREATE TABLE IF NOT EXISTS quest_progress (
@@ -415,8 +410,6 @@ const setupDatabase = async () => {
     logDb('Database connection released after setup.');
   }
 };
-
-// ... (rest of server.js remains the same) ...
 
 const authenticate = async (req, res, next) => {
   logAuth('Attempting to authenticate request for:', req.originalUrl);
