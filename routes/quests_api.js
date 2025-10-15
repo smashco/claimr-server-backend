@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 
 
-module.exports = (pool, authenticate) => { // This was missing from the original file you provided but is necessary
+module.exports = (pool, authenticate) => {
    // Get active quests with user's progress
    router.get('/active', authenticate, async (req, res) => {
        try {
@@ -27,11 +27,18 @@ module.exports = (pool, authenticate) => { // This was missing from the original
                WHERE status = 'active' AND expiry_time > NOW() AND winner_user_id IS NULL
            `);
           
-           // Fetch the user's progress for these quests
+           // =======================================================================//
+           // ========================== FIX STARTS HERE ==========================//
+           // =======================================================================//
+           // The column in the database is 'current_value', but the code expects 'progress'.
+           // We select 'current_value' and alias it as 'progress' to fix the error.
            const progressRes = await pool.query(
-               'SELECT quest_id, progress FROM quest_progress WHERE user_id = $1',
+               'SELECT quest_id, current_value as progress FROM quest_progress WHERE user_id = $1',
                [req.user.googleId]
            );
+           // =======================================================================//
+           // =========================== FIX ENDS HERE ===========================//
+           // =======================================================================//
 
 
            // Create a map for quick lookup
