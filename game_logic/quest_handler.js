@@ -37,17 +37,10 @@ async function updateQuestProgress(userId, questType, value, client, io, players
 
 
    try {
-       // =======================================================================//
-       // ========================== FIX STARTS HERE ==========================//
-       // =======================================================================//
-       // The column name for the quest's objective is 'objective_type', not 'quest_type'.
        const questRes = await client.query(
            `SELECT id, title, objective_value FROM quests WHERE objective_type = $1 AND status = 'active' AND expiry_time > NOW() AND winner_user_id IS NULL`,
            [questType]
        );
-       // =======================================================================//
-       // =========================== FIX ENDS HERE ===========================//
-       // =======================================================================//
 
 
        if (questRes.rowCount === 0) {
@@ -86,6 +79,10 @@ async function updateQuestProgress(userId, questType, value, client, io, players
                debug(`[QUEST] User ${userId} has met the target for quest ${quest.id}. Attempting to declare winner.`);
                await client.query('SAVEPOINT declare_winner');
                try {
+                   // =======================================================================//
+                   // ========================== FIX STARTS HERE ==========================//
+                   // =======================================================================//
+                   // The column name is 'winner_user_id', not 'winner_id'.
                    const winnerCheck = await client.query(
                        'SELECT winner_user_id FROM quests WHERE id = $1 FOR UPDATE',
                        [quest.id]
@@ -93,10 +90,15 @@ async function updateQuestProgress(userId, questType, value, client, io, players
 
 
                    if (winnerCheck.rows[0].winner_user_id === null) {
+                       // We have a winner!
+                       // Update 'winner_user_id' and set 'status' to 'completed'.
                        await client.query(
-                           'UPDATE quests SET winner_user_id = $1, status = \'completed\' WHERE id = $2',
+                           "UPDATE quests SET winner_user_id = $1, status = 'completed' WHERE id = $2",
                            [userId, quest.id]
                        );
+                   // =======================================================================//
+                   // =========================== FIX ENDS HERE ===========================//
+                   // =======================================================================//
                       
                        const playerInfo = await client.query('SELECT username FROM territories WHERE owner_id = $1', [userId]);
                        const winnerName = playerInfo.rows.length > 0 ? playerInfo.rows[0].username : 'Unknown Player';
