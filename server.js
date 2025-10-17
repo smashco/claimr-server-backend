@@ -164,6 +164,7 @@ const setupDatabase = async () => {
         is_shield_active BOOLEAN DEFAULT FALSE,
         is_carve_mode_active BOOLEAN DEFAULT FALSE,
         is_paid BOOLEAN DEFAULT FALSE,
+        banned_until TIMESTAMP WITH TIME ZONE,
         razorpay_subscription_id VARCHAR(100),
         subscription_status VARCHAR(50),
         total_distance_km REAL DEFAULT 0,
@@ -192,6 +193,9 @@ const setupDatabase = async () => {
     await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{"owned": []}'::jsonb;`);
     await client.query(`ALTER TABLE territories ALTER COLUMN superpowers SET DEFAULT '{"owned": []}'::jsonb;`);
     await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS trail_effect VARCHAR(50) DEFAULT \'default\';');
+    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS banned_until TIMESTAMP WITH TIME ZONE;');
+    await client.query('ALTER TABLE territories DROP COLUMN IF EXISTS is_banned;');
+    logDb('Ensured "banned_until" column exists and removed old "is_banned" column.');
     
     const usernameConstraint = await client.query(`SELECT 1 FROM pg_constraint WHERE conname = 'territories_username_key'`);
     if(usernameConstraint.rowCount === 0) {
@@ -294,7 +298,7 @@ const setupDatabase = async () => {
 
     await client.query('ALTER TABLE quests ADD COLUMN IF NOT EXISTS requires_qr_validation BOOLEAN DEFAULT FALSE;');
     logDb('Ensured "requires_qr_validation" column exists in "quests" table.');
-
+    
     await client.query('ALTER TABLE quests ADD COLUMN IF NOT EXISTS reward_description TEXT;');
     logDb('Ensured "reward_description" column exists in "quests" table.');
 
@@ -427,6 +431,13 @@ const authenticate = async (req, res, next) => {
     } else {
         req.user.googleId = decodedToken.uid;
     }
+
+    const banCheck = await pool.query('SELECT banned_until FROM territories WHERE owner_id = $1', [req.user.googleId]);
+    if (banCheck.rowCount > 0 && banCheck.rows[0].banned_until && new Date(banCheck.rows[0].banned_until) > new Date()) {
+        logAuth(`Authentication failed for user ${req.user.googleId}: Account is banned until ${banCheck.rows[0].banned_until}.`);
+        return res.status(403).send('Forbidden: Your account has been temporarily suspended.');
+    }
+
     logAuth('Authentication successful for user:', req.user.googleId);
     next();
   } catch (error) {
@@ -603,6 +614,7 @@ app.get('/check-profile', async (req, res) => {
         const query = `
             SELECT
                 t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
+                t.banned_until,
                 t.razorpay_subscription_id, t.subscription_status, t.trail_effect, t.superpowers,
                 c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
                 (c.base_location IS NOT NULL) as base_is_set
@@ -623,6 +635,7 @@ app.get('/check-profile', async (req, res) => {
                 identityColor: row.identity_color,
                 area_sqm: row.area_sqm || 0,
                 has_shield: row.has_shield,
+                banned_until: row.banned_until,
                 razorpaySubscriptionId: row.razorpay_subscription_id,
                 subscriptionStatus: row.subscription_status,
                 trailEffect: row.trail_effect || 'default',

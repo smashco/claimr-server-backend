@@ -1,4 +1,4 @@
-// /routes/admin_api.js
+// routes/admin_api.js
 
 const express = require('express');
 const multer = require('multer');
@@ -14,7 +14,7 @@ module.exports = (pool, io, geofenceService, players) => {
    // --- Player Management ---
    router.get('/players', async (req, res) => {
        try {
-           const result = await pool.query('SELECT owner_id, username, area_sqm, superpowers FROM territories ORDER BY username');
+           const result = await pool.query('SELECT owner_id, username, area_sqm, superpowers, banned_until FROM territories ORDER BY username');
            const playersList = result.rows.map(dbPlayer => {
                const onlinePlayer = Object.values(players).find(p => p.googleId === dbPlayer.owner_id);
                return {
@@ -72,6 +72,39 @@ module.exports = (pool, io, geofenceService, players) => {
   });
 
 
+   router.post('/player/:id/ban', async (req, res) => {
+       const { id } = req.params;
+       try {
+           const banExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+           await pool.query("UPDATE territories SET banned_until = $1 WHERE owner_id = $2", [banExpiry, id]);
+           
+           const playerSocket = Object.values(players).find(p => p.googleId === id);
+           if (playerSocket) {
+               io.to(playerSocket.id).emit('accountBanned', { 
+                   reason: 'Your account has been temporarily suspended by an administrator.',
+                   banned_until: banExpiry.toISOString()
+               });
+               io.to(playerSocket.id).disconnect(true);
+           }
+           return res.json({ message: `Player ${id} has been banned for 24 hours.` });
+       } catch (err) {
+           console.error(`[API/Admin] Error banning player ${id}:`, err);
+           res.status(500).json({ message: 'Server error during ban.' });
+       }
+   });
+
+   router.post('/player/:id/unban', async (req, res) => {
+       const { id } = req.params;
+       try {
+           await pool.query("UPDATE territories SET banned_until = NULL WHERE owner_id = $1", [id]);
+           return res.json({ message: `Player ${id} has been unbanned.` });
+       } catch (err) {
+           console.error(`[API/Admin] Error unbanning player ${id}:`, err);
+           res.status(500).json({ message: 'Server error during unban.' });
+       }
+   });
+
+
    // --- Quest Management ---
    router.get('/quests', async (req, res) => {
        try {
@@ -103,7 +136,6 @@ module.exports = (pool, io, geofenceService, players) => {
                [title, description, reward_description, objective_type, objective_value, !!is_first_come_first_served, expiry_time]
            );
            
-           // Notify all connected clients that a new quest is live
            io.emit('newQuestLaunched', newQuest.rows[0]);
            
            res.status(201).json(newQuest.rows[0]);

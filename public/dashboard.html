@@ -58,6 +58,7 @@
                                    <th>Status</th>
                                    <th>Username</th>
                                    <th>Territory (km²)</th>
+                                   <th>Ban Status</th>
                                    <th>Actions</th>
                                </tr>
                            </thead>
@@ -98,9 +99,6 @@
            <div class="tab-pane fade p-3" id="quests-tab-pane" role="tabpanel">
                <div class="row">
                    <div class="col-md-4">
-                        <!-- =======================================================================// -->
-                        <!-- ===================== NEW QUEST FORM STARTS HERE ======================// -->
-                        <!-- =======================================================================// -->
                         <div class="card">
                            <div class="card-body">
                                <h5 class="card-title">Create Admin Quest</h5>
@@ -144,9 +142,6 @@
                                </form>
                            </div>
                        </div>
-                       <!-- =======================================================================// -->
-                       <!-- ====================== NEW QUEST FORM ENDS HERE =======================// -->
-                       <!-- =======================================================================// -->
                         <div class="card">
                            <div class="card-body">
                                <h5 class="card-title">Create Sponsor Account</h5>
@@ -343,42 +338,46 @@
 
            players.forEach(player => {
                const row = tableBody.insertRow();
-               cellStatus = row.insertCell();
-               cellStatus.innerHTML = `<span class="badge ${player.isOnline ? 'bg-success' : 'bg-secondary'}">${player.isOnline ? 'Online' : 'Offline'}</span>`;
-               cellUsername = row.insertCell();
-               cellUsername.textContent = player.username || 'N/A';
-               cellTerritory = row.insertCell();
-               cellTerritory.textContent = (player.area_sqm / 1000000).toFixed(6);
-               cellActions = row.insertCell();
+               row.insertCell().innerHTML = `<span class="badge ${player.isOnline ? 'bg-success' : 'bg-secondary'}">${player.isOnline ? 'Online' : 'Offline'}</span>`;
+               row.insertCell().textContent = player.username || 'N/A';
+               row.insertCell().textContent = (player.area_sqm / 1000000).toFixed(6);
+               
+               const isBanned = player.banned_until && new Date(player.banned_until) > new Date();
+               row.insertCell().innerHTML = `<span class="badge ${isBanned ? 'bg-danger' : 'bg-success'}">${isBanned ? 'Banned' : 'Active'}</span>`;
+               
+               const cellActions = row.insertCell();
                const actionsContainer = document.createElement('div');
                actionsContainer.className = 'btn-group';
-               const detailsButton = document.createElement('a');
-               detailsButton.href = `/admin/player_details.html?id=${player.owner_id}`;
-               detailsButton.className = 'btn btn-sm btn-primary';
-               detailsButton.textContent = 'Details';
-               actionsContainer.appendChild(detailsButton);
-               const powersButton = document.createElement('button');
-               powersButton.className = 'btn btn-sm btn-info';
-               powersButton.textContent = 'Powers';
-               powersButton.addEventListener('click', () => { openSuperpowerModal(player); });
-               actionsContainer.appendChild(powersButton);
-               const resetButton = document.createElement('button');
-               resetButton.className = 'btn btn-sm btn-warning';
-               resetButton.textContent = 'Reset';
-               resetButton.addEventListener('click', () => performAction(player.owner_id, 'reset-territory', player.username));
-               actionsContainer.appendChild(resetButton);
-               const deleteButton = document.createElement('button');
-               deleteButton.className = 'btn btn-sm btn-danger';
-               deleteButton.textContent = 'Delete';
-               deleteButton.addEventListener('click', () => performAction(player.owner_id, 'delete', player.username));
-               actionsContainer.appendChild(deleteButton);
+
+               actionsContainer.appendChild(createButton('Details', 'btn-primary', () => window.location.href = `/admin/player_details.html?id=${player.owner_id}`));
+               actionsContainer.appendChild(createButton('Powers', 'btn-info', () => openSuperpowerModal(player)));
+
+               if (isBanned) {
+                   actionsContainer.appendChild(createButton('Unban', 'btn-success', () => performAction(player.owner_id, 'unban', player.username)));
+               } else {
+                   actionsContainer.appendChild(createButton('Ban (24h)', 'btn-danger', () => performAction(player.owner_id, 'ban', player.username)));
+               }
+               
+               actionsContainer.appendChild(createButton('Reset', 'btn-warning', () => performAction(player.owner_id, 'reset-territory', player.username)));
+               
+               const deleteButton = createButton('Delete', 'btn-outline-danger ms-2', () => performAction(player.owner_id, 'delete', player.username));
+               
                cellActions.appendChild(actionsContainer);
+               cellActions.appendChild(deleteButton);
 
                if (player.isOnline && player.lastKnownPosition) {
                    const { lat, lng } = player.lastKnownPosition;
                    playerMarkers[player.owner_id] = L.marker([lat, lng]).addTo(map).bindPopup(`<b>${player.username}</b>`);
                }
            });
+       }
+      
+       function createButton(text, className, onClick) {
+           const button = document.createElement('button');
+           button.className = `btn btn-sm ${className}`;
+           button.textContent = text;
+           button.addEventListener('click', onClick);
+           return button;
        }
       
        function openSuperpowerModal(player) {
@@ -452,7 +451,9 @@
        async function performAction(playerId, action, username) {
            const actions = {
                'reset-territory': { confirm: `Reset ALL territory for ${username}?`, method: 'POST' },
-               'delete': { confirm: `DANGER: Permanently DELETE ${username} and all their data?`, method: 'DELETE' }
+               'delete': { confirm: `DANGER: Permanently DELETE ${username} and all their data?`, method: 'DELETE' },
+               'ban': { confirm: `Are you sure you want to BAN ${username} for 24 hours? They will be disconnected and unable to log in.`, method: 'POST' },
+               'unban': { confirm: `Are you sure you want to UNBAN ${username}?`, method: 'POST' }
            };
            if (!actions[action] || !confirm(actions[action].confirm)) return;
            try {
@@ -475,9 +476,6 @@
        async function deleteQuest(questId) { if (!confirm('Are you sure you want to permanently delete this quest?')) return; try { const result = await apiFetch(`/admin/api/quests/${questId}`, { method: 'DELETE' }); alert(result.message); fetchQuests(); } catch (error) { alert(`Error: ${error.message}`); } }
        async function extendQuest(questId) { const newExpiry = prompt("Enter new expiry date and time (YYYY-MM-DDTHH:MM:SS):", new Date(Date.now() + 24*60*60*1000).toISOString().slice(0, 19)); if (!newExpiry) return; try { const result = await apiFetch(`/admin/api/quests/${questId}/extend`, { method: 'PUT', body: { new_expiry_time: newExpiry } }); alert(result.message); fetchQuests(); } catch (error) { alert(`Error: ${error.message}`); } }
        
-       // =======================================================================//
-       // ===================== NEW QUEST FORM JAVASCRIPT =====================//
-       // =======================================================================//
        document.getElementById('objectiveType').addEventListener('change', function() {
            const label = document.getElementById('objectiveValueLabel');
            switch(this.value) {
@@ -501,7 +499,7 @@
            const body = {
                title: document.getElementById('questTitle').value,
                description: document.getElementById('questDescription').value,
-               type: 'admin', // This is an admin quest form
+               type: 'admin',
                objective_type: document.getElementById('objectiveType').value,
                objective_value: parseInt(document.getElementById('objectiveValue').value, 10),
                reward_description: document.getElementById('questReward').value,
@@ -517,9 +515,6 @@
                alert(`Error: ${error.message}`);
            }
        });
-       // =======================================================================//
-       // =================== END OF NEW QUEST FORM JAVASCRIPT ==================//
-       // =======================================================================//
 
        document.getElementById('createSponsorForm').addEventListener('submit', async function(e) { e.preventDefault(); const name = document.getElementById('sponsorName').value; const login_id = document.getElementById('sponsorLoginId').value; const passcode = document.getElementById('sponsorPasscode').value; try { const result = await apiFetch('/admin/api/sponsors', { method: 'POST', body: { name, login_id, passcode } }); alert(result.message); this.reset(); } catch(error) { alert(`Error: ${error.message}`); } });
        document.getElementById('spawnChestBtn').addEventListener('click', () => { isSpawnMode = !isSpawnMode; const spawnBtn = document.getElementById('spawnChestBtn'); const mapContainer = document.getElementById('map'); if (isSpawnMode) { spawnBtn.textContent = 'Spawning... Click on Map'; spawnBtn.classList.add('btn-success'); spawnBtn.classList.remove('btn-info'); L.DomUtil.addClass(mapContainer, 'leaflet-crosshair-cursor'); } else { spawnBtn.textContent = 'Spawn Chest'; spawnBtn.classList.add('btn-info'); spawnBtn.classList.remove('btn-success'); L.DomUtil.removeClass(mapContainer, 'leaflet-crosshair-cursor'); } });
