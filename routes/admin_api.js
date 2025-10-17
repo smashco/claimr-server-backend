@@ -61,9 +61,14 @@ module.exports = (pool, io, geofenceService, players) => {
    router.delete('/player/:id/delete', async (req, res) => {
        const { id } = req.params;
        try {
-          const playerSocket = Object.values(players).find(p => p.googleId === id);
+          const playerSocketInfo = Object.values(players).find(p => p.googleId === id);
+          if (playerSocketInfo) {
+              const socketToDisconnect = io.sockets.sockets.get(playerSocketInfo.id);
+              if (socketToDisconnect) {
+                  socketToDisconnect.disconnect(true);
+              }
+          }
           await pool.query('DELETE FROM territories WHERE owner_id = $1', [id]);
-          if (playerSocket) io.to(playerSocket.id).disconnect(true);
           return res.json({ message: `Player ${id} and all their data have been permanently deleted.` });
       } catch (err) {
           console.error(`[ADMIN] Error deleting player ${id}:`, err);
@@ -78,13 +83,16 @@ module.exports = (pool, io, geofenceService, players) => {
            const banExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
            await pool.query("UPDATE territories SET banned_until = $1 WHERE owner_id = $2", [banExpiry, id]);
            
-           const playerSocket = Object.values(players).find(p => p.googleId === id);
-           if (playerSocket) {
-               io.to(playerSocket.id).emit('accountBanned', { 
-                   reason: 'Your account has been temporarily suspended by an administrator.',
-                   banned_until: banExpiry.toISOString()
-               });
-               io.to(playerSocket.id).disconnect(true);
+           const playerSocketInfo = Object.values(players).find(p => p.googleId === id);
+           if (playerSocketInfo) {
+               const socketToDisconnect = io.sockets.sockets.get(playerSocketInfo.id);
+               if (socketToDisconnect) {
+                   socketToDisconnect.emit('accountBanned', { 
+                       reason: 'Your account has been temporarily suspended by an administrator.',
+                       banned_until: banExpiry.toISOString()
+                   });
+                   socketToDisconnect.disconnect(true);
+               }
            }
            return res.json({ message: `Player ${id} has been banned for 24 hours.` });
        } catch (err) {
