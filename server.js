@@ -1502,7 +1502,17 @@ io.on('connection', (socket) => {
                             logGame(`TRAIL CUT! Attacker ${player.name} cut Victim ${victim.name}`);
                             io.to(victimId).emit('runTerminated', { reason: `Your trail was cut by ${player.name}!` });
                             
-                            await updateQuestProgress(pool, io, player.googleId, 'trail_cut', 1);
+                            const client = await pool.connect();
+                            try {
+                                await client.query('BEGIN');
+                                await updateQuestProgress(player.googleId, 'trail_cut', 1, client, io, players);
+                                await client.query('COMMIT');
+                            } catch (questErr) {
+                                await client.query('ROLLBACK');
+                                logGame(`Error updating trail_cut quest progress for ${player.name}: %O`, questErr);
+                            } finally {
+                                client.release();
+                            }
 
                             victim.isDrawing = false;
                             victim.activeTrail = [];
