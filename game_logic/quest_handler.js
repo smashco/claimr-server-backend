@@ -52,32 +52,24 @@ async function updateQuestProgress(userId, questType, value, client, io, players
        for (const quest of questRes.rows) {
            debug(`[QUEST] Processing quest "${quest.title}" (ID: ${quest.id}) for user ${userId}.`);
 
-           // =======================================================================//
-           // ========================== FIX STARTS HERE ==========================//
-           // =======================================================================//
-           // Convert units before adding to progress.
            let valueToInsert = value;
            if (questType === 'cover_area') {
-               // The quest objective is in sqkm, but the value comes in as sqm.
                valueToInsert = value / 1000000;
            }
-           // The database stores progress as an INT, so we round the value.
            valueToInsert = Math.round(valueToInsert);
-           // =======================================================================//
-           // =========================== FIX ENDS HERE ===========================//
-           // =======================================================================//
           
            const progressRes = await client.query(
-               `INSERT INTO quest_progress (quest_id, user_id, progress)
+               `INSERT INTO quest_progress (quest_id, user_id, current_value)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (quest_id, user_id) DO UPDATE
-                SET progress = quest_progress.progress + $3
-                RETURNING progress`,
+                SET current_value = quest_progress.current_value + $3
+                RETURNING current_value`,
                [quest.id, userId, valueToInsert]
            );
 
 
-           const newProgress = progressRes.rows[0].progress;
+           const newProgress = progressRes.rows[0].current_value;
+           
            debug(`[QUEST] User ${userId} progress for quest "${quest.title}" is now: ${newProgress}/${quest.objective_value}`);
 
 
