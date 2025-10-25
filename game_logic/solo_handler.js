@@ -154,11 +154,10 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
    // =======================================================================//
    // ========================== FIX STARTS HERE ==========================//
    // =======================================================================//
-   // Update quest progress for claiming new area.
-   await updateQuestProgress(userId, 'claim_area', Math.round(newAreaSqM), client, io, players);
+   // The objective_type in the database is 'cover_area', not 'claim_area'.
+   await updateQuestProgress(userId, 'cover_area', Math.round(newAreaSqM), client, io, players);
 
 
-   // If this was an expansion (not an initial base), also check for run_trail quests.
    if (!isInitialBaseClaim && trail.length > 0) {
        const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
        const trailLengthKm = turf.length(trailLineString, { units: 'kilometers' });

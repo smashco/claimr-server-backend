@@ -19,8 +19,8 @@ const QUEST_TYPES = {
 /**
 * Updates a player's progress for a specific type of quest.
 * @param {string} userId - The Google ID of the player.
-* @param {string} questType - The type of quest action (e.g., 'claim_area', 'run_trail'). This corresponds to 'objective_type' in the DB.
-* @param {number} value - The value to add to the progress (e.g., 1 for one attack, or distance for a trail).
+* @param {string} questType - The type of quest action (e.g., 'cover_area').
+* @param {number} value - The value to add to the progress (e.g., area in sqm, distance in km).
 * @param {object} client - The PostgreSQL client for the current transaction.
 * @param {object} io - The Socket.IO server instance.
 * @param {object} players - The server's map of active players.
@@ -51,6 +51,21 @@ async function updateQuestProgress(userId, questType, value, client, io, players
 
        for (const quest of questRes.rows) {
            debug(`[QUEST] Processing quest "${quest.title}" (ID: ${quest.id}) for user ${userId}.`);
+
+           // =======================================================================//
+           // ========================== FIX STARTS HERE ==========================//
+           // =======================================================================//
+           // Convert units before adding to progress.
+           let valueToInsert = value;
+           if (questType === 'cover_area') {
+               // The quest objective is in sqkm, but the value comes in as sqm.
+               valueToInsert = value / 1000000;
+           }
+           // The database stores progress as an INT, so we round the value.
+           valueToInsert = Math.round(valueToInsert);
+           // =======================================================================//
+           // =========================== FIX ENDS HERE ===========================//
+           // =======================================================================//
           
            const progressRes = await client.query(
                `INSERT INTO quest_progress (quest_id, user_id, progress)
@@ -58,7 +73,7 @@ async function updateQuestProgress(userId, questType, value, client, io, players
                 ON CONFLICT (quest_id, user_id) DO UPDATE
                 SET progress = quest_progress.progress + $3
                 RETURNING progress`,
-               [quest.id, userId, value]
+               [quest.id, userId, valueToInsert]
            );
 
 
@@ -79,10 +94,6 @@ async function updateQuestProgress(userId, questType, value, client, io, players
                debug(`[QUEST] User ${userId} has met the target for quest ${quest.id}. Attempting to declare winner.`);
                await client.query('SAVEPOINT declare_winner');
                try {
-                   // =======================================================================//
-                   // ========================== FIX STARTS HERE ==========================//
-                   // =======================================================================//
-                   // The column name is 'winner_user_id', not 'winner_id'.
                    const winnerCheck = await client.query(
                        'SELECT winner_user_id FROM quests WHERE id = $1 FOR UPDATE',
                        [quest.id]
@@ -90,15 +101,10 @@ async function updateQuestProgress(userId, questType, value, client, io, players
 
 
                    if (winnerCheck.rows[0].winner_user_id === null) {
-                       // We have a winner!
-                       // Update 'winner_user_id' and set 'status' to 'completed'.
                        await client.query(
                            "UPDATE quests SET winner_user_id = $1, status = 'completed' WHERE id = $2",
                            [userId, quest.id]
                        );
-                   // =======================================================================//
-                   // =========================== FIX ENDS HERE ===========================//
-                   // =======================================================================//
                       
                        const playerInfo = await client.query('SELECT username FROM territories WHERE owner_id = $1', [userId]);
                        const winnerName = playerInfo.rows.length > 0 ? playerInfo.rows[0].username : 'Unknown Player';
