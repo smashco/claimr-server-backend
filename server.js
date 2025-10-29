@@ -1719,3 +1719,4 @@ const main = async () => {
 
 setInterval(broadcastAllPlayers, SERVER_TICK_RATE_MS);
 main();
+//xas
