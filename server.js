@@ -615,33 +615,24 @@ app.get('/users/me/stats', authenticate, async (req, res) => {
     }
 });
 
-// =======================================================================//
-// ========================== FIX STARTS HERE ==========================//
-// =======================================================================//
 app.get('/check-profile', authenticate, async (req, res) => {
     const { googleId } = req.user;
     logApi(`Checking profile for authenticated user: ${googleId}`);
     
-    // Acquire a client from the connection pool.
     const client = await pool.connect();
 
     try {
-        // First, check if a profile exists for this user ID.
         const userCheckResult = await client.query('SELECT username FROM territories WHERE owner_id = $1', [googleId]);
 
-        // If a profile exists (rowCount > 0), then proceed to log the daily visit and fetch all data.
         if (userCheckResult.rowCount > 0) {
             
-            // Start a transaction to ensure both logging the visit and fetching data happen together.
             await client.query('BEGIN');
 
-            // Insert today's login record. ON CONFLICT DO NOTHING is safe and prevents duplicates.
             await client.query(
                 `INSERT INTO daily_logins (user_id, login_date) VALUES ($1, CURRENT_DATE) ON CONFLICT DO NOTHING;`,
                 [googleId]
             );
 
-            // Fetch all logins for the current month.
             const loginDatesResult = await client.query(
                 `SELECT login_date FROM daily_logins 
                  WHERE user_id = $1 AND DATE_TRUNC('month', login_date) = DATE_TRUNC('month', CURRENT_DATE);`,
@@ -649,7 +640,6 @@ app.get('/check-profile', authenticate, async (req, res) => {
             );
             const dailyLogins = loginDatesResult.rows.map(r => r.login_date);
 
-            // The main query to get all profile details.
             const profileQuery = `
                 SELECT
                     t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
@@ -669,7 +659,6 @@ app.get('/check-profile', authenticate, async (req, res) => {
             const profileResult = await client.query(profileQuery, [googleId]);
             const row = profileResult.rows[0];
 
-            // If all queries were successful, commit the transaction.
             await client.query('COMMIT');
 
             logApi(`Profile found for ${googleId}. Rank: ${row.rank}, Logins: ${dailyLogins.length}`);
@@ -696,23 +685,17 @@ app.get('/check-profile', authenticate, async (req, res) => {
             return res.json(response);
 
         } else {
-            // If no profile exists, simply inform the client. This is the path for a new user.
             logApi(`No profile found for new user ${googleId}.`);
             return res.json({ profileExists: false });
         }
     } catch (err) {
-        // If any error occurs, attempt to rollback the transaction and log the error.
         await client.query('ROLLBACK');
         logApi(`Error in /check-profile for ${googleId}: %O`, err);
         return res.status(500).json({ error: 'Server error while checking profile.' });
     } finally {
-        // CRITICAL: This block ensures the database connection is ALWAYS released, preventing leaks.
         client.release();
     }
 });
-// =======================================================================//
-// =========================== FIX ENDS HERE ===========================//
-// =======================================================================//
 
 app.get('/users/check-username', async (req, res) => {
     const { username } = req.query;
@@ -1014,19 +997,53 @@ app.get('/geofence/onboarding-check', async (req, res) => {
     }
 });
 
+// =======================================================================//
+// ========================== FIX STARTS HERE ==========================//
+// =======================================================================//
 app.get('/leaderboard', async (req, res) => {
-    logApi('Fetching player leaderboard.');
+    logApi('Fetching player leaderboard with full stats.');
     try {
-        const result = await pool.query(`
-            SELECT owner_id, username as owner_name, profile_image_url, area_sqm, RANK() OVER (ORDER BY area_sqm DESC) as rank, identity_color
-            FROM territories WHERE area_sqm > 0 AND username IS NOT NULL ORDER BY area_sqm DESC LIMIT 100;
-        `);
+        const query = `
+            SELECT
+                t.owner_id,
+                t.username as owner_name,
+                t.profile_image_url,
+                t.area_sqm,
+                t.identity_color,
+                t.total_distance_km,
+                RANK() OVER (ORDER BY t.area_sqm DESC) as rank,
+                COALESCE(dl.login_count, 0) as daily_login_count,
+                COALESCE(qp.quests_completed, 0) as quests_completed
+            FROM
+                territories t
+            LEFT JOIN (
+                SELECT user_id, COUNT(login_date)::int as login_count
+                FROM daily_logins
+                GROUP BY user_id
+            ) dl ON t.owner_id = dl.user_id
+            LEFT JOIN (
+                SELECT user_id, COUNT(id)::int as quests_completed
+                FROM quest_progress
+                WHERE status = 'completed'
+                GROUP BY user_id
+            ) qp ON t.owner_id = qp.user_id
+            WHERE
+                t.area_sqm > 0 AND t.username IS NOT NULL
+            ORDER BY
+                t.area_sqm DESC
+            LIMIT 100;
+        `;
+        const result = await pool.query(query);
         res.status(200).json(result.rows);
     } catch (err) {
         logApi('Error fetching leaderboard: %O', err);
         res.status(500).json({ error: 'Failed to fetch leaderboard.' });
     }
 });
+// =======================================================================//
+// =========================== FIX ENDS HERE ===========================//
+// =======================================================================//
+
 
 app.get('/leaderboard/clans', async (req, res) => {
     logApi('Fetching clan leaderboard.');
@@ -1040,7 +1057,7 @@ app.get('/leaderboard/clans', async (req, res) => {
             FROM clans c
             LEFT JOIN clan_members cm ON c.id = cm.clan_id
             LEFT JOIN clan_territories ct ON c.id = ct.clan_id
-            LEFT JOIN territories t_leader ON c.leader_id = t.owner_id
+            LEFT JOIN territories t_leader ON c.leader_id = t_leader.owner_id
             GROUP BY c.id, ct.area_sqm, t_leader.username
             ORDER BY total_area_sqm DESC LIMIT 100;
         `;
