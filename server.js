@@ -625,24 +625,27 @@ app.get('/check-profile', authenticate, async (req, res) => {
     const client = await pool.connect();
 
     try {
-        // First, just check if the user exists.
+        // First, just check if the user has a record in the main territories table.
         const userCheck = await client.query('SELECT username FROM territories WHERE owner_id = $1', [googleId]);
 
-        // If the user does NOT exist, there's no profile. Return immediately.
+        // If the user does NOT exist, they don't have a profile. Release the connection and return immediately.
         if (userCheck.rowCount === 0) {
             logApi(`No profile found for new user ${googleId}.`);
             client.release();
             return res.json({ profileExists: false });
         }
         
-        // If the user DOES exist, proceed with the transaction to log their daily visit and fetch all data.
+        // If the user DOES exist, we can safely proceed.
+        // Start a transaction to ensure both logging the visit and fetching data happen together.
         await client.query('BEGIN');
 
+        // Insert today's login record. ON CONFLICT DO NOTHING prevents duplicates if the endpoint is called multiple times a day.
         await client.query(
             `INSERT INTO daily_logins (user_id, login_date) VALUES ($1, CURRENT_DATE) ON CONFLICT DO NOTHING;`,
             [googleId]
         );
 
+        // Get all logins for the current month to send to the app.
         const loginDatesResult = await client.query(
             `SELECT login_date FROM daily_logins 
              WHERE user_id = $1 AND DATE_TRUNC('month', login_date) = DATE_TRUNC('month', CURRENT_DATE);`,
@@ -650,6 +653,7 @@ app.get('/check-profile', authenticate, async (req, res) => {
         );
         const dailyLogins = loginDatesResult.rows.map(r => r.login_date);
 
+        // The main query to get all profile details.
         const query = `
             SELECT
                 t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
@@ -678,6 +682,7 @@ app.get('/check-profile', authenticate, async (req, res) => {
         const result = await client.query(query, [googleId]);
         const row = result.rows[0];
 
+        // If all queries were successful, commit the transaction.
         await client.query('COMMIT');
 
         logApi(`Profile found for ${googleId}. Rank: ${row.rank}, Logins: ${dailyLogins.length}`);
@@ -707,10 +712,12 @@ app.get('/check-profile', authenticate, async (req, res) => {
         res.json(response);
 
     } catch (err) {
+        // If any error occurred during the transaction, roll it back.
         await client.query('ROLLBACK');
         logApi(`Error in /check-profile for ${googleId}: %O`, err);
         res.status(500).json({ error: 'Server error while checking profile.' });
     } finally {
+        // CRITICAL: Always release the client connection, whether the process succeeded or failed.
         client.release();
     }
 });
