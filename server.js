@@ -314,16 +314,9 @@ const setupDatabase = async () => {
         );
     `);
     logDb('"quest_progress" table is ready.');
-
-    // =======================================================================//
-    // ========================== FIX STARTS HERE ==========================//
-    // =======================================================================//
-    // This line ensures the 'status' column exists, fixing the leaderboard crash.
+    
     await client.query(`ALTER TABLE quest_progress ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'in_progress';`);
     logDb('Ensured "status" column exists in "quest_progress" table.');
-    // =======================================================================//
-    // =========================== FIX ENDS HERE ===========================//
-    // =======================================================================//
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS quest_entries (
@@ -407,6 +400,22 @@ const setupDatabase = async () => {
       );
     `);
     logDb('"daily_logins" table is ready.');
+
+    // =======================================================================//
+    // ========================== NEW TABLES START HERE ======================//
+    // =======================================================================//
+    await client.query(`
+        CREATE TABLE IF NOT EXISTS season_winners (
+            id SERIAL PRIMARY KEY,
+            winner_user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
+            win_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            area_sqm REAL NOT NULL
+        );
+    `);
+    logDb('"season_winners" table is ready.');
+    // =======================================================================//
+    // =========================== NEW TABLES END HERE =======================//
+    // =======================================================================//
 
     const superpowerItems = [
       { id: 'lastStand', name: 'Last Stand', description: 'Protects your territory from the next attack.', price: 29 },
@@ -1773,6 +1782,54 @@ io.on('connection', (socket) => {
   });
 });
 
+// =======================================================================//
+// ========================== NEW FUNCTION STARTS HERE ===================//
+// =======================================================================//
+async function checkForScheduledReset() {
+    logLifecycle('Checking for scheduled game reset...');
+    const client = await pool.connect();
+    try {
+        const res = await client.query("SELECT setting_value FROM system_settings WHERE setting_key = 'game_reset_time'");
+        if (res.rowCount > 0 && res.rows[0].setting_value) {
+            const scheduledTime = new Date(res.rows[0].setting_value);
+            if (new Date() > scheduledTime) {
+                logLifecycle(`Scheduled reset time ${scheduledTime.toISOString()} has passed. Initiating game reset.`);
+                
+                await client.query('BEGIN');
+
+                const topPlayerRes = await client.query('SELECT owner_id, area_sqm FROM territories ORDER BY area_sqm DESC LIMIT 1');
+                if (topPlayerRes.rowCount > 0) {
+                    const topPlayer = topPlayerRes.rows[0];
+                    await client.query(
+                        'INSERT INTO season_winners (winner_user_id, area_sqm, win_date) VALUES ($1, $2, $3)',
+                        [topPlayer.owner_id, topPlayer.area_sqm, scheduledTime]
+                    );
+                    logLifecycle(`Season winner ${topPlayer.owner_id} recorded with area ${topPlayer.area_sqm}.`);
+                }
+
+                await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), area_sqm = 0`);
+                logLifecycle('All player territories have been reset.');
+                
+                await client.query("DELETE FROM system_settings WHERE setting_key = 'game_reset_time'");
+                logLifecycle('Scheduled reset time has been cleared.');
+
+                await client.query('COMMIT');
+                
+                io.emit('gameReset', { message: 'A new season has begun! All territories have been reset.' });
+
+            }
+        }
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('[SERVER] CRITICAL: Error during scheduled game reset check:', err);
+    } finally {
+        client.release();
+    }
+}
+// =======================================================================//
+// =========================== NEW FUNCTION ENDS HERE ====================//
+// =======================================================================//
+
 
 const main = async () => {
   server.listen(PORT, '0.0.0.0', () => {
@@ -1781,6 +1838,9 @@ const main = async () => {
         console.error("[SERVER] FATAL: Failed to setup database after server start:", err);
         process.exit(1);
     });
+
+    // Set up a recurring check for the game reset every minute.
+    setInterval(checkForScheduledReset, 60 * 1000);
   });
 };
 

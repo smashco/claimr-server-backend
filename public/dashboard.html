@@ -46,6 +46,9 @@
            <li class="nav-item" role="presentation">
                <button class="nav-link" id="shop-tab" data-bs-toggle="tab" data-bs-target="#shop-tab-pane" type="button" role="tab">Shop & Prizes</button>
            </li>
+           <li class="nav-item" role="presentation">
+                <button class="nav-link" id="game-tab" data-bs-toggle="tab" data-bs-target="#game-tab-pane" type="button" role="tab">Game Management</button>
+           </li>
        </ul>
 
        <div class="tab-content" id="myTabContent">
@@ -208,13 +211,17 @@
                            <div class="card-body">
                                <h5 class="card-title">Mega Prize Management</h5>
                                <div class="mb-3">
-                                   <h6>Voting Control</h6>
-                                   <div class="d-flex align-items-center">
-                                       <span>Status: </span>
-                                       <span id="voting-status" class="badge bg-secondary ms-2">UNKNOWN</span>
-                                       <button class="btn btn-sm btn-success ms-auto" id="start-voting-btn">Start Voting</button>
-                                       <button class="btn btn-sm btn-warning ms-2" id="stop-voting-btn">Stop Voting</button>
-                                   </div>
+                                    <h6>Voting Control</h6>
+                                    <div class="d-flex align-items-center mb-2">
+                                        <span>Status: </span>
+                                        <span id="voting-status" class="badge bg-secondary ms-2">UNKNOWN</span>
+                                        <button class="btn btn-sm btn-success ms-auto" id="start-voting-btn">Start Voting</button>
+                                        <button class="btn btn-sm btn-warning ms-2" id="stop-voting-btn">Stop Voting</button>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="voting-expiry-time" class="form-label small">Set Voting Expiry (optional)</label>
+                                        <input type="datetime-local" class="form-control form-control-sm" id="voting-expiry-time">
+                                    </div>
                                </div>
                                <hr>
                                <h6>Add Prize Candidate</h6>
@@ -234,12 +241,50 @@
                                <hr>
                                <h6>Active Candidates & Vote Counts</h6>
                                <div id="prize-candidates-list" class="list-group mb-3"></div>
-                               <button class="btn btn-danger w-100" id="declare-winner-btn" disabled>Declare Winner & Reset</button>
+                               <button class="btn btn-danger w-100" id="declare-winner-btn" disabled>Declare Winner & Clear Losing Prizes</button>
                            </div>
                        </div>
                    </div>
                </div>
            </div>
+           
+           <!-- =======================================================================// -->
+           <!-- ========================== NEW SECTION STARTS HERE ======================// -->
+           <!-- =======================================================================// -->
+           <div class="tab-pane fade p-3" id="game-tab-pane" role="tabpanel">
+               <div class="row">
+                   <div class="col-lg-6">
+                       <div class="card">
+                           <div class="card-body">
+                               <h5 class="card-title">Season Winner & Game Reset</h5>
+                               <p class="text-muted">Schedule a date and time to automatically declare the top player as the season winner and reset all player territories. This action cannot be undone.</p>
+                               
+                               <div class="mb-3">
+                                   <label for="reset-time" class="form-label">Scheduled Reset Time</label>
+                                   <input type="datetime-local" class="form-control" id="reset-time">
+                                   <div class="form-text">Current scheduled reset: <strong id="current-reset-time">Not Scheduled</strong></div>
+                               </div>
+                               <button class="btn btn-danger" id="schedule-reset-btn">Schedule Game Reset</button>
+                               <button class="btn btn-secondary ms-2" id="cancel-reset-btn">Cancel Scheduled Reset</button>
+                           </div>
+                       </div>
+                   </div>
+                   <div class="col-lg-6">
+                       <div class="card">
+                           <div class="card-body">
+                               <h5 class="card-title">Past Season Winners</h5>
+                               <ul class="list-group" id="season-winners-list">
+                                   <li class="list-group-item">No season winners yet.</li>
+                               </ul>
+                           </div>
+                       </div>
+                   </div>
+               </div>
+           </div>
+           <!-- =======================================================================// -->
+           <!-- =========================== NEW SECTION ENDS HERE =======================// -->
+           <!-- =======================================================================// -->
+
        </div>
    </div>
 
@@ -316,6 +361,7 @@
            fetchChests();
            fetchShopData();
            fetchMegaPrizeData();
+           fetchGameManagementData();
        }
 
 
@@ -528,9 +574,14 @@
        function renderMegaPrize(data) { const statusBadge = document.getElementById('voting-status'); statusBadge.textContent = data.voting_active ? 'ACTIVE' : 'INACTIVE'; statusBadge.className = `badge ms-2 ${data.voting_active ? 'bg-success' : 'bg-secondary'}`; document.getElementById('start-voting-btn').disabled = data.voting_active; document.getElementById('stop-voting-btn').disabled = !data.voting_active; document.getElementById('declare-winner-btn').disabled = data.voting_active; const candidatesList = document.getElementById('prize-candidates-list'); candidatesList.innerHTML = ''; if (data.candidates.length === 0) { candidatesList.innerHTML = '<div class="list-group-item">No active prize candidates.</div>'; } data.candidates.forEach(c => { const item = document.createElement('div'); item.className = 'list-group-item d-flex justify-content-between align-items-center'; item.innerHTML = `<span>${c.name} (${c.brand || 'N/A'}) - <strong>${c.vote_count} votes</strong></span><button class="btn btn-sm btn-outline-danger" onclick="deletePrizeCandidate(${c.id})">Delete</button>`; candidatesList.appendChild(item); }); const winnersList = document.getElementById('mega-prize-winners-list'); winnersList.innerHTML = ''; if (data.winners.length === 0) { winnersList.innerHTML = '<li class="list-group-item">No winners yet.</li>'; } data.winners.forEach(w => { const item = document.createElement('li'); item.className = 'list-group-item'; item.innerHTML = `<strong>${w.username}</strong> won "${w.prize_name}" on ${new Date(w.win_date).toLocaleDateString()}`; winnersList.appendChild(item); }); }
        document.getElementById('add-prize-form').addEventListener('submit', async function(e) { e.preventDefault(); const name = document.getElementById('prize-name').value; const brand = document.getElementById('prize-brand').value; try { const result = await apiFetch('/admin/api/mega-prize/candidates', { method: 'POST', body: { name, brand } }); alert(result.message); this.reset(); fetchMegaPrizeData(); } catch(error) { alert(`Error: ${error.message}`); } });
        async function deletePrizeCandidate(id) { if(!confirm('Are you sure you want to delete this prize candidate?')) return; try { const result = await apiFetch(`/admin/api/mega-prize/candidates/${id}`, { method: 'DELETE' }); alert(result.message); fetchMegaPrizeData(); } catch(error) { alert(`Error: ${error.message}`); } }
-       document.getElementById('start-voting-btn').addEventListener('click', async () => { if(!confirm('Are you sure you want to START the voting period and clear all previous votes?')) return; try { const result = await apiFetch('/admin/api/mega-prize/start-voting', { method: 'POST' }); alert(result.message); fetchMegaPrizeData(); } catch(error) { alert(`Error: ${error.message}`); } });
+       document.getElementById('start-voting-btn').addEventListener('click', async () => { if(!confirm('Are you sure you want to START the voting period? This will not clear old votes.')) return; try { const expiryTime = document.getElementById('voting-expiry-time').value; const result = await apiFetch('/admin/api/mega-prize/start-voting', { method: 'POST', body: { expiryTime: expiryTime || null } }); alert(result.message); fetchMegaPrizeData(); } catch(error) { alert(`Error: ${error.message}`); } });
        document.getElementById('stop-voting-btn').addEventListener('click', async () => { if(!confirm('Are you sure you want to STOP the voting period?')) return; try { const result = await apiFetch('/admin/api/mega-prize/stop-voting', { method: 'POST' }); alert(result.message); fetchMegaPrizeData(); } catch(error) { alert(`Error: ${error.message}`); } });
-       document.getElementById('declare-winner-btn').addEventListener('click', async () => { if(!confirm('DANGER: This will declare a winner, record them, and clear all candidates and votes. This cannot be undone. Proceed?')) return; try { const result = await apiFetch('/admin/api/mega-prize/declare-winner', { method: 'POST' }); alert(result.message); fetchMegaPrizeData(); } catch(error) { alert(`Error: ${error.message}`); } });
+       document.getElementById('declare-winner-btn').addEventListener('click', async () => { if(!confirm('DANGER: This will declare a winner based on current votes, record them, and clear all LOSING candidates and ALL votes. This cannot be undone. Proceed?')) return; try { const result = await apiFetch('/admin/api/mega-prize/declare-winner', { method: 'POST' }); alert(result.message); fetchMegaPrizeData(); } catch(error) { alert(`Error: ${error.message}`); } });
+       
+       async function fetchGameManagementData() { try { const data = await apiFetch('/admin/api/game-management'); renderGameManagement(data); } catch (error) { console.error('Error fetching game management data:', error); } }
+       function renderGameManagement(data) { document.getElementById('current-reset-time').textContent = data.nextResetTime ? new Date(data.nextResetTime).toLocaleString() : 'Not Scheduled'; const winnersList = document.getElementById('season-winners-list'); winnersList.innerHTML = ''; if (!data.seasonWinners || data.seasonWinners.length === 0) { winnersList.innerHTML = '<li class="list-group-item">No season winners yet.</li>'; } else { data.seasonWinners.forEach(w => { const item = document.createElement('li'); item.className = 'list-group-item'; item.innerHTML = `<strong>${w.username}</strong> (Season ending ${new Date(w.win_date).toLocaleDateString()}) - Area: ${(w.area_sqm/1000000).toFixed(4)} km²`; winnersList.appendChild(item); }); } }
+       document.getElementById('schedule-reset-btn').addEventListener('click', async () => { const resetTime = document.getElementById('reset-time').value; if (!resetTime) { alert('Please select a date and time for the reset.'); return; } if (!confirm(`Are you sure you want to schedule a full game reset for ${new Date(resetTime).toLocaleString()}?`)) return; try { const result = await apiFetch('/admin/api/game-management/schedule-reset', { method: 'POST', body: { resetTime } }); alert(result.message); fetchGameManagementData(); } catch (error) { alert(`Error: ${error.message}`); } });
+       document.getElementById('cancel-reset-btn').addEventListener('click', async () => { if (!confirm('Are you sure you want to cancel the scheduled game reset?')) return; try { const result = await apiFetch('/admin/api/game-management/cancel-reset', { method: 'POST' }); alert(result.message); fetchGameManagementData(); } catch (error) { alert(`Error: ${error.message}`); } });
 
 
        window.onload = () => {
