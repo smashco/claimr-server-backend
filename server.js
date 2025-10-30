@@ -611,16 +611,13 @@ app.get('/check-profile', authenticate, async (req, res) => {
     logApi(`Checking profile for authenticated user: ${googleId}`);
     
     try {
-        // =======================================================================//
-        // ========================== FIX STARTS HERE ==========================//
-        // =======================================================================//
-        // REVISED QUERY: This new query uses a more direct scalar subquery to
-        // reliably fetch the user's rank, avoiding the previous JOIN issue.
+        // This query now includes 'total_distance_km'
         const query = `
             SELECT
                 t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
                 t.banned_until,
                 t.razorpay_subscription_id, t.subscription_status, t.trail_effect, t.superpowers,
+                t.total_distance_km,
                 c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
                 (c.base_location IS NOT NULL) as base_is_set,
                 (
@@ -639,9 +636,6 @@ app.get('/check-profile', authenticate, async (req, res) => {
             LEFT JOIN clans c ON cm.clan_id = c.id
             WHERE t.owner_id = $1;
         `;
-        // =======================================================================//
-        // =========================== FIX ENDS HERE ===========================//
-        // =======================================================================//
         
         const result = await pool.query(query, [googleId]);
 
@@ -661,7 +655,8 @@ app.get('/check-profile', authenticate, async (req, res) => {
                 subscriptionStatus: row.subscription_status,
                 trailEffect: row.trail_effect || 'default',
                 superpowers: row.superpowers || { owned: [] },
-                rank: row.rank, // This will now have the correct value
+                rank: row.rank,
+                total_distance_km: row.total_distance_km || 0,
                 clan_info: null
             };
             if (row.clan_id) {
