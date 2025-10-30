@@ -389,9 +389,6 @@ const setupDatabase = async () => {
     `);
     logDb('"system_settings" table is ready.');
 
-    // =======================================================================//
-    // ========================== FIX STARTS HERE ==========================//
-    // =======================================================================//
     await client.query(`
       CREATE TABLE IF NOT EXISTS daily_logins (
         user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
@@ -400,9 +397,6 @@ const setupDatabase = async () => {
       );
     `);
     logDb('"daily_logins" table is ready.');
-    // =======================================================================//
-    // =========================== FIX ENDS HERE ===========================//
-    // =======================================================================//
 
     const superpowerItems = [
       { id: 'lastStand', name: 'Last Stand', description: 'Protects your territory from the next attack.', price: 29 },
@@ -631,15 +625,24 @@ app.get('/check-profile', authenticate, async (req, res) => {
     const client = await pool.connect();
 
     try {
+        // First, just check if the user exists.
+        const userCheck = await client.query('SELECT username FROM territories WHERE owner_id = $1', [googleId]);
+
+        // If the user does NOT exist, there's no profile. Return immediately.
+        if (userCheck.rowCount === 0) {
+            logApi(`No profile found for new user ${googleId}.`);
+            client.release();
+            return res.json({ profileExists: false });
+        }
+        
+        // If the user DOES exist, proceed with the transaction to log their daily visit and fetch all data.
         await client.query('BEGIN');
 
-        // Insert today's login record. ON CONFLICT DO NOTHING prevents duplicates.
         await client.query(
             `INSERT INTO daily_logins (user_id, login_date) VALUES ($1, CURRENT_DATE) ON CONFLICT DO NOTHING;`,
             [googleId]
         );
 
-        // Get all logins for the current month
         const loginDatesResult = await client.query(
             `SELECT login_date FROM daily_logins 
              WHERE user_id = $1 AND DATE_TRUNC('month', login_date) = DATE_TRUNC('month', CURRENT_DATE);`,
@@ -673,38 +676,36 @@ app.get('/check-profile', authenticate, async (req, res) => {
         `;
         
         const result = await client.query(query, [googleId]);
+        const row = result.rows[0];
 
         await client.query('COMMIT');
 
-        if (result.rowCount > 0 && result.rows[0].username) {
-            const row = result.rows[0];
-            logApi(`Profile found for ${googleId}. Rank: ${row.rank}, Logins: ${dailyLogins.length}`);
-            const response = {
-                profileExists: true,
-                isPaid: row.is_paid,
-                username: row.username,
-                profileImageUrl: row.profile_image_url,
-                identityColor: row.identity_color,
-                area_sqm: row.area_sqm || 0,
-                has_shield: row.has_shield,
-                banned_until: row.banned_until,
-                razorpaySubscriptionId: row.razorpay_subscription_id,
-                subscriptionStatus: row.subscription_status,
-                trailEffect: row.trail_effect || 'default',
-                superpowers: row.superpowers || { owned: [] },
-                rank: row.rank,
-                total_distance_km: row.total_distance_km || 0,
-                dailyLogins: dailyLogins, // Add the login dates to the response
-                clan_info: null
-            };
-            if (row.clan_id) {
-                response.clan_info = { id: row.clan_id.toString(), name: row.clan_name, tag: row.clan_tag, role: row.clan_role, base_is_set: row.base_is_set };
-            }
-            res.json(response);
-        } else {
-            logApi(`No profile found for ${googleId}.`);
-            res.json({ profileExists: false });
+        logApi(`Profile found for ${googleId}. Rank: ${row.rank}, Logins: ${dailyLogins.length}`);
+        const response = {
+            profileExists: true,
+            isPaid: row.is_paid,
+            username: row.username,
+            profileImageUrl: row.profile_image_url,
+            identityColor: row.identity_color,
+            area_sqm: row.area_sqm || 0,
+            has_shield: row.has_shield,
+            banned_until: row.banned_until,
+            razorpaySubscriptionId: row.razorpay_subscription_id,
+            subscriptionStatus: row.subscription_status,
+            trailEffect: row.trail_effect || 'default',
+            superpowers: row.superpowers || { owned: [] },
+            rank: row.rank,
+            total_distance_km: row.total_distance_km || 0,
+            dailyLogins: dailyLogins,
+            clan_info: null
+        };
+
+        if (row.clan_id) {
+            response.clan_info = { id: row.clan_id.toString(), name: row.clan_name, tag: row.clan_tag, role: row.clan_role, base_is_set: row.base_is_set };
         }
+        
+        res.json(response);
+
     } catch (err) {
         await client.query('ROLLBACK');
         logApi(`Error in /check-profile for ${googleId}: %O`, err);
