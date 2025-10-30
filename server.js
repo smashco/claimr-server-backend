@@ -315,6 +315,16 @@ const setupDatabase = async () => {
     `);
     logDb('"quest_progress" table is ready.');
 
+    // =======================================================================//
+    // ========================== FIX STARTS HERE ==========================//
+    // =======================================================================//
+    // This line ensures the 'status' column exists, fixing the leaderboard crash.
+    await client.query(`ALTER TABLE quest_progress ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'in_progress';`);
+    logDb('Ensured "status" column exists in "quest_progress" table.');
+    // =======================================================================//
+    // =========================== FIX ENDS HERE ===========================//
+    // =======================================================================//
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS quest_entries (
         id SERIAL PRIMARY KEY,
@@ -1057,13 +1067,7 @@ app.get('/leaderboard/clans', async (req, res) => {
         const result = await pool.query(query);
         res.status(200).json(result.rows);
     } catch (err) {
-        // =======================================================================//
-        // ========================== FIX STARTS HERE ==========================//
-        // =======================================================================//
         logApi('Error fetching clan leaderboard: %O', err);
-        // =======================================================================//
-        // =========================== FIX ENDS HERE ===========================//
-        // =======================================================================//
         res.status(500).json({ error: 'Failed to fetch clan leaderboard.' });
     }
 });
