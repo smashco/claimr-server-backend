@@ -19,39 +19,40 @@ class SuperpowerManager {
        }
    }
 
-
+// =======================================================================//
+// ========================== FIX STARTS HERE ==========================//
+// =======================================================================//
    async createPurchaseOrder(googleId, itemId) {
        logPayment(`[MANAGER] Creating purchase order for item '${itemId}' for user ${googleId}`);
        if (!this.razorpay) {
            throw new Error('Payment gateway is not configured.');
        }
 
-
-       const userRes = await this.pool.query("SELECT superpowers FROM territories WHERE owner_id = $1", [googleId]);
-       if (userRes.rowCount > 0) {
-           const ownedPowers = userRes.rows[0].superpowers?.owned || [];
-           if (ownedPowers.includes(itemId)) {
-               logPayment(`[MANAGER-BLOCK] Purchase blocked for user ${googleId}: already owns '${itemId}'.`);
-               throw new Error('You already own this superpower.');
-           }
-       }
-
-
-       const amount = 2900;
-       const currency = 'INR';
-       const options = {
-           amount,
-           currency,
-           receipt: `item_${Date.now()}${crypto.randomBytes(2).toString('hex')}`,
-           notes: {
-               purchaseType: 'superpower',
-               itemId: itemId,
-               googleId: googleId
-           }
-       };
-
-
+       const client = await this.pool.connect();
        try {
+           const userRes = await client.query("SELECT superpowers FROM territories WHERE owner_id = $1", [googleId]);
+           if (userRes.rowCount > 0) {
+               const ownedPowers = userRes.rows[0].superpowers?.owned || [];
+               // This logic now correctly checks if the user already owns the SPECIFIC item.
+               if (ownedPowers.includes(itemId)) {
+                   logPayment(`[MANAGER-BLOCK] Purchase blocked for user ${googleId}: already owns '${itemId}'.`);
+                   throw new Error('You already own this superpower.');
+               }
+           }
+
+           const amount = 2900;
+           const currency = 'INR';
+           const options = {
+               amount,
+               currency,
+               receipt: `item_${Date.now()}${crypto.randomBytes(2).toString('hex')}`,
+               notes: {
+                   purchaseType: 'superpower',
+                   itemId: itemId,
+                   googleId: googleId
+               }
+           };
+
            const order = await this.razorpay.orders.create(options);
            if (!order) {
                throw new Error('Failed to create Razorpay order.');
@@ -60,10 +61,15 @@ class SuperpowerManager {
            return { orderId: order.id, amount: order.amount };
        } catch (err) {
            logPayment(`[MANAGER-ERROR] Error creating Razorpay order for user ${googleId}: %O`, err);
-           throw new Error('Server error while creating payment order.');
+           // Rethrow the original error to preserve its message (e.g., "You already own this superpower.")
+           throw err;
+       } finally {
+           client.release();
        }
    }
-
+// =======================================================================//
+// =========================== FIX ENDS HERE ===========================//
+// =======================================================================//
 
    async verifyAndGrantPower(googleId, itemId, paymentDetails) {
        logPayment(`[MANAGER] Verifying payment for user ${googleId} for item '${itemId}'`);
