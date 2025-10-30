@@ -611,33 +611,43 @@ app.get('/check-profile', authenticate, async (req, res) => {
     logApi(`Checking profile for authenticated user: ${googleId}`);
     
     try {
+        // =======================================================================//
+        // ========================== FIX STARTS HERE ==========================//
+        // =======================================================================//
+        // REVISED QUERY: This new query uses a more direct scalar subquery to
+        // reliably fetch the user's rank, avoiding the previous JOIN issue.
         const query = `
-            WITH ranked_players AS (
-                SELECT
-                    owner_id,
-                    RANK() OVER (ORDER BY area_sqm DESC) as rank
-                FROM territories
-                WHERE area_sqm > 0 AND username IS NOT NULL
-            )
             SELECT
                 t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
                 t.banned_until,
                 t.razorpay_subscription_id, t.subscription_status, t.trail_effect, t.superpowers,
                 c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
                 (c.base_location IS NOT NULL) as base_is_set,
-                rp.rank
+                (
+                    SELECT r.rank
+                    FROM (
+                        SELECT
+                            owner_id,
+                            RANK() OVER (ORDER BY area_sqm DESC) as rank
+                        FROM territories
+                        WHERE area_sqm > 0 AND username IS NOT NULL
+                    ) r
+                    WHERE r.owner_id = t.owner_id
+                ) as rank
             FROM territories t
             LEFT JOIN clan_members cm ON t.owner_id = cm.user_id
             LEFT JOIN clans c ON cm.clan_id = c.id
-            LEFT JOIN ranked_players rp ON t.owner_id = rp.owner_id
             WHERE t.owner_id = $1;
         `;
+        // =======================================================================//
+        // =========================== FIX ENDS HERE ===========================//
+        // =======================================================================//
         
         const result = await pool.query(query, [googleId]);
 
         if (result.rowCount > 0 && result.rows[0].username) {
             const row = result.rows[0];
-            logApi(`Profile found for ${googleId}. Superpowers: %O`, row.superpowers);
+            logApi(`Profile found for ${googleId}. Rank: ${row.rank}, Superpowers: %O`, row.superpowers);
             const response = {
                 profileExists: true,
                 isPaid: row.is_paid,
@@ -651,7 +661,7 @@ app.get('/check-profile', authenticate, async (req, res) => {
                 subscriptionStatus: row.subscription_status,
                 trailEffect: row.trail_effect || 'default',
                 superpowers: row.superpowers || { owned: [] },
-                rank: row.rank,
+                rank: row.rank, // This will now have the correct value
                 clan_info: null
             };
             if (row.clan_id) {
