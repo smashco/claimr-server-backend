@@ -997,9 +997,6 @@ app.get('/geofence/onboarding-check', async (req, res) => {
     }
 });
 
-// =======================================================================//
-// ========================== FIX STARTS HERE ==========================//
-// =======================================================================//
 app.get('/leaderboard', async (req, res) => {
     logApi('Fetching player leaderboard with full stats.');
     try {
@@ -1040,10 +1037,6 @@ app.get('/leaderboard', async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch leaderboard.' });
     }
 });
-// =======================================================================//
-// =========================== FIX ENDS HERE ===========================//
-// =======================================================================//
-
 
 app.get('/leaderboard/clans', async (req, res) => {
     logApi('Fetching clan leaderboard.');
@@ -1064,10 +1057,17 @@ app.get('/leaderboard/clans', async (req, res) => {
         const result = await pool.query(query);
         res.status(200).json(result.rows);
     } catch (err) {
+        // =======================================================================//
+        // ========================== FIX STARTS HERE ==========================//
+        // =======================================================================//
         logApi('Error fetching clan leaderboard: %O', err);
+        // =======================================================================//
+        // =========================== FIX ENDS HERE ===========================//
+        // =======================================================================//
         res.status(500).json({ error: 'Failed to fetch clan leaderboard.' });
     }
 });
+
 
 app.post('/clans', authenticate, async (req, res) => {
     const { name, tag, description } = req.body;
