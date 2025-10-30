@@ -389,6 +389,21 @@ const setupDatabase = async () => {
     `);
     logDb('"system_settings" table is ready.');
 
+    // =======================================================================//
+    // ========================== FIX STARTS HERE ==========================//
+    // =======================================================================//
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS daily_logins (
+        user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
+        login_date DATE NOT NULL,
+        PRIMARY KEY (user_id, login_date)
+      );
+    `);
+    logDb('"daily_logins" table is ready.');
+    // =======================================================================//
+    // =========================== FIX ENDS HERE ===========================//
+    // =======================================================================//
+
     const superpowerItems = [
       { id: 'lastStand', name: 'Last Stand', description: 'Protects your territory from the next attack.', price: 29 },
       { id: 'infiltrator', name: 'Infiltrator', description: 'Start a run from deep within enemy territory.', price: 29 },
@@ -606,12 +621,32 @@ app.get('/users/me/stats', authenticate, async (req, res) => {
     }
 });
 
+// =======================================================================//
+// ========================== FIX STARTS HERE ==========================//
+// =======================================================================//
 app.get('/check-profile', authenticate, async (req, res) => {
     const { googleId } = req.user;
     logApi(`Checking profile for authenticated user: ${googleId}`);
     
+    const client = await pool.connect();
+
     try {
-        // This query now includes 'total_distance_km'
+        await client.query('BEGIN');
+
+        // Insert today's login record. ON CONFLICT DO NOTHING prevents duplicates.
+        await client.query(
+            `INSERT INTO daily_logins (user_id, login_date) VALUES ($1, CURRENT_DATE) ON CONFLICT DO NOTHING;`,
+            [googleId]
+        );
+
+        // Get all logins for the current month
+        const loginDatesResult = await client.query(
+            `SELECT login_date FROM daily_logins 
+             WHERE user_id = $1 AND DATE_TRUNC('month', login_date) = DATE_TRUNC('month', CURRENT_DATE);`,
+            [googleId]
+        );
+        const dailyLogins = loginDatesResult.rows.map(r => r.login_date);
+
         const query = `
             SELECT
                 t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
@@ -637,11 +672,13 @@ app.get('/check-profile', authenticate, async (req, res) => {
             WHERE t.owner_id = $1;
         `;
         
-        const result = await pool.query(query, [googleId]);
+        const result = await client.query(query, [googleId]);
+
+        await client.query('COMMIT');
 
         if (result.rowCount > 0 && result.rows[0].username) {
             const row = result.rows[0];
-            logApi(`Profile found for ${googleId}. Rank: ${row.rank}, Superpowers: %O`, row.superpowers);
+            logApi(`Profile found for ${googleId}. Rank: ${row.rank}, Logins: ${dailyLogins.length}`);
             const response = {
                 profileExists: true,
                 isPaid: row.is_paid,
@@ -657,6 +694,7 @@ app.get('/check-profile', authenticate, async (req, res) => {
                 superpowers: row.superpowers || { owned: [] },
                 rank: row.rank,
                 total_distance_km: row.total_distance_km || 0,
+                dailyLogins: dailyLogins, // Add the login dates to the response
                 clan_info: null
             };
             if (row.clan_id) {
@@ -668,10 +706,16 @@ app.get('/check-profile', authenticate, async (req, res) => {
             res.json({ profileExists: false });
         }
     } catch (err) {
+        await client.query('ROLLBACK');
         logApi(`Error in /check-profile for ${googleId}: %O`, err);
         res.status(500).json({ error: 'Server error while checking profile.' });
+    } finally {
+        client.release();
     }
 });
+// =======================================================================//
+// =========================== FIX ENDS HERE ===========================//
+// =======================================================================//
 
 app.get('/users/check-username', async (req, res) => {
     const { username } = req.query;
