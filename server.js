@@ -622,102 +622,91 @@ app.get('/check-profile', authenticate, async (req, res) => {
     const { googleId } = req.user;
     logApi(`Checking profile for authenticated user: ${googleId}`);
     
+    // Acquire a client from the connection pool.
     const client = await pool.connect();
 
     try {
-        // First, just check if the user has a record in the main territories table.
-        const userCheck = await client.query('SELECT username FROM territories WHERE owner_id = $1', [googleId]);
+        // First, check if a profile exists for this user ID.
+        const userCheckResult = await client.query('SELECT username FROM territories WHERE owner_id = $1', [googleId]);
 
-        // If the user does NOT exist, they don't have a profile. Release the connection and return immediately.
-        if (userCheck.rowCount === 0) {
+        // If a profile exists (rowCount > 0), then proceed to log the daily visit and fetch all data.
+        if (userCheckResult.rowCount > 0) {
+            
+            // Start a transaction to ensure both logging the visit and fetching data happen together.
+            await client.query('BEGIN');
+
+            // Insert today's login record. ON CONFLICT DO NOTHING is safe and prevents duplicates.
+            await client.query(
+                `INSERT INTO daily_logins (user_id, login_date) VALUES ($1, CURRENT_DATE) ON CONFLICT DO NOTHING;`,
+                [googleId]
+            );
+
+            // Fetch all logins for the current month.
+            const loginDatesResult = await client.query(
+                `SELECT login_date FROM daily_logins 
+                 WHERE user_id = $1 AND DATE_TRUNC('month', login_date) = DATE_TRUNC('month', CURRENT_DATE);`,
+                [googleId]
+            );
+            const dailyLogins = loginDatesResult.rows.map(r => r.login_date);
+
+            // The main query to get all profile details.
+            const profileQuery = `
+                SELECT
+                    t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
+                    t.banned_until, t.razorpay_subscription_id, t.subscription_status, t.trail_effect, t.superpowers,
+                    t.total_distance_km, c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
+                    (c.base_location IS NOT NULL) as base_is_set,
+                    (SELECT r.rank FROM (
+                        SELECT owner_id, RANK() OVER (ORDER BY area_sqm DESC) as rank
+                        FROM territories WHERE area_sqm > 0 AND username IS NOT NULL
+                    ) r WHERE r.owner_id = t.owner_id) as rank
+                FROM territories t
+                LEFT JOIN clan_members cm ON t.owner_id = cm.user_id
+                LEFT JOIN clans c ON cm.clan_id = c.id
+                WHERE t.owner_id = $1;
+            `;
+            
+            const profileResult = await client.query(profileQuery, [googleId]);
+            const row = profileResult.rows[0];
+
+            // If all queries were successful, commit the transaction.
+            await client.query('COMMIT');
+
+            logApi(`Profile found for ${googleId}. Rank: ${row.rank}, Logins: ${dailyLogins.length}`);
+            
+            const response = {
+                profileExists: true,
+                isPaid: row.is_paid,
+                username: row.username,
+                profileImageUrl: row.profile_image_url,
+                identityColor: row.identity_color,
+                area_sqm: row.area_sqm || 0,
+                has_shield: row.has_shield,
+                banned_until: row.banned_until,
+                razorpaySubscriptionId: row.razorpay_subscription_id,
+                subscriptionStatus: row.subscription_status,
+                trailEffect: row.trail_effect || 'default',
+                superpowers: row.superpowers || { owned: [] },
+                rank: row.rank,
+                total_distance_km: row.total_distance_km || 0,
+                dailyLogins: dailyLogins,
+                clan_info: row.clan_id ? { id: row.clan_id.toString(), name: row.clan_name, tag: row.clan_tag, role: row.clan_role, base_is_set: row.base_is_set } : null
+            };
+            
+            return res.json(response);
+
+        } else {
+            // If no profile exists, simply inform the client. This is the path for a new user.
             logApi(`No profile found for new user ${googleId}.`);
-            client.release();
             return res.json({ profileExists: false });
         }
-        
-        // If the user DOES exist, we can safely proceed.
-        // Start a transaction to ensure both logging the visit and fetching data happen together.
-        await client.query('BEGIN');
-
-        // Insert today's login record. ON CONFLICT DO NOTHING prevents duplicates if the endpoint is called multiple times a day.
-        await client.query(
-            `INSERT INTO daily_logins (user_id, login_date) VALUES ($1, CURRENT_DATE) ON CONFLICT DO NOTHING;`,
-            [googleId]
-        );
-
-        // Get all logins for the current month to send to the app.
-        const loginDatesResult = await client.query(
-            `SELECT login_date FROM daily_logins 
-             WHERE user_id = $1 AND DATE_TRUNC('month', login_date) = DATE_TRUNC('month', CURRENT_DATE);`,
-            [googleId]
-        );
-        const dailyLogins = loginDatesResult.rows.map(r => r.login_date);
-
-        // The main query to get all profile details.
-        const query = `
-            SELECT
-                t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
-                t.banned_until,
-                t.razorpay_subscription_id, t.subscription_status, t.trail_effect, t.superpowers,
-                t.total_distance_km,
-                c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
-                (c.base_location IS NOT NULL) as base_is_set,
-                (
-                    SELECT r.rank
-                    FROM (
-                        SELECT
-                            owner_id,
-                            RANK() OVER (ORDER BY area_sqm DESC) as rank
-                        FROM territories
-                        WHERE area_sqm > 0 AND username IS NOT NULL
-                    ) r
-                    WHERE r.owner_id = t.owner_id
-                ) as rank
-            FROM territories t
-            LEFT JOIN clan_members cm ON t.owner_id = cm.user_id
-            LEFT JOIN clans c ON cm.clan_id = c.id
-            WHERE t.owner_id = $1;
-        `;
-        
-        const result = await client.query(query, [googleId]);
-        const row = result.rows[0];
-
-        // If all queries were successful, commit the transaction.
-        await client.query('COMMIT');
-
-        logApi(`Profile found for ${googleId}. Rank: ${row.rank}, Logins: ${dailyLogins.length}`);
-        const response = {
-            profileExists: true,
-            isPaid: row.is_paid,
-            username: row.username,
-            profileImageUrl: row.profile_image_url,
-            identityColor: row.identity_color,
-            area_sqm: row.area_sqm || 0,
-            has_shield: row.has_shield,
-            banned_until: row.banned_until,
-            razorpaySubscriptionId: row.razorpay_subscription_id,
-            subscriptionStatus: row.subscription_status,
-            trailEffect: row.trail_effect || 'default',
-            superpowers: row.superpowers || { owned: [] },
-            rank: row.rank,
-            total_distance_km: row.total_distance_km || 0,
-            dailyLogins: dailyLogins,
-            clan_info: null
-        };
-
-        if (row.clan_id) {
-            response.clan_info = { id: row.clan_id.toString(), name: row.clan_name, tag: row.clan_tag, role: row.clan_role, base_is_set: row.base_is_set };
-        }
-        
-        res.json(response);
-
     } catch (err) {
-        // If any error occurred during the transaction, roll it back.
+        // If any error occurs, attempt to rollback the transaction and log the error.
         await client.query('ROLLBACK');
         logApi(`Error in /check-profile for ${googleId}: %O`, err);
-        res.status(500).json({ error: 'Server error while checking profile.' });
+        return res.status(500).json({ error: 'Server error while checking profile.' });
     } finally {
-        // CRITICAL: Always release the client connection, whether the process succeeded or failed.
+        // CRITICAL: This block ensures the database connection is ALWAYS released, preventing leaks.
         client.release();
     }
 });
@@ -1051,7 +1040,7 @@ app.get('/leaderboard/clans', async (req, res) => {
             FROM clans c
             LEFT JOIN clan_members cm ON c.id = cm.clan_id
             LEFT JOIN clan_territories ct ON c.id = ct.clan_id
-            LEFT JOIN territories t_leader ON c.leader_id = t_leader.owner_id
+            LEFT JOIN territories t_leader ON c.leader_id = t.owner_id
             GROUP BY c.id, ct.area_sqm, t_leader.username
             ORDER BY total_area_sqm DESC LIMIT 100;
         `;
