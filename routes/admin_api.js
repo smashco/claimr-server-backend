@@ -78,7 +78,10 @@ module.exports = (pool, io, geofenceService, players) => {
             }
 
 
-            // Delete from all child tables first to satisfy foreign key constraints
+            // Anonymize quest winner records before deleting the user
+            await client.query('UPDATE quests SET winner_user_id = NULL WHERE winner_user_id = $1', [id]);
+            
+            // Delete from all other child tables
             await client.query('DELETE FROM daily_logins WHERE user_id = $1', [id]);
             await client.query('DELETE FROM quest_progress WHERE user_id = $1', [id]);
             await client.query('DELETE FROM quest_entries WHERE user_id = $1', [id]);
@@ -86,11 +89,6 @@ module.exports = (pool, io, geofenceService, players) => {
             await client.query('DELETE FROM clan_join_requests WHERE user_id = $1', [id]);
             await client.query('DELETE FROM clan_members WHERE user_id = $1', [id]);
             
-            // NOTE: If the player is a clan leader, deleting them from `territories`
-            // will CASCADE and delete the clan, its territory, and all members.
-            // This is the expected behavior for a full user deletion.
-
-
             // Finally, delete the player from the main territories table
             await client.query('DELETE FROM territories WHERE owner_id = $1', [id]);
 
