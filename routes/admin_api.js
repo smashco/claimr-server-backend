@@ -58,23 +58,59 @@ module.exports = (pool, io, geofenceService, players) => {
        }
    });
   
+    // =======================================================================//
+    // ========================== FIX STARTS HERE ==========================//
+    // =======================================================================//
    router.delete('/player/:id/delete', async (req, res) => {
-       const { id } = req.params;
-       try {
-          const playerSocketInfo = Object.values(players).find(p => p.googleId === id);
-          if (playerSocketInfo) {
-              const socketToDisconnect = io.sockets.sockets.get(playerSocketInfo.id);
-              if (socketToDisconnect) {
-                  socketToDisconnect.disconnect(true);
-              }
-          }
-          await pool.query('DELETE FROM territories WHERE owner_id = $1', [id]);
-          return res.json({ message: `Player ${id} and all their data have been permanently deleted.` });
-      } catch (err) {
-          console.error(`[ADMIN] Error deleting player ${id}:`, err);
-          res.status(500).json({ message: 'Server error' });
-      }
-  });
+        const { id } = req.params;
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+
+
+            // Disconnect the player if they are online
+            const playerSocketInfo = Object.values(players).find(p => p.googleId === id);
+            if (playerSocketInfo) {
+                const socketToDisconnect = io.sockets.sockets.get(playerSocketInfo.id);
+                if (socketToDisconnect) {
+                    socketToDisconnect.disconnect(true);
+                }
+            }
+
+
+            // Delete from all child tables first to satisfy foreign key constraints
+            await client.query('DELETE FROM daily_logins WHERE user_id = $1', [id]);
+            await client.query('DELETE FROM quest_progress WHERE user_id = $1', [id]);
+            await client.query('DELETE FROM quest_entries WHERE user_id = $1', [id]);
+            await client.query('DELETE FROM mega_prize_votes WHERE user_id = $1', [id]);
+            await client.query('DELETE FROM clan_join_requests WHERE user_id = $1', [id]);
+            await client.query('DELETE FROM clan_members WHERE user_id = $1', [id]);
+            
+            // NOTE: If the player is a clan leader, deleting them from `territories`
+            // will CASCADE and delete the clan, its territory, and all members.
+            // This is the expected behavior for a full user deletion.
+
+
+            // Finally, delete the player from the main territories table
+            await client.query('DELETE FROM territories WHERE owner_id = $1', [id]);
+
+
+            await client.query('COMMIT');
+            
+            return res.json({ message: `Player ${id} and all their associated data have been permanently deleted.` });
+
+
+        } catch (err) {
+            await client.query('ROLLBACK');
+            console.error(`[ADMIN] Error deleting player ${id}:`, err);
+            res.status(500).json({ message: 'Server error while deleting player.' });
+        } finally {
+            client.release();
+        }
+    });
+    // =======================================================================//
+    // =========================== FIX ENDS HERE ===========================//
+    // =======================================================================//
 
 
    router.post('/player/:id/ban', async (req, res) => {
@@ -356,29 +392,21 @@ module.exports = (pool, io, geofenceService, players) => {
 
 
    router.post('/mega-prize/start-voting', async (req, res) => {
-        const { expiryTime } = req.body; // Expect an ISO string
-        const client = await pool.connect();
-        try {
-            await client.query('BEGIN');
-            await client.query("UPDATE system_settings SET setting_value = 'true' WHERE setting_key = 'mega_prize_voting_active'");
-            // Store or update the expiry time
-            if (expiryTime) {
-                await client.query(
-                    `INSERT INTO system_settings (setting_key, setting_value) VALUES ('mega_prize_voting_expiry', $1) 
-                     ON CONFLICT (setting_key) DO UPDATE SET setting_value = $1`,
-                    [expiryTime]
-                );
-            }
-            await client.query('COMMIT');
-            res.json({ message: 'Voting has been started.' });
-        } catch (err) {
-            await client.query('ROLLBACK');
-            console.error('[Admin API] Error starting voting:', err);
-            res.status(500).json({ message: 'Failed to start voting.' });
-        } finally {
-            client.release();
-        }
-    });
+       const client = await pool.connect();
+       try {
+           await client.query('BEGIN');
+           await client.query('DELETE FROM mega_prize_votes');
+           await client.query("UPDATE system_settings SET setting_value = 'true' WHERE setting_key = 'mega_prize_voting_active'");
+           await client.query('COMMIT');
+           res.json({ message: 'Voting has been started and previous votes have been cleared.' });
+       } catch (err) {
+           await client.query('ROLLBACK');
+           console.error('[Admin API] Error starting voting:', err);
+           res.status(500).json({ message: 'Failed to start voting.' });
+       } finally {
+           client.release();
+       }
+   });
 
 
    router.post('/mega-prize/stop-voting', async (req, res) => {
@@ -392,117 +420,72 @@ module.exports = (pool, io, geofenceService, players) => {
    });
 
 
-    // =======================================================================//
-    // ========================== FIX STARTS HERE ==========================//
-    // =======================================================================//
    router.post('/mega-prize/declare-winner', async (req, res) => {
-        const client = await pool.connect();
-        try {
-            await client.query('BEGIN');
+       const client = await pool.connect();
+       try {
+           await client.query('BEGIN');
 
 
-            const winningCandidateRes = await client.query(`
-                SELECT c.id, c.name, COUNT(v.user_id) as votes
-                FROM mega_prize_candidates c
-                LEFT JOIN mega_prize_votes v ON c.id = v.candidate_id
-                WHERE c.is_active = TRUE
-                GROUP BY c.id
-                ORDER BY votes DESC, RANDOM() LIMIT 1;
-            `);
+           const votingStatus = await client.query("SELECT setting_value FROM system_settings WHERE setting_key = 'mega_prize_voting_active'");
+           if (votingStatus.rows[0].setting_value === 'true') {
+               await client.query('ROLLBACK');
+               return res.status(400).json({ message: 'Cannot declare a winner while voting is active. Please stop voting first.' });
+           }
+          
+           const winningCandidateRes = await client.query(`
+               SELECT c.id, c.name, COUNT(v.user_id) as votes
+               FROM mega_prize_candidates c
+               JOIN mega_prize_votes v ON c.id = v.candidate_id
+               WHERE c.is_active = TRUE
+               GROUP BY c.id
+               ORDER BY votes DESC, RANDOM() LIMIT 1;
+           `);
 
 
-            if (winningCandidateRes.rowCount === 0) {
+           if (winningCandidateRes.rowCount === 0) {
+               await client.query('ROLLBACK');
+               return res.status(404).json({ message: 'No votes found for any candidate. Cannot declare a winner.' });
+           }
+
+
+           const winningPrize = winningCandidateRes.rows[0];
+           const votersRes = await client.query('SELECT user_id FROM mega_prize_votes WHERE candidate_id = $1', [winningPrize.id]);
+          
+           if (votersRes.rowCount === 0) {
                 await client.query('ROLLBACK');
-                return res.status(404).json({ message: 'No active candidates to declare a winner from.' });
-            }
+               return res.status(404).json({ message: 'Winning prize had no voters. This should not happen.' });
+           }
 
 
-            const winningPrize = winningCandidateRes.rows[0];
-            const winner_user_id = 'TBD'; // Placeholder, actual winner determined later or randomly.
-            
-            // Log the winner to the winners table
-            await client.query(
-                'INSERT INTO mega_prize_winners (prize_name, winner_user_id) VALUES ($1, $2)',
-                [winningPrize.name, winner_user_id]
-            );
+           const winner = votersRes.rows[Math.floor(Math.random() * votersRes.rowCount)];
+           await client.query(
+               'INSERT INTO mega_prize_winners (prize_name, winner_user_id) VALUES ($1, $2)',
+               [`${winningPrize.name}`, winner.user_id]
+           );
 
 
-            // Mark the winning prize as inactive, but DO NOT delete it
-            await client.query('UPDATE mega_prize_candidates SET is_active = false WHERE id = $1', [winningPrize.id]);
-            
-            // Delete all OTHER prize candidates
-            await client.query('DELETE FROM mega_prize_candidates WHERE id != $1', [winningPrize.id]);
-            
-            // Clear all votes for the next round
-            await client.query('DELETE FROM mega_prize_votes');
-            
-            // Stop the voting period
-            await client.query("UPDATE system_settings SET setting_value = 'false' WHERE setting_key = 'mega_prize_voting_active'");
+           await client.query('DELETE FROM mega_prize_votes');
+           await client.query('DELETE FROM mega_prize_candidates');
 
 
-            await client.query('COMMIT');
-            
-            res.json({ message: `Winner declared for "${winningPrize.name}". Losing prizes and all votes have been cleared.` });
+           await client.query('COMMIT');
+          
+           const winnerUsernameRes = await pool.query('SELECT username FROM territories WHERE owner_id = $1', [winner.user_id]);
+           const winnerUsername = winnerUsernameRes.rows[0].username;
 
 
-        } catch (err) {
-            await client.query('ROLLBACK');
-            console.error('[Admin API] Error declaring winner:', err);
-            res.status(500).json({ message: 'Failed to declare winner.' });
-        } finally {
-            client.release();
-        }
-    });
+           res.json({ message: `🎉 WINNER DECLARED! 🎉\n\n${winnerUsername} has won "${winningPrize.name}"!` });
 
-    // --- GAME MANAGEMENT ---
-    router.get('/game-management', async (req, res) => {
-        try {
-            const resetRes = await pool.query("SELECT setting_value FROM system_settings WHERE setting_key = 'game_reset_time'");
-            const winnersRes = await pool.query(`
-                SELECT sw.win_date, sw.area_sqm, t.username
-                FROM season_winners sw
-                JOIN territories t ON sw.winner_user_id = t.owner_id
-                ORDER BY sw.win_date DESC;
-            `);
-            res.json({
-                nextResetTime: resetRes.rows[0]?.setting_value || null,
-                seasonWinners: winnersRes.rows,
-            });
-        } catch (err) {
-            console.error('[Admin API] Error fetching game management data:', err);
-            res.status(500).json({ message: 'Failed to fetch game management data.' });
-        }
-    });
 
-    router.post('/game-management/schedule-reset', async (req, res) => {
-        const { resetTime } = req.body;
-        if (!resetTime) {
-            return res.status(400).json({ message: 'A reset time is required.' });
-        }
-        try {
-            await pool.query(
-                "INSERT INTO system_settings (setting_key, setting_value) VALUES ('game_reset_time', $1) ON CONFLICT (setting_key) DO UPDATE SET setting_value = $1",
-                [resetTime]
-            );
-            res.json({ message: `Game reset scheduled for ${new Date(resetTime).toLocaleString()}` });
-        } catch (err) {
-            console.error('[Admin API] Error scheduling game reset:', err);
-            res.status(500).json({ message: 'Failed to schedule game reset.' });
-        }
-    });
+       } catch (err) {
+           await client.query('ROLLBACK');
+           console.error('[Admin API] Error declaring winner:', err);
+           res.status(500).json({ message: 'Failed to declare winner.' });
+       } finally {
+           client.release();
+       }
+   });
 
-    router.post('/game-management/cancel-reset', async (req, res) => {
-        try {
-            await pool.query("DELETE FROM system_settings WHERE setting_key = 'game_reset_time'");
-            res.json({ message: 'Scheduled game reset has been cancelled.' });
-        } catch (err) {
-            console.error('[Admin API] Error cancelling game reset:', err);
-            res.status(500).json({ message: 'Failed to cancel game reset.' });
-        }
-    });
-    // =======================================================================//
-    // =========================== FIX ENDS HERE ===========================//
-    // =======================================================================//
 
    return router;
 };
