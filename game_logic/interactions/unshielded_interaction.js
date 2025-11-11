@@ -11,35 +11,42 @@ const SOLO_BASE_RADIUS_METERS = 30.0;
 async function handleSoloClaim(io, socket, player, players, data, client) {
     debug(`[SOLO_HANDLER_V2] Processing claim for ${player.name}`);
     const userId = player.googleId;
-    const { trail, baseClaim } = data;
+    const { trail, baseClaim, conquerAttempt } = data;
 
-    let newAreaPolygon;
+    let newAreaPolygon, newAreaSqM, interactionType;
 
     if (baseClaim) {
-        debug(`[SOLO_HANDLER_V2] Claim Type: INITIAL BASE`);
+        interactionType = 'INITIAL_BASE';
         const center = [baseClaim.lng, baseClaim.lat];
         newAreaPolygon = turf.circle(center, baseClaim.radius || SOLO_BASE_RADIUS_METERS, { units: 'meters' });
-    } else {
-        debug(`[SOLO_HANDLER_V2] Claim Type: EXPANSION`);
-        if (!trail || trail.length < 3) throw new Error('Trail is too short to form a valid area.');
+    } else if (trail) {
+        interactionType = 'EXPANSION';
+        if (trail.length < 3) throw new Error('Trail is too short to form a valid area.');
         const points = [...trail.map(p => [p.lng, p.lat]), [trail[0].lng, trail[0].lat]];
         newAreaPolygon = turf.polygon([points]);
+    } else if (conquerAttempt) {
+        interactionType = 'CONQUER';
+        // In a conquer, the new polygon IS the path of the area being conquered
+        const points = conquerAttempt.path.map(p => [p.lng, p.lat]);
+        newAreaPolygon = turf.polygon([points]);
+    } else {
+        throw new Error("Invalid claim data: No trail, base, or conquer info provided.");
     }
-
-    const newAreaSqM = turf.area(newAreaPolygon);
+    
+    newAreaSqM = turf.area(newAreaPolygon);
     if (newAreaSqM < 100 && !baseClaim) {
         throw new Error('Claimed area is too small.');
     }
 
     const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
     
-    // Find victims whose territory intersects with the new claim
+    // Find all territories that are touched by this new polygon
     const victimsRes = await client.query(`
-        SELECT owner_id, username, ST_AsGeoJSON(area) as geojson, is_shield_active
+        SELECT owner_id, username, is_shield_active
         FROM territories
         WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
     `, [userId]);
-
+    
     const affectedOwnerIds = new Set([userId]);
     
     // First, check for any active shields before proceeding
@@ -112,8 +119,8 @@ async function handleSoloClaim(io, socket, player, players, data, client) {
         finalTotalArea: finalTotalArea,
         areaClaimed: newAreaSqM,
         updatedTerritories: updatedTerritories,
-        // ===== FIX START: Return the correct user ID =====
-        newTerritoryId: userId 
+        // ===== FIX START: Always return the user's string ID =====
+        newTerritoryId: userId
         // ===== FIX END =====
     };
 }
