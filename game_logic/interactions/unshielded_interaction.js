@@ -46,8 +46,6 @@ async function handleSoloClaim(io, socket, player, players, data, client) {
     for (const victim of victimsRes.rows) {
         if (victim.is_shield_active) {
             debug(`[SOLO_HANDLER_V2] ATTACK BLOCKED by ${victim.username}'s shield.`);
-            // Shield logic would go here (e.g., notifying users, consuming the shield power)
-            // For now, we'll just reject the claim.
             throw new Error(`Your run was blocked by ${victim.username}'s Last Stand!`);
         }
     }
@@ -80,11 +78,14 @@ async function handleSoloClaim(io, socket, player, players, data, client) {
 
     // Update quest progress
     await updateQuestProgress(userId, 'cover_area', newAreaSqM, client, io, players);
-    if (trail) {
-         const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
-         const trailLengthKm = turf.length(trailLineString, { units: 'kilometers' });
-         await updateQuestProgress(userId, 'run_trail', trailLengthKm, client, io, players);
+    
+    // ===== FIX START: Only calculate trail length if a valid trail exists =====
+    if (trail && trail.length >= 2) {
+        const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
+        const trailLengthKm = turf.length(trailLineString, { units: 'kilometers' });
+        await updateQuestProgress(userId, 'run_trail', trailLengthKm, client, io, players);
     }
+    // ===== FIX END =====
 
     // Fetch all updated territory data to broadcast back to all clients
     const updatedTerritories = [];
@@ -104,6 +105,7 @@ async function handleSoloClaim(io, socket, player, players, data, client) {
             [Array.from(affectedOwnerIds)]
         );
         queryResult.rows.forEach(r => {
+            // Note: The 'id' for a territory in solo mode is simply the owner's ID for consistency on the client
             updatedTerritories.push({...r, id: r.ownerId, geojson: r.geojson ? JSON.parse(r.geojson) : null });
         });
     }
@@ -113,7 +115,9 @@ async function handleSoloClaim(io, socket, player, players, data, client) {
         finalTotalArea: finalTotalArea,
         areaClaimed: newAreaSqM,
         updatedTerritories: updatedTerritories,
-        newTerritoryId: userId // In this model, the "territory ID" is just the user's ID.
+        // In this schema model, the "territory ID" for a user's solo area is just their own ID.
+        // This is a placeholder since we don't have separate territory rows.
+        newTerritoryId: 1 
     };
 }
 
