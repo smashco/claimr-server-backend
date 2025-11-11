@@ -1,133 +1,120 @@
-// game_logic/interactions/unshielded_interaction.js
-
 const turf = require('@turf/turf');
 const { updateQuestProgress } = require('../quest_handler');
 const debug = require('debug')('server:game');
 
 const SOLO_BASE_RADIUS_METERS = 30.0;
 
-async function getFullTerritoryDetails(ownerIds, client) {
-    if (!ownerIds || ownerIds.length === 0) return [];
-    
-    const query = `
-        SELECT
-            id,
-            owner_id as "ownerId",
-            owner_name as "ownerName",
-            profile_image_url as "profileImageUrl",
-            identity_color,
-            ST_AsGeoJSON(area) as geojson,
-            area_sqm as area,
-            laps_required,
-            brand_wrapper
-        FROM territories
-        WHERE owner_id = ANY($1::varchar[]) AND area IS NOT NULL;
-    `;
-    const result = await client.query(query, [ownerIds]);
-    return result.rows.map(row => ({
-        ...row,
-        geojson: JSON.parse(row.geojson)
-    }));
-}
-
-
-async function handleSoloLap(io, socket, player, players, data, client) {
-    debug(`[INTERACTION] Processing unshielded interaction for ${player.name}`);
+/**
+ * Handles a player's attempt to claim territory in solo mode.
+ * This version is designed for a schema where each user has ONE row and their 'area' is a MultiPolygon/GeometryCollection.
+ */
+async function handleSoloClaim(io, socket, player, players, data, client) {
+    debug(`[SOLO_HANDLER_V2] Processing claim for ${player.name}`);
     const userId = player.googleId;
-    const { trail, baseClaim, conquerAttempt } = data;
+    const { trail, baseClaim } = data;
 
-    let newAreaPolygon, newAreaSqM, interactionType;
+    let newAreaPolygon;
 
     if (baseClaim) {
-        interactionType = 'INITIAL_BASE';
+        debug(`[SOLO_HANDLER_V2] Claim Type: INITIAL BASE`);
         const center = [baseClaim.lng, baseClaim.lat];
         newAreaPolygon = turf.circle(center, baseClaim.radius || SOLO_BASE_RADIUS_METERS, { units: 'meters' });
-    } else if (trail) {
-        interactionType = 'EXPANSION';
-        if (trail.length < 3) throw new Error('Trail is too short to form a valid area.');
+    } else {
+        debug(`[SOLO_HANDLER_V2] Claim Type: EXPANSION`);
+        if (!trail || trail.length < 3) throw new Error('Trail is too short to form a valid area.');
         const points = [...trail.map(p => [p.lng, p.lat]), [trail[0].lng, trail[0].lat]];
         newAreaPolygon = turf.polygon([points]);
-    } else if (conquerAttempt) {
-        interactionType = 'CONQUER';
-        const points = conquerAttempt.path.map(p => [p.lng, p.lat]);
-        newAreaPolygon = turf.polygon([points]);
-    } else {
-        throw new Error("Invalid claim data: No trail, base, or conquer info provided.");
     }
-    
-    newAreaSqM = turf.area(newAreaPolygon);
-    debug(`[INTERACTION] Type: ${interactionType}, Area: ${newAreaSqM.toFixed(2)} sqm`);
 
-    if (interactionType === 'EXPANSION' && newAreaSqM < 100) {
+    const newAreaSqM = turf.area(newAreaPolygon);
+    if (newAreaSqM < 100 && !baseClaim) {
         throw new Error('Claimed area is too small.');
     }
 
     const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
     
-    // Find all territories that are touched by this new polygon
+    // Find victims whose territory intersects with the new claim
     const victimsRes = await client.query(`
-        SELECT id, owner_id
+        SELECT owner_id, username, ST_AsGeoJSON(area) as geojson, is_shield_active
         FROM territories
         WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
     `, [userId]);
-    
+
     const affectedOwnerIds = new Set([userId]);
-    const affectedTerritoryIds = new Set();
-    victimsRes.rows.forEach(v => {
-        affectedOwnerIds.add(v.owner_id);
-        affectedTerritoryIds.add(v.id);
-    });
-
-    // For a conquer, we also need to delete the original territory being conquered
-    if (interactionType === 'CONQUER') {
-        affectedTerritoryIds.add(conquerAttempt.territoryId);
-    }
     
-    // Delete all affected victim territories. This simplifies the logic immensely.
-    // The attacker claims the new shape, and whatever part of the victim's land was outside that shape is gone.
-    if (affectedTerritoryIds.size > 0) {
-        await client.query('DELETE FROM territories WHERE id = ANY($1::int[])', [Array.from(affectedTerritoryIds)]);
-        debug(`[INTERACTION] Wiped out ${affectedTerritoryIds.size} conflicting territories.`);
+    // First, check for any active shields before proceeding
+    for (const victim of victimsRes.rows) {
+        if (victim.is_shield_active) {
+            debug(`[SOLO_HANDLER_V2] ATTACK BLOCKED by ${victim.username}'s shield.`);
+            // Shield logic would go here (e.g., notifying users, consuming the shield power)
+            // For now, we'll just reject the claim.
+            throw new Error(`Your run was blocked by ${victim.username}'s Last Stand!`);
+        }
     }
 
-    // Now, insert the new territory for the attacker
-    const lapsForNewArea = interactionType === 'CONQUER' ? (conquerAttempt.lapsRequired + 1) : 1;
-    
-    const insertRes = await client.query(
-       `INSERT INTO territories (owner_id, owner_name, username, profile_image_url, identity_color, area, area_sqm, laps_required)
-        SELECT $1, owner_name, username, profile_image_url, identity_color, ${newAreaWKT}, $2, $3
-        FROM territories WHERE owner_id = $1 LIMIT 1
-        RETURNING id`,
-       [userId, newAreaSqM, lapsForNewArea]
-    );
-    const newTerritoryId = insertRes.rows[0].id;
-    
-    // Store the path for future lapping
-    const borderPath = (interactionType === 'EXPANSION') 
-        ? trail 
-        : newAreaPolygon.geometry.coordinates[0].map(p => ({ lat: p[1], lng: p[0] }));
+    // If no shields, apply damage to all victims
+    for (const victim of victimsRes.rows) {
+        affectedOwnerIds.add(victim.owner_id);
+        debug(`[SOLO_HANDLER_V2] Calculating damage for victim: ${victim.username}`);
+        const remainingVictimAreaWKT = `ST_Multi(ST_Difference(area, ${newAreaWKT}))`;
+        await client.query(
+            `UPDATE territories SET area = ${remainingVictimAreaWKT}, area_sqm = ST_Area((${remainingVictimAreaWKT})::geography) WHERE owner_id = $1`, 
+            [victim.owner_id]
+        );
+    }
 
-    await client.query(
-        'INSERT INTO captured_area_paths (territory_id, path) VALUES ($1, $2)',
-        [newTerritoryId, JSON.stringify(borderPath)]
+    // Add the new area to the attacker's existing territory
+    const attackerTerritoryWKT = `ST_Union(COALESCE(area, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)), ${newAreaWKT})`;
+    const result = await client.query(
+        `UPDATE territories 
+         SET area = ${attackerTerritoryWKT}, area_sqm = ST_Area((${attackerTerritoryWKT})::geography) 
+         WHERE owner_id = $1
+         RETURNING area_sqm`,
+        [userId]
     );
+    
+    if (result.rowCount === 0) {
+        throw new Error("Attacker's profile not found in territories table.");
+    }
+    const finalTotalArea = result.rows[0].area_sqm;
 
     // Update quest progress
     await updateQuestProgress(userId, 'cover_area', newAreaSqM, client, io, players);
     if (trail) {
-        const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
-        const trailLengthKm = turf.length(trailLineString, { units: 'kilometers' });
-        await updateQuestProgress(userId, 'run_trail', trailLengthKm, client, io, players);
+         const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
+         const trailLengthKm = turf.length(trailLineString, { units: 'kilometers' });
+         await updateQuestProgress(userId, 'run_trail', trailLengthKm, client, io, players);
     }
 
-    const finalTerritories = await getFullTerritoryDetails(Array.from(affectedOwnerIds), client);
-
-    debug(`[INTERACTION] SUCCESS: Interaction for ${player.name} is ready for commit.`);
+    // Fetch all updated territory data to broadcast back to all clients
+    const updatedTerritories = [];
+    if (affectedOwnerIds.size > 0) {
+        const queryResult = await client.query(`
+            SELECT 
+                owner_id as "ownerId", 
+                username as "ownerName", 
+                profile_image_url as "profileImageUrl", 
+                identity_color, 
+                ST_AsGeoJSON(area) as geojson, 
+                area_sqm as area,
+                laps_required,
+                brand_wrapper
+            FROM territories 
+            WHERE owner_id = ANY($1::varchar[])`, 
+            [Array.from(affectedOwnerIds)]
+        );
+        queryResult.rows.forEach(r => {
+            updatedTerritories.push({...r, id: r.ownerId, geojson: r.geojson ? JSON.parse(r.geojson) : null });
+        });
+    }
+    
+    debug(`[SOLO_HANDLER_V2] Claim successful for ${player.name}. New total area: ${finalTotalArea.toFixed(2)}`);
     return {
+        finalTotalArea: finalTotalArea,
         areaClaimed: newAreaSqM,
-        newTerritoryId: newTerritoryId,
-        updatedTerritories: finalTerritories
+        updatedTerritories: updatedTerritories,
+        newTerritoryId: userId // In this model, the "territory ID" is just the user's ID.
     };
 }
 
-module.exports = handleSoloLap;
+module.exports = handleSoloClaim;
