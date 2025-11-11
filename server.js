@@ -15,17 +15,6 @@ Examples (run these in your terminal):
 
 3. See all messages EXCEPT database logs:
    DEBUG=server:*,-server:db node server.js
-
-Available Namespaces:
-- server:lifecycle (Server start, stop, major events)
-- server:db         (Database setup, transactions, critical queries)
-- server:auth       (Authentication middleware, token verification)
-- server:api        (User-facing API endpoints)
-- server:admin      (Admin portal API endpoints)
-- server:payment    (Razorpay and payment verification logic)
-- server:socket     (Socket.IO connection, disconnects, and events)
-- server:game       (Core game logic like claims, trail cuts, etc.)
-- server:superpower (All logic within the superpower_manager)
 ================================================================================
 */
 
@@ -58,17 +47,13 @@ const crypto = require('crypto');
 // Import the new manager
 const SuperpowerManager = require('./superpower_manager');
 
-// =======================================================================//
-// ==================== HANDLER LOGIC UPDATED HERE =======================//
-// =======================================================================//
+// Import game logic handlers
 const handleSoloClaim = require('./game_logic/interactions/unshielded_interaction');
 const handleClanClaim = require('./game_logic/clan_handler');
-// =======================================================================//
-// =======================================================================//
-
 const GeofenceService = require('./geofence_service');
 const { updateQuestProgress } = require('./game_logic/quest_handler');
 
+// Import routers
 const adminApiRouter = require('./routes/admin_api');
 const sponsorPortalRouter = require('./routes/sponsor_portal');
 const questsApiRouter = require('./routes/quests_api');
@@ -134,21 +119,18 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Instantiate the manager
 const superpowerManager = new SuperpowerManager(pool, razorpay, io, () => players);
-
-
 const geofenceService = new GeofenceService(pool);
 const players = {};
 
 const setupDatabase = async () => {
-  const client = await pool.connect();
-  logDb('Connected to database for setup.');
-  try {
-    await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
-    logDb('PostGIS extension is enabled.');
+    const client = await pool.connect();
+    logDb('Connected to database for setup.');
+    try {
+        await client.query('CREATE EXTENSION IF NOT EXISTS postgis;');
+        logDb('PostGIS extension is enabled.');
 
-    await client.query(`
+        await client.query(`
       CREATE TABLE IF NOT EXISTS territories (
         id SERIAL PRIMARY KEY,
         owner_id VARCHAR(255) NOT NULL UNIQUE,
@@ -182,35 +164,32 @@ const setupDatabase = async () => {
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    logDb('"territories" table is ready.');
-    
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS unique_player_id VARCHAR(10) UNIQUE;');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS phone_number VARCHAR(20);');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS instagram_id VARCHAR(100);');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS gender VARCHAR(50);');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS age INTEGER;');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS height_cm REAL;');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS weight_kg REAL;');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_shield_active BOOLEAN DEFAULT FALSE;');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_carve_mode_active BOOLEAN DEFAULT FALSE;');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE;');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS razorpay_subscription_id VARCHAR(100);');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50);');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_distance_km REAL DEFAULT 0;');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_duration_minutes INTEGER DEFAULT 0;');
-    await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{"owned": []}'::jsonb;`);
-    await client.query(`ALTER TABLE territories ALTER COLUMN superpowers SET DEFAULT '{"owned": []}'::jsonb;`);
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS trail_effect VARCHAR(50) DEFAULT \'default\';');
-    await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS banned_until TIMESTAMP WITH TIME ZONE;');
-    await client.query('ALTER TABLE territories DROP COLUMN IF EXISTS is_banned;');
-    logDb('Ensured "banned_until" column exists and removed old "is_banned" column.');
-    
-    const usernameConstraint = await client.query(`SELECT 1 FROM pg_constraint WHERE conname = 'territories_username_key'`);
-    if(usernameConstraint.rowCount === 0) {
-        await client.query('ALTER TABLE territories ADD CONSTRAINT territories_username_key UNIQUE (username);');
-    }
-    
-    await client.query(`
+        logDb('"territories" table is ready.');
+
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS laps_required INTEGER DEFAULT 1;');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS brand_wrapper VARCHAR(100);');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS unique_player_id VARCHAR(10) UNIQUE;');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS phone_number VARCHAR(20);');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS instagram_id VARCHAR(100);');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS gender VARCHAR(50);');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS age INTEGER;');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS height_cm REAL;');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS weight_kg REAL;');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_shield_active BOOLEAN DEFAULT FALSE;');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_carve_mode_active BOOLEAN DEFAULT FALSE;');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE;');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS razorpay_subscription_id VARCHAR(100);');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50);');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_distance_km REAL DEFAULT 0;');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS total_duration_minutes INTEGER DEFAULT 0;');
+        await client.query(`ALTER TABLE territories ADD COLUMN IF NOT EXISTS superpowers JSONB DEFAULT '{"owned": []}'::jsonb;`);
+        await client.query(`ALTER TABLE territories ALTER COLUMN superpowers SET DEFAULT '{"owned": []}'::jsonb;`);
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS trail_effect VARCHAR(50) DEFAULT \'default\';');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS banned_until TIMESTAMP WITH TIME ZONE;');
+        await client.query('ALTER TABLE territories DROP COLUMN IF EXISTS is_banned;');
+        logDb('Ensured all columns exist on "territories" table.');
+        
+        await client.query(`
       CREATE TABLE IF NOT EXISTS clans (
         id SERIAL PRIMARY KEY,
         name VARCHAR(50) NOT NULL UNIQUE,
@@ -223,9 +202,9 @@ const setupDatabase = async () => {
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    logDb('"clans" table is ready.');
+        logDb('"clans" table is ready.');
 
-    await client.query(`
+        await client.query(`
       CREATE TABLE IF NOT EXISTS clan_members (
         clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
         user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
@@ -234,9 +213,9 @@ const setupDatabase = async () => {
         PRIMARY KEY (clan_id, user_id)
       );
     `);
-    logDb('"clan_members" table is ready.');
+        logDb('"clan_members" table is ready.');
 
-    await client.query(`
+        await client.query(`
       CREATE TABLE IF NOT EXISTS clan_join_requests (
         id SERIAL PRIMARY KEY,
         clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
@@ -246,9 +225,9 @@ const setupDatabase = async () => {
         UNIQUE(clan_id, user_id)
       );
     `);
-    logDb('"clan_join_requests" table is ready.');
+        logDb('"clan_join_requests" table is ready.');
 
-    await client.query(`
+        await client.query(`
       CREATE TABLE IF NOT EXISTS clan_territories (
         clan_id INTEGER NOT NULL PRIMARY KEY REFERENCES clans(id) ON DELETE CASCADE,
         area GEOMETRY(GEOMETRY, 4326),
@@ -256,9 +235,9 @@ const setupDatabase = async () => {
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    logDb('"clan_territories" table is ready.');
+        logDb('"clan_territories" table is ready.');
 
-    await client.query(`
+        await client.query(`
       CREATE TABLE IF NOT EXISTS geofence_zones (
         id SERIAL PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
@@ -267,33 +246,20 @@ const setupDatabase = async () => {
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    logDb('"geofence_zones" table is ready.');
-
-    await client.query('CREATE INDEX IF NOT EXISTS geofence_geom_idx ON geofence_zones USING GIST (geom);');
-    logDb('Spatial index for "geofence_zones" is ensured.');
-    
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS sponsors (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(100) NOT NULL,
-        login_id VARCHAR(50) NOT NULL UNIQUE,
-        passcode_hash TEXT NOT NULL,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    logDb('"sponsors" table is ready.');
-
-    await client.query(`
-        CREATE TABLE IF NOT EXISTS quests (
+        logDb('"geofence_zones" table is ready.');
+        
+        await client.query(`
+      CREATE TABLE IF NOT EXISTS quests (
             id SERIAL PRIMARY KEY,
             title VARCHAR(150) NOT NULL,
             description TEXT NOT NULL,
             type VARCHAR(20) NOT NULL, 
             objective_type VARCHAR(50),
             objective_value INT,
+            reward_description TEXT,
             status VARCHAR(20) NOT NULL DEFAULT 'pending',
             is_first_come_first_served BOOLEAN DEFAULT FALSE,
-            sponsor_id INTEGER REFERENCES sponsors(id) ON DELETE SET NULL,
+            sponsor_id INTEGER,
             google_form_url TEXT,
             requires_qr_validation BOOLEAN DEFAULT FALSE,
             winner_user_id VARCHAR(255) REFERENCES territories(owner_id),
@@ -302,147 +268,15 @@ const setupDatabase = async () => {
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
     `);
-    logDb('"quests" table creation/check complete.');
+        logDb('"quests" table is ready.');
 
-    await client.query('ALTER TABLE quests ADD COLUMN IF NOT EXISTS requires_qr_validation BOOLEAN DEFAULT FALSE;');
-    logDb('Ensured "requires_qr_validation" column exists in "quests" table.');
-    
-    await client.query('ALTER TABLE quests ADD COLUMN IF NOT EXISTS reward_description TEXT;');
-    logDb('Ensured "reward_description" column exists in "quests" table.');
-
-    await client.query(`
-        CREATE TABLE IF NOT EXISTS quest_progress (
-            id SERIAL PRIMARY KEY,
-            quest_id INTEGER NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
-            user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-            progress INT NOT NULL DEFAULT 0,
-            status VARCHAR(20) NOT NULL DEFAULT 'in_progress',
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(quest_id, user_id)
-        );
-    `);
-    logDb('"quest_progress" table is ready.');
-    
-    await client.query(`ALTER TABLE quest_progress ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'in_progress';`);
-    logDb('Ensured "status" column exists in "quest_progress" table.');
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS quest_entries (
-        id SERIAL PRIMARY KEY,
-        quest_id INTEGER NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
-        user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-        submission_details TEXT,
-        status VARCHAR(20) NOT NULL DEFAULT 'submitted',
-        submitted_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(quest_id, user_id)
-      );
-    `);
-    logDb('"quest_entries" table is ready.');
-
-    await client.query(`
-        CREATE TABLE IF NOT EXISTS superpower_chests (
-            id SERIAL PRIMARY KEY,
-            location GEOMETRY(POINT, 4326) NOT NULL,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );
-    `);
-    logDb('"superpower_chests" table is ready.');
-
-    await client.query('CREATE INDEX IF NOT EXISTS superpower_chests_location_idx ON superpower_chests USING GIST (location);');
-    logDb('Spatial index for "superpower_chests" is ensured.');
-    
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS shop_items (
-        item_id VARCHAR(50) PRIMARY KEY,
-        name VARCHAR(100) NOT NULL,
-        description TEXT NOT NULL,
-        price INTEGER NOT NULL,
-        item_type VARCHAR(50) NOT NULL DEFAULT 'superpower'
-      );
-    `);
-    logDb('"shop_items" table is ready.');
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS mega_prize_candidates (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(150) NOT NULL,
-        brand VARCHAR(100),
-        is_active BOOLEAN DEFAULT TRUE
-      );
-    `);
-    logDb('"mega_prize_candidates" table is ready.');
-    
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS mega_prize_votes (
-        user_id VARCHAR(255) PRIMARY KEY REFERENCES territories(owner_id) ON DELETE CASCADE,
-        candidate_id INTEGER NOT NULL REFERENCES mega_prize_candidates(id) ON DELETE CASCADE,
-        voted_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    logDb('"mega_prize_votes" table is ready.');
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS mega_prize_winners (
-        id SERIAL PRIMARY KEY,
-        prize_name VARCHAR(255) NOT NULL,
-        winner_user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-        win_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    logDb('"mega_prize_winners" table is ready.');
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS system_settings (
-        setting_key VARCHAR(50) PRIMARY KEY,
-        setting_value TEXT
-      );
-    `);
-    logDb('"system_settings" table is ready.');
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS daily_logins (
-        user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-        login_date DATE NOT NULL,
-        PRIMARY KEY (user_id, login_date)
-      );
-    `);
-    logDb('"daily_logins" table is ready.');
-
-    await client.query(`
-        CREATE TABLE IF NOT EXISTS season_winners (
-            id SERIAL PRIMARY KEY,
-            winner_user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
-            win_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            area_sqm REAL NOT NULL
-        );
-    `);
-    logDb('"season_winners" table is ready.');
-
-    const superpowerItems = [
-      { id: 'lastStand', name: 'Last Stand', description: 'Protects your territory from the next attack.', price: 29 },
-      { id: 'infiltrator', name: 'Infiltrator', description: 'Start a run from deep within enemy territory.', price: 29 },
-      { id: 'ghostRunner', name: 'Ghost Runner', description: 'Your trail is hidden from rivals for one run.', price: 29 },
-      { id: 'trailDefense', name: 'Trail Defense', description: 'Your trail cannot be cut by rivals.', price: 29 },
-    ];
-    for (const item of superpowerItems) {
-      await client.query(
-        `INSERT INTO shop_items (item_id, name, description, price, item_type) VALUES ($1, $2, $3, $4, 'superpower') ON CONFLICT (item_id) DO UPDATE SET name = $2, description = $3, price = $4;`,
-        [item.id, item.name, item.description, item.price]
-      );
+    } catch (err) {
+        console.error('[DB] FATAL ERROR during database setup:', err);
+        throw err;
+    } finally {
+        client.release();
+        logDb('Database connection released after setup.');
     }
-    logDb('Seeded superpower items.');
-
-    await client.query(`INSERT INTO system_settings (setting_key, setting_value) VALUES ('mega_prize_voting_active', 'true') ON CONFLICT (setting_key) DO NOTHING;`);
-    logDb('Seeded system settings.');
-
-  } catch (err) {
-    console.error('[DB] FATAL ERROR during database setup:', err);
-    throw err;
-  } finally {
-    client.release();
-    logDb('Database connection released after setup.');
-  }
 };
 
 const authenticate = async (req, res, next) => {
@@ -462,7 +296,7 @@ const authenticate = async (req, res, next) => {
         req.user.googleId = decodedToken.uid;
     }
 
-    const banCheck = await pool.query('SELECT banned_until FROM territories WHERE owner_id = $1', [req.user.googleId]);
+    const banCheck = await pool.query('SELECT banned_until FROM territories WHERE owner_id = $1 LIMIT 1', [req.user.googleId]);
     if (banCheck.rowCount > 0 && banCheck.rows[0].banned_until && new Date(banCheck.rows[0].banned_until) > new Date()) {
         logAuth(`Authentication failed for user ${req.user.googleId}: Account is banned until ${banCheck.rows[0].banned_until}.`);
         return res.status(403).send('Forbidden: Your account has been temporarily suspended.');
@@ -506,68 +340,17 @@ app.get('/admin/dashboard', checkAdminAuth, (req, res) => res.sendFile(path.join
 app.get('/admin/player_details.html', checkAdminAuth, (req, res) => res.sendFile(path.join(__dirname, 'public', 'player_details.html')));
 app.get('/admin', (req, res) => res.redirect('/admin/login'));
 app.use('/admin/api', checkAdminAuth, adminApiRouter(pool, io, geofenceService, players));
-
-app.post('/admin/api/players/:googleId/manage-superpower', checkAdminAuth, async (req, res) => {
-    const { googleId } = req.params;
-    const { powerId, action } = req.body; 
-
-    try {
-        let newInventory;
-        if (action === 'grant') {
-            newInventory = await superpowerManager.grantPower(googleId, powerId);
-        } else if (action === 'revoke') {
-            newInventory = await superpowerManager.revokePower(googleId, powerId);
-        } else {
-            return res.status(400).json({ message: "Invalid action." });
-        }
-        
-        const playerSocketId = Object.keys(players).find(id => players[id].googleId === googleId);
-        if (playerSocketId) {
-            const onlinePlayer = players[playerSocketId];
-            const ownedList = newInventory.owned || [];
-            onlinePlayer.hasLastStand = ownedList.includes('lastStand');
-            onlinePlayer.hasInfiltrator = ownedList.includes('infiltrator');
-            onlinePlayer.hasGhostRunner = ownedList.includes('ghostRunner');
-            onlinePlayer.hasTrailDefense = ownedList.includes('trailDefense');
-            
-            io.to(playerSocketId).emit('superpowerInventoryUpdated', newInventory);
-            logSocket(`Notified player ${googleId} of superpower update from admin in real-time.`);
-        }
-
-        res.status(200).json({
-            success: true,
-            message: `Successfully ${action === 'grant' ? 'granted' : 'revoked'} '${powerId}'.`,
-            newInventory
-        });
-    } catch (err) {
-        logAdmin(`Error managing superpower for ${googleId}: %O`, err);
-        res.status(500).json({ message: err.message || 'Server error while managing superpower.' });
-    }
-});
-
 app.use('/sponsor', sponsorPortalRouter(pool, io, players));
 app.use('/api/quests', questsApiRouter(pool, authenticate));
 
 app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
 app.get('/ping', (req, res) => { res.status(200).json({ success: true, message: 'pong' }); });
 
-app.put('/users/me/preferences', authenticate, async (req, res) => {
-    const { googleId } = req.user;
-    const { identityColor } = req.body;
-    logApi(`User ${googleId} updating identityColor to ${identityColor}`);
-    if (!identityColor) { return res.status(400).json({ message: 'identityColor is required.' }); }
-    try {
-        await pool.query('UPDATE territories SET identity_color = $1 WHERE owner_id = $2', [identityColor, googleId]);
-        res.status(200).json({ success: true, message: 'Preferences updated.' });
-    } catch (err) {
-        logApi(`Error updating preferences for ${googleId}: %O`, err);
-        res.status(500).json({ message: 'Server error while updating preferences.' });
-    }
-});
-
-app.post('/territory/brand', authenticate, async (req, res) => {
+app.post('/api/territory/:id/brand', authenticate, async (req, res) => {
+    const { id: territoryId } = req.params;
     const { brand } = req.body;
     const { googleId } = req.user;
+
     logApi(`User ${googleId} setting brand '${brand}' for their territory.`);
 
     if (!brand) {
@@ -575,6 +358,7 @@ app.post('/territory/brand', authenticate, async (req, res) => {
     }
 
     try {
+        // Since each user has one territory row, the ID to update is just the user's ID
         const updateResult = await pool.query(
             'UPDATE territories SET brand_wrapper = $1 WHERE owner_id = $2 RETURNING owner_id',
             [brand, googleId]
@@ -594,7 +378,7 @@ app.post('/territory/brand', authenticate, async (req, res) => {
         if (territoryUpdate.rowCount > 0) {
             const updatedData = territoryUpdate.rows.map(row => ({
                 ...row,
-                id: row.ownerId,
+                id: row.ownerId, // For consistency, the client uses an 'id' field
                 geojson: row.geojson ? JSON.parse(row.geojson) : null
             }));
             io.emit('batchTerritoryUpdate', updatedData);
@@ -604,6 +388,20 @@ app.post('/territory/brand', authenticate, async (req, res) => {
     } catch (err) {
         logApi(`Error setting brand for user ${googleId}: %O`, err);
         res.status(500).json({ message: 'Server error while setting brand.' });
+    }
+});
+
+app.put('/users/me/preferences', authenticate, async (req, res) => {
+    const { googleId } = req.user;
+    const { identityColor } = req.body;
+    logApi(`User ${googleId} updating identityColor to ${identityColor}`);
+    if (!identityColor) { return res.status(400).json({ message: 'identityColor is required.' }); }
+    try {
+        await pool.query('UPDATE territories SET identity_color = $1 WHERE owner_id = $2', [identityColor, googleId]);
+        res.status(200).json({ success: true, message: 'Preferences updated.' });
+    } catch (err) {
+        logApi(`Error updating preferences for ${googleId}: %O`, err);
+        res.status(500).json({ message: 'Server error while updating preferences.' });
     }
 });
 
@@ -1122,7 +920,7 @@ io.on('connection', (socket) => {
         const clanId = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].clan_id : null;
         const role = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].role : null;
 
-        const playerProfileRes = await client.query('SELECT has_shield, is_carve_mode_active, username IS NOT NULL as has_record, superpowers FROM territories WHERE owner_id = $1', [googleId]);
+        const playerProfileRes = await client.query('SELECT has_shield, is_carve_mode_active, username IS NOT NULL as has_record, superpowers FROM territories WHERE owner_id = $1 LIMIT 1', [googleId]);
         
         const playerRecord = playerProfileRes.rows[0];
         const hasShield = playerRecord ? playerRecord.has_shield : false;
@@ -1285,6 +1083,71 @@ io.on('connection', (socket) => {
     io.emit('trailCleared', { id: socket.id });
   });
 
+  socket.on('activateTrailDefense', async () => {
+    const player = players[socket.id];
+    if (player && player.hasTrailDefense) {
+        player.isTrailDefenseActive = true;
+        player.hasTrailDefense = false;
+        logGame(`Player ${player.name} activating Trail Defense.`);
+        try {
+            await superpowerManager.usePower(player.googleId, 'trailDefense');
+            socket.emit('superpowerAcknowledged', { power: 'trailDefense' });
+        } catch (err) {
+            logGame(`Failed to use Trail Defense for ${player.name}: %O`, err);
+            player.hasTrailDefense = true;
+        }
+    }
+  });
+
+  socket.on('activateGhostRunner', async () => {
+      const player = players[socket.id];
+      if (player && player.hasGhostRunner) {
+          player.isGhostRunnerActive = true;
+          player.hasGhostRunner = false;
+          logGame(`Player ${player.name} activating Ghost Runner.`);
+          try {
+            await superpowerManager.usePower(player.googleId, 'ghostRunner');
+            socket.emit('superpowerAcknowledged', { power: 'ghostRunner' });
+          } catch(err) {
+            logGame(`Failed to use Ghost Runner for ${player.name}: %O`, err);
+            player.hasGhostRunner = true;
+          }
+      }
+  });
+
+  socket.on('activateInfiltrator', async () => {
+      const player = players[socket.id];
+      if (player && player.hasInfiltrator) {
+          player.isInfiltratorActive = true;
+          player.hasInfiltrator = false;
+          logGame(`Player ${player.name} activating Infiltrator.`);
+          try {
+            await superpowerManager.usePower(player.googleId, 'infiltrator');
+            socket.emit('superpowerAcknowledged', { power: 'infiltrator' });
+          } catch(err) {
+            logGame(`Failed to use Infiltrator for ${player.name}: %O`, err);
+            player.hasInfiltrator = true;
+          }
+      }
+  });
+
+  socket.on('activateLastStand', async () => {
+      const player = players[socket.id];
+      if (player && player.hasLastStand) {
+          player.isLastStandActive = true;
+          player.hasLastStand = false;
+          logGame(`Player ${player.name} activating Last Stand.`);
+          try {
+            await superpowerManager.usePower(player.googleId, 'lastStand');
+            await pool.query('UPDATE territories SET is_shield_active = true WHERE owner_id = $1', [player.googleId]);
+            socket.emit('superpowerAcknowledged', { power: 'lastStand' });
+          } catch(err) {
+            logGame(`Failed to use Last Stand for ${player.name}: %O`, err);
+            player.hasLastStand = true;
+          }
+      }
+  });
+  
   socket.on('claimTerritory', async (req) => {
     const player = players[socket.id];
     if (!player || !player.googleId || !req.gameMode) {
@@ -1328,6 +1191,83 @@ io.on('connection', (socket) => {
         logDb(`ROLLBACK transaction for claim by ${player.name} due to error: ${err.message}`);
         logGame(`Error during territory claim for ${player.name}: %O`, err);
         socket.emit('claimRejected', { reason: err.message || 'Server error during claim.' });
+    } finally {
+        client.release();
+    }
+  });
+
+  socket.on('startConquerAttempt', async ({ territoryId }) => {
+    const player = players[socket.id];
+    if (!player) return;
+
+    try {
+        const res = await pool.query(
+            `SELECT t.owner_id, t.laps_required, cap.path
+             FROM territories t
+             LEFT JOIN captured_area_paths cap ON t.id = cap.territory_id
+             WHERE t.id = $1`,
+            [territoryId]
+        );
+
+        if (res.rowCount === 0 || !res.rows[0].path) {
+            return socket.emit('conquerAttemptFailed', { reason: 'Territory not found or has no path.' });
+        }
+
+        const target = res.rows[0];
+        if (target.owner_id === player.googleId) {
+            return socket.emit('conquerAttemptFailed', { reason: 'You cannot conquer your own territory.' });
+        }
+
+        player.isConquering = true;
+        player.conquerTarget = {
+            territoryId: territoryId,
+            path: target.path,
+            lapsRequired: target.laps_required,
+            lapsCompleted: 0,
+        };
+
+        socket.emit('conquerAttemptStarted', {
+            path: target.path,
+            lapsRequired: target.laps_required
+        });
+        logGame(`Player ${player.name} started conquer attempt on territory ${territoryId}. Laps required: ${target.laps_required}`);
+
+    } catch (err) {
+        logGame(`Error starting conquer attempt for ${player.name}: %O`, err);
+        socket.emit('conquerAttemptFailed', { reason: 'Server error.' });
+    }
+  });
+
+  socket.on('completeConquerAttempt', async ({ territoryId }) => {
+    const player = players[socket.id];
+    if (!player || !player.isConquering || !player.conquerTarget || player.conquerTarget.territoryId != territoryId) {
+        return;
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const result = await handleSoloClaim(io, socket, player, players, { conquerAttempt: player.conquerTarget }, client);
+        if (!result) {
+            await client.query('ROLLBACK');
+            return;
+        }
+        await client.query('COMMIT');
+
+        player.isConquering = false;
+        player.conquerTarget = null;
+
+        socket.emit('conquerAttemptSuccessful', { newTerritoryId: result.newTerritoryId });
+        
+        if (result.updatedTerritories && result.updatedTerritories.length > 0) {
+            io.emit('batchTerritoryUpdate', result.updatedTerritories);
+        }
+        logGame(`Player ${player.name} successfully conquered territory ${territoryId}`);
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        logGame(`Error completing conquer attempt for ${player.name}: %O`, err);
+        socket.emit('conquerAttemptFailed', { reason: err.message });
     } finally {
         client.release();
     }
