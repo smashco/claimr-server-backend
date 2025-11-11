@@ -79,13 +79,11 @@ async function handleSoloClaim(io, socket, player, players, data, client) {
     // Update quest progress
     await updateQuestProgress(userId, 'cover_area', newAreaSqM, client, io, players);
     
-    // ===== FIX START: Only calculate trail length if a valid trail exists =====
     if (trail && trail.length >= 2) {
         const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
         const trailLengthKm = turf.length(trailLineString, { units: 'kilometers' });
         await updateQuestProgress(userId, 'run_trail', trailLengthKm, client, io, players);
     }
-    // ===== FIX END =====
 
     // Fetch all updated territory data to broadcast back to all clients
     const updatedTerritories = [];
@@ -105,7 +103,6 @@ async function handleSoloClaim(io, socket, player, players, data, client) {
             [Array.from(affectedOwnerIds)]
         );
         queryResult.rows.forEach(r => {
-            // Note: The 'id' for a territory in solo mode is simply the owner's ID for consistency on the client
             updatedTerritories.push({...r, id: r.ownerId, geojson: r.geojson ? JSON.parse(r.geojson) : null });
         });
     }
@@ -115,9 +112,9 @@ async function handleSoloClaim(io, socket, player, players, data, client) {
         finalTotalArea: finalTotalArea,
         areaClaimed: newAreaSqM,
         updatedTerritories: updatedTerritories,
-        // In this schema model, the "territory ID" for a user's solo area is just their own ID.
-        // This is a placeholder since we don't have separate territory rows.
-        newTerritoryId: 1 
+        // ===== FIX START: Return the correct user ID =====
+        newTerritoryId: userId 
+        // ===== FIX END =====
     };
 }
 
