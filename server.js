@@ -35,11 +35,9 @@ const http = require('http');
 const path = require('path');
 const cookieParser = require('cookie-parser');
 const { Server } = require("socket.io");
-const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
 const admin = require('firebase-admin');
 const turf = require('@turf/turf');
-const multer = require('multer');
 const debug = require('debug');
 
 // Initialize namespaced debuggers
@@ -80,24 +78,14 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
-const upload = multer({ storage: multer.memoryStorage() });
 
 const server = http.createServer(app);
-
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST", "PUT", "DELETE"]
-  }
-});
+const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST", "PUT", "DELETE"] } });
 
 try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      storageBucket: 'claimr-6464.firebasestorage.app'
-    });
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
     logLifecycle('Firebase Admin initialized successfully.');
   } else {
     logLifecycle('Firebase Admin skipping initialization (FIREBASE_SERVICE_ACCOUNT env var not set).');
@@ -108,10 +96,7 @@ try {
 
 let razorpay;
 if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
-  razorpay = new Razorpay({
-    key_id: process.env.RAZORPAY_KEY_ID,
-    key_secret: process.env.RAZORPAY_KEY_SECRET,
-  });
+  razorpay = new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_KEY_SECRET });
   logLifecycle('Razorpay initialized successfully.');
 } else {
   console.warn('[Razorpay] Skipping initialization (RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET not set in env).');
@@ -480,7 +465,7 @@ app.use('/admin/api', checkAdminAuth, adminApiRouter(pool, io, geofenceService, 
 app.use('/sponsor', sponsorPortalRouter(pool, io, players));
 app.use('/api/quests', questsApiRouter(pool, authenticate));
 
-// User & Profile Routes
+// User Profile & Data Routes
 app.get('/check-profile', authenticate, async (req, res) => {
     const { googleId } = req.user;
     logApi(`Checking profile for authenticated user: ${googleId}`);
@@ -588,23 +573,6 @@ app.post('/setup-profile', authenticate, async (req, res) => {
     }
 });
 
-app.get('/users/check-username', async (req, res) => {
-    const { username } = req.query;
-    logApi(`Checking username availability for: ${username}`);
-    if (!username) {
-      return res.status(400).json({ error: 'Username query parameter is required.' });
-    }
-    try {
-        const result = await pool.query('SELECT 1 FROM territories WHERE username ILIKE $1', [username]);
-        const isAvailable = result.rowCount === 0;
-        logApi(`Username '${username}' is available: ${isAvailable}`);
-        res.json({ available: isAvailable }); 
-    } catch (err) {
-        logApi(`Error in /users/check-username for ${username}: %O`, err);
-        res.status(500).json({ error: 'Server error while checking username.' });
-    }
-});
-
 app.put('/users/me/preferences', authenticate, async (req, res) => {
     const { googleId } = req.user;
     const { identityColor } = req.body;
@@ -683,6 +651,7 @@ app.get('/users/me/stats', authenticate, async (req, res) => {
         res.status(500).json({ message: 'Server error while fetching stats.' });
     }
 });
+
 
 // Shop & Payment Routes
 app.get('/shop/items', authenticate, async (req, res) => {
@@ -767,7 +736,8 @@ app.post('/verify-payment', async (req, res) => {
     }
 });
 
-// Leaderboard & Game Data
+
+// Game Data & Leaderboard Routes
 app.get('/leaderboard', async (req, res) => {
     logApi('Fetching player leaderboard with full stats.');
     try {
@@ -1018,6 +988,7 @@ app.post('/clans/:id/requests', authenticate, async (req, res) => {
     }
 });
 
+
 // --- SOCKET.IO LOGIC ---
 io.on('connection', (socket) => {
   logSocket(`User connected: ${socket.id}`);
@@ -1107,12 +1078,15 @@ io.on('connection', (socket) => {
         else if (gameMode === 'solo') {
             const query = `
                 SELECT
+                    id,
                     owner_id as "ownerId",
                     username as "ownerName",
                     profile_image_url as "profileImageUrl",
                     identity_color,
                     ST_AsGeoJSON(area) as geojson,
-                    area_sqm as area
+                    area_sqm as area,
+                    laps_required,
+                    brand_wrapper
                 FROM territories
                 WHERE area IS NOT NULL AND NOT ST_IsEmpty(area);
             `;
@@ -1122,16 +1096,6 @@ io.on('connection', (socket) => {
 
         logSocket(`Found ${activeTerritories.length} [${gameMode}] territories. Sending 'existingTerritories' to ${socket.id}.`);
         socket.emit('existingTerritories', { territories: activeTerritories, playerHasRecord: playerHasRecord });
-
-        const activeTrails = [];
-        for (const playerId in players) {
-          if (players[playerId].isDrawing && players[playerId].activeTrail.length > 0 && players[playerId].gameMode === gameMode) {
-            activeTrails.push({ id: playerId, trail: players[playerId].activeTrail });
-          }
-        }
-        if (activeTrails.length > 0) {
-          socket.emit('existingLiveTrails', activeTrails);
-        }
 
     } catch (err) {
       logSocket(`FATAL ERROR in playerJoined for ${socket.id}: %O`, err);
@@ -1358,11 +1322,14 @@ io.on('connection', (socket) => {
         await client.query('COMMIT');
         logDb(`COMMIT transaction for claim by ${player.name}.`);
 
-        socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed, newTerritoryId: newTerritoryId });
+        socket.emit('claimSuccessful', { 
+            newTotalArea: finalTotalArea, 
+            areaClaimed: areaClaimed, 
+            newTerritoryId: newTerritoryId,
+            newTerritoryData: updatedTerritories.find(t => t.ownerId === player.googleId)
+        });
         
-        if (updatedTerritories && updatedTerritories.length > 0) {
-            io.emit('batchTerritoryUpdate', updatedTerritories);
-        }
+        io.emit('batchTerritoryUpdate', updatedTerritories);
 
         player.isDrawing = false;
         player.activeTrail = [];
@@ -1479,7 +1446,6 @@ const main = async () => {
         console.error("[SERVER] FATAL: Failed to setup database after server start:", err);
         process.exit(1);
     });
-
     setInterval(checkForScheduledReset, 60 * 1000);
   });
 };
