@@ -6,14 +6,10 @@ const debug = require('debug')('server:game');
 
 const SOLO_BASE_RADIUS_METERS = 30.0;
 
-/**
-* Handles a player's attempt to claim territory in solo mode.
-*/
-// <<< SOLUTION: The function signature was wrong. It should accept the `req` object.
 async function handleSoloClaim(io, socket, player, players, req, client, superpowerManager) {
    debug(`\n\n[SOLO_HANDLER] =================== NEW SOLO CLAIM ===================`);
   
-   const { trail, baseClaim } = req; // <<< SOLUTION: Destructure trail and baseClaim from req
+   const { trail, baseClaim } = req;
    const userId = player.googleId;
    const isInitialBaseClaim = !!baseClaim;
 
@@ -39,6 +35,8 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
            const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
            const overlapCheck = await client.query(`SELECT 1 FROM territories WHERE ST_Intersects(area, ${newAreaWKT});`);
            if (overlapCheck.rowCount > 0) {
+               // This is a normal overlap, not necessarily a shield block.
+               // It's still a reason to reject the claim.
                throw new Error('Base overlaps existing territory.');
            }
        } else {
@@ -57,12 +55,12 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
        }
    } catch (err) {
        debug(`[SOLO_HANDLER] ERROR during geometry definition: ${err.message}`);
-       throw err;
+       throw err; // Propagate the error up to be caught in server.js
    }
 
    const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
    const victimsRes = await client.query(`
-       SELECT owner_id, username, area, is_shield_active
+       SELECT owner_id, username, is_shield_active
        FROM territories
        WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
    `, [userId]);
@@ -71,12 +69,14 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
    const affectedOwnerIds = new Set([userId]);
    let attackPolygonGeometry = newAreaPolygon.geometry;
 
+   // <<< SOLUTION START: Handle shield block by throwing an error >>>
    for (const victim of victimsRes.rows) {
        affectedOwnerIds.add(victim.owner_id);
 
        if (victim.is_shield_active) {
            debug(`[SOLO_HANDLER] ATTACK BLOCKED! Attacker ${player.name} hit ${victim.username}'s shield.`);
           
+           // We can still emit events here before throwing
            io.to(socket.id).emit('runTerminated', { reason: `Your run was blocked by ${victim.username}'s Last Stand!` });
           
            const victimSocketId = Object.keys(players).find(id => players[id].googleId === victim.owner_id);
@@ -90,9 +90,11 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
            player.activeTrail = [];
            io.emit('trailCleared', { id: socket.id });
           
-           return null;
+           // Instead of returning null, throw an error that will be sent to the user.
+           throw new Error(`Your claim was blocked by ${victim.username}'s Last Stand!`);
        }
    }
+   // <<< SOLUTION END >>>
 
    for (const victim of victimsRes.rows) {
        debug(`[SOLO_HANDLER] Calculating damage for victim: ${victim.username}`);
@@ -122,8 +124,12 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
    const finalAreaSqM = finalAreaSqMRes.rows[0].area || 0;
    debug(`[SOLO_HANDLER] Final total area for ${player.name}: ${finalAreaSqM.toFixed(2)} sqm`);
   
+   // Use INSERT ... ON CONFLICT DO UPDATE to handle both new and existing user records gracefully
    await client.query(
-       `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3`,
+       `INSERT INTO territories (owner_id, area, area_sqm) 
+        VALUES ($3, ST_GeomFromGeoJSON($1), $2)
+        ON CONFLICT (owner_id) DO UPDATE 
+        SET area = ST_GeomFromGeoJSON($1), area_sqm = $2;`,
        [finalAreaGeoJSON, finalAreaSqM, userId]
    );
 
