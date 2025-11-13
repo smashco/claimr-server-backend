@@ -1586,7 +1586,7 @@ io.on('connection', (socket) => {
         await client.query('BEGIN');
         let result;
         if (gameMode === 'solo') {
-            result = await handleSoloClaim(io, socket, player, players, { trail, baseClaim }, client);
+           // result = await handleSoloClaim(io, socket, player, players, { trail, baseClaim }, client);
         } else if (gameMode === 'clan') {
             result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client);
         }

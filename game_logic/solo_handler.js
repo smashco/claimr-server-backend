@@ -9,9 +9,11 @@ const SOLO_BASE_RADIUS_METERS = 30.0;
 /**
 * Handles a player's attempt to claim territory in solo mode.
 */
-async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client, superpowerManager) {
+// <<< SOLUTION: The function signature was wrong. It should accept the `req` object.
+async function handleSoloClaim(io, socket, player, players, req, client, superpowerManager) {
    debug(`\n\n[SOLO_HANDLER] =================== NEW SOLO CLAIM ===================`);
   
+   const { trail, baseClaim } = req; // <<< SOLUTION: Destructure trail and baseClaim from req
    const userId = player.googleId;
    const isInitialBaseClaim = !!baseClaim;
 
@@ -24,14 +26,10 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
        if (isInitialBaseClaim) {
            debug(`[SOLO_HANDLER] Processing Initial Base Claim. Received baseClaim object:`, baseClaim);
            
-           // <<< SOLUTION START >>>
-           // Validate that baseClaim contains the necessary numeric coordinates.
            if (typeof baseClaim.lng !== 'number' || typeof baseClaim.lat !== 'number') {
                throw new Error('Invalid coordinates in baseClaim object. `lat` and `lng` must be numbers.');
            }
            const center = [baseClaim.lng, baseClaim.lat];
-           // <<< SOLUTION END >>>
-
            const radius = baseClaim.radius || SOLO_BASE_RADIUS_METERS;
           
            newAreaPolygon = turf.circle(center, radius, { units: 'meters' });
