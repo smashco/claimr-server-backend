@@ -1,29 +1,13 @@
 // game_logic/solo_handler.js
 
-
-// Import required libraries and modules
 const turf = require('@turf/turf');
 const { updateQuestProgress } = require('./quest_handler');
 const debug = require('debug')('server:game');
 
-
 const SOLO_BASE_RADIUS_METERS = 30.0;
-
 
 /**
 * Handles a player's attempt to claim territory in solo mode.
-* This can be an initial base claim or an expansion of existing territory.
-* It now correctly handles shield interactions before applying damage to other players.
-*
-* @param {object} io - The Socket.IO server instance, used for emitting events to clients.
-* @param {object} socket - The socket of the specific player making the claim.
-* @param {object} player - The internal server state object for the attacking player.
-* @param {object} players - The global object containing all currently online players.
-* @param {Array<object>} trail - An array of {lat, lng} points forming the new territory boundary.
-* @param {object|null} baseClaim - If this is an initial base claim, this object contains the center {lat, lng} and radius. Null otherwise.
-* @param {object} client - The active PostgreSQL database client for running queries within a transaction.
-* @param {object} superpowerManager - The instance of the SuperpowerManager, used to handle shield consumption.
-* @returns {Promise<object|null>} Returns an object with the results of the successful claim, or null if the claim was stopped (e.g., by a shield).
 */
 async function handleSoloClaim(io, socket, player, players, trail, baseClaim, client, superpowerManager) {
    debug(`\n\n[SOLO_HANDLER] =================== NEW SOLO CLAIM ===================`);
@@ -31,24 +15,28 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
    const userId = player.googleId;
    const isInitialBaseClaim = !!baseClaim;
 
-
    debug(`[SOLO_HANDLER] Claim by: ${player.name} (${userId})`);
    debug(`[SOLO_HANDLER] Claim Type: ${isInitialBaseClaim ? 'INITIAL BASE' : 'EXPANSION'}`);
 
-
    let newAreaPolygon, newAreaSqM;
-
 
    try {
        if (isInitialBaseClaim) {
-           debug(`[SOLO_HANDLER] Processing Initial Base Claim.`);
+           debug(`[SOLO_HANDLER] Processing Initial Base Claim. Received baseClaim object:`, baseClaim);
+           
+           // <<< SOLUTION START >>>
+           // Validate that baseClaim contains the necessary numeric coordinates.
+           if (typeof baseClaim.lng !== 'number' || typeof baseClaim.lat !== 'number') {
+               throw new Error('Invalid coordinates in baseClaim object. `lat` and `lng` must be numbers.');
+           }
            const center = [baseClaim.lng, baseClaim.lat];
+           // <<< SOLUTION END >>>
+
            const radius = baseClaim.radius || SOLO_BASE_RADIUS_METERS;
           
            newAreaPolygon = turf.circle(center, radius, { units: 'meters' });
            newAreaSqM = turf.area(newAreaPolygon);
            debug(`[SOLO_HANDLER] Base area calculated: ${newAreaSqM.toFixed(2)} sqm`);
-
 
            const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
            const overlapCheck = await client.query(`SELECT 1 FROM territories WHERE ST_Intersects(area, ${newAreaWKT});`);
@@ -74,7 +62,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
        throw err;
    }
 
-
    const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
    const victimsRes = await client.query(`
        SELECT owner_id, username, area, is_shield_active
@@ -83,14 +70,11 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
    `, [userId]);
    debug(`[SOLO_HANDLER] Found ${victimsRes.rowCount} overlapping enemy territories.`);
 
-
    const affectedOwnerIds = new Set([userId]);
    let attackPolygonGeometry = newAreaPolygon.geometry;
 
-
    for (const victim of victimsRes.rows) {
        affectedOwnerIds.add(victim.owner_id);
-
 
        if (victim.is_shield_active) {
            debug(`[SOLO_HANDLER] ATTACK BLOCKED! Attacker ${player.name} hit ${victim.username}'s shield.`);
@@ -102,9 +86,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
                io.to(victimSocketId).emit('lastStandActivated', { attacker: player.name });
            }
 
-
            await superpowerManager.consumePower(victim.owner_id, 'lastStand', client);
-
 
            player.isDrawing = false;
            player.activeTrail = [];
@@ -114,12 +96,10 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
        }
    }
 
-
    for (const victim of victimsRes.rows) {
        debug(`[SOLO_HANDLER] Calculating damage for victim: ${victim.username}`);
        const victimGeomRes = await client.query(`SELECT ST_AsGeoJSON(area) as geojson FROM territories WHERE owner_id = $1`, [victim.owner_id]);
        const victimPolygon = JSON.parse(victimGeomRes.rows[0].geojson);
-
 
        const remainingVictimArea = turf.difference(victimPolygon, attackPolygonGeometry);
       
@@ -133,7 +113,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
   
    const userExistingRes = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
    let finalAreaGeoJSON = JSON.stringify(attackPolygonGeometry);
-
 
    if (userExistingRes.rowCount > 0 && userExistingRes.rows[0].area) {
        debug(`[SOLO_HANDLER] Merging new area with existing land for user ${userId}`);
@@ -150,13 +129,7 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
        [finalAreaGeoJSON, finalAreaSqM, userId]
    );
 
-
-   // =======================================================================//
-   // ========================== FIX STARTS HERE ==========================//
-   // =======================================================================//
-   // The objective_type in the database is 'cover_area', not 'claim_area'.
    await updateQuestProgress(userId, 'cover_area', Math.round(newAreaSqM), client, io, players);
-
 
    if (!isInitialBaseClaim && trail.length > 0) {
        const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
@@ -164,10 +137,6 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
        debug(`[SOLO_HANDLER] Trail length for this claim was ${trailLengthKm.toFixed(3)} km.`);
        await updateQuestProgress(userId, 'run_trail', trailLengthKm, client, io, players);
    }
-   // =======================================================================//
-   // =========================== FIX ENDS HERE ===========================//
-   // =======================================================================//
-
 
    debug(`[SOLO_HANDLER] SUCCESS: Claim transaction for ${player.name} is ready to be committed.`);
   
@@ -178,7 +147,4 @@ async function handleSoloClaim(io, socket, player, players, trail, baseClaim, cl
    };
 }
 
-
 module.exports = handleSoloClaim;
-
-//vsdgdvs/wxws
