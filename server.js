@@ -1577,43 +1577,42 @@ io.on('connection', (socket) => {
     const player = players[socket.id];
     if (!player || !player.googleId || !req.gameMode) {
       logSocket(`Invalid claimTerritory request from ${socket.id}`);
-      return;
+      return socket.emit('claimRejected', { reason: 'Invalid player data.' });
     }
     logGame(`Player ${player.name} (${socket.id}) is attempting to claim territory.`);
     const { gameMode, trail, baseClaim } = req;
     const client = await pool.connect();
     try {
-        logDb(`BEGIN transaction for claim by ${player.name}.`);
         await client.query('BEGIN');
         let result;
         if (gameMode === 'solo') {
-            result = await handleSoloClaim(io, socket, player, players, trail, baseClaim, client);
+            result = await handleSoloClaim(io, socket, player, players, { trail, baseClaim }, client);
         } else if (gameMode === 'clan') {
             result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client);
         }
+        
         if (!result) {
             await client.query('ROLLBACK');
-            logDb(`ROLLBACK transaction for claim by ${player.name}, handler returned no result.`);
+            logDb(`ROLLBACK transaction for claim by ${player.name}, handler returned null.`);
             return;
         }
-        const { finalTotalArea, areaClaimed, ownerIdsToUpdate } = result;
+
+        // <<< THIS IS THE FIX: We now correctly get newTerritoryId from the result
+        const { finalTotalArea, areaClaimed, updatedTerritories, newTerritoryId } = result;
         await client.query('COMMIT');
         logDb(`COMMIT transaction for claim by ${player.name}.`);
-        socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed });
+
+        // <<< THIS IS THE FIX: We now send newTerritoryId back to the client
+        socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed, newTerritoryId: newTerritoryId });
         
-        const soloOwnersToUpdate = ownerIdsToUpdate.filter(id => typeof id === 'string');
-        let batchUpdateData = [];
-        if (soloOwnersToUpdate.length > 0) {
-            const soloQueryResult = await client.query(`SELECT owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl", identity_color, ST_AsGeoJSON(area) as geojson, area_sqm as area FROM territories WHERE owner_id = ANY($1::varchar[]);`, [soloOwnersToUpdate]);
-            batchUpdateData = batchUpdateData.concat(soloQueryResult.rows.map(r => ({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null })));
-        }
-        if (batchUpdateData.length > 0) {
-            io.emit('batchTerritoryUpdate', batchUpdateData);
+        if (updatedTerritories && updatedTerritories.length > 0) {
+            io.emit('batchTerritoryUpdate', updatedTerritories);
         }
 
         player.isDrawing = false;
         player.activeTrail = [];
         io.emit('trailCleared', { id: socket.id });
+
     } catch (err) {
         await client.query('ROLLBACK');
         logDb(`ROLLBACK transaction for claim by ${player.name} due to error: ${err.message}`);
@@ -1622,7 +1621,8 @@ io.on('connection', (socket) => {
     } finally {
         client.release();
     }
-  });
+});
+
 
   socket.on('disconnect', () => {
     const player = players[socket.id];
