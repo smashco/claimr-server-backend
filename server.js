@@ -565,7 +565,7 @@ app.post('/setup-profile', authenticate, async (req, res) => {
     const { googleId } = req.user;
     const { username, imageUrl, displayName, phoneNumber, instagramId } = req.body;
     logApi(`Setting up profile for user ${googleId} with username ${username}.`);
-    if (!username || !imageUrl || !displayName || !phoneNumber) {
+    if (!username || !imageUrl || !displayName) {
         return res.status(400).json({ error: 'Missing required profile data.' });
     }
     let uniqueId, isUnique = false;
