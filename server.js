@@ -652,7 +652,6 @@ app.get('/users/me/stats', authenticate, async (req, res) => {
     }
 });
 
-
 // Shop & Payment Routes
 app.get('/shop/items', authenticate, async (req, res) => {
     logApi(`Fetching shop items for user ${req.user.googleId}`);
@@ -736,8 +735,114 @@ app.post('/verify-payment', async (req, res) => {
     }
 });
 
+// Game Data, Brand, and Leaderboard Routes
+app.post('/api/territory/:id/brand', authenticate, async (req, res) => {
+    const { id: territoryId } = req.params;
+    const { brand } = req.body;
+    const { googleId } = req.user;
 
-// Game Data & Leaderboard Routes
+    logApi(`User ${googleId} setting brand '${brand}' for territory ID ${territoryId}.`);
+
+    if (!brand) {
+        return res.status(400).json({ message: 'Brand name is required.' });
+    }
+
+    try {
+        const updateResult = await pool.query(
+            'UPDATE territories SET brand_wrapper = $1 WHERE id = $2 AND owner_id = $3 RETURNING owner_id',
+            [brand, territoryId, googleId]
+        );
+        
+        if (updateResult.rowCount === 0) {
+            return res.status(404).json({ message: 'Territory not found or you do not own it.' });
+        }
+        
+        const territoryUpdate = await pool.query(`
+            SELECT
+                id, owner_id as "ownerId", username as "ownerName", profile_image_url as "profileImageUrl",
+                identity_color, ST_AsGeoJSON(area) as geojson, area_sqm as area, laps_required, brand_wrapper
+            FROM territories WHERE id = $1
+        `, [territoryId]);
+        
+        if (territoryUpdate.rowCount > 0) {
+            const updatedData = territoryUpdate.rows.map(row => ({
+                ...row,
+                geojson: row.geojson ? JSON.parse(row.geojson) : null
+            }));
+            io.emit('batchTerritoryUpdate', updatedData);
+        }
+
+        res.status(200).json({ success: true, message: 'Brand applied successfully.' });
+    } catch (err) {
+        logApi(`Error setting brand for user ${googleId}: %O`, err);
+        res.status(500).json({ message: 'Server error while setting brand.' });
+    }
+});
+
+app.get('/shop/mega-prize', authenticate, async (req, res) => {
+    const { googleId } = req.user;
+    logApi(`Fetching mega prize data for user ${googleId}`);
+    try {
+        const settingsRes = await pool.query("SELECT setting_value FROM system_settings WHERE setting_key = 'mega_prize_voting_active'");
+        const voting_active = settingsRes.rowCount > 0 && settingsRes.rows[0].setting_value === 'true';
+
+        const candidatesRes = await pool.query(`
+            SELECT c.id, c.name, c.brand, COUNT(v.user_id)::int as vote_count
+            FROM mega_prize_candidates c
+            LEFT JOIN mega_prize_votes v ON c.id = v.candidate_id
+            WHERE c.is_active = TRUE
+            GROUP BY c.id ORDER BY c.id;
+        `);
+        
+        const winnersRes = await pool.query(`
+            SELECT w.prize_name, w.win_date, t.username
+            FROM mega_prize_winners w
+            JOIN territories t ON w.winner_user_id = t.owner_id
+            ORDER BY w.win_date DESC LIMIT 10;
+        `);
+
+        const userVoteRes = await pool.query('SELECT candidate_id FROM mega_prize_votes WHERE user_id = $1', [googleId]);
+
+        res.json({
+            voting_active,
+            candidates: candidatesRes.rows,
+            winners: winnersRes.rows,
+            user_vote_id: userVoteRes.rowCount > 0 ? userVoteRes.rows[0].candidate_id : null,
+        });
+
+    } catch (err) {
+        logApi(`Error fetching mega prize data for user ${googleId}: %O`, err);
+        res.status(500).json({ message: 'Server error while fetching mega prize data.' });
+    }
+});
+
+app.post('/shop/mega-prize/vote', authenticate, async (req, res) => {
+    const { googleId } = req.user;
+    const { candidateId } = req.body;
+    logApi(`User ${googleId} voting for mega prize candidate ${candidateId}`);
+    if (!candidateId) {
+        return res.status(400).json({ message: 'Candidate ID is required.' });
+    }
+    try {
+        const settingsRes = await pool.query("SELECT setting_value FROM system_settings WHERE setting_key = 'mega_prize_voting_active'");
+        if (!(settingsRes.rowCount > 0 && settingsRes.rows[0].setting_value === 'true')) {
+            return res.status(403).json({ message: 'Voting is not currently active.' });
+        }
+        await pool.query(
+            `INSERT INTO mega_prize_votes (user_id, candidate_id) VALUES ($1, $2)
+             ON CONFLICT (user_id) DO UPDATE SET candidate_id = $2, voted_at = CURRENT_TIMESTAMP;`,
+            [googleId, candidateId]
+        );
+        res.status(200).json({ success: true, message: 'Vote cast successfully.' });
+    } catch (err) {
+        logApi(`Error casting vote for user ${googleId}: %O`, err);
+        if (err.code === '23503') { 
+            return res.status(404).json({ message: 'Invalid prize candidate.' });
+        }
+        res.status(500).json({ message: 'Server error while casting vote.' });
+    }
+});
+
 app.get('/leaderboard', async (req, res) => {
     logApi('Fetching player leaderboard with full stats.');
     try {
@@ -785,7 +890,7 @@ app.get('/leaderboard/clans', async (req, res) => {
         const result = await pool.query(query);
         res.status(200).json(result.rows);
     } catch (err) {
-        logApi('Error fetching clan leaderboard: %O', err);
+        logApi('Error fetching clan leaderboard: %O`, err);
         res.status(500).json({ error: 'Failed to fetch clan leaderboard.' });
     }
 });
