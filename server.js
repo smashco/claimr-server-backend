@@ -551,7 +551,6 @@ app.post('/setup-profile', authenticate, async (req, res) => {
     const { username, imageUrl, displayName, phoneNumber, instagramId } = req.body;
     logApi(`Setting up profile for user ${googleId} with username ${username}.`);
     
-    // phoneNumber is now optional
     if (!username || !imageUrl || !displayName) {
         return res.status(400).json({ error: 'Missing required profile data.' });
     }
@@ -652,7 +651,8 @@ app.get('/users/me/stats', authenticate, async (req, res) => {
     }
 });
 
-// Shop & Payment Routes
+
+// Shop, Payment, Brand, and Mega Prize Routes
 app.get('/shop/items', authenticate, async (req, res) => {
     logApi(`Fetching shop items for user ${req.user.googleId}`);
     try {
@@ -735,7 +735,6 @@ app.post('/verify-payment', async (req, res) => {
     }
 });
 
-// Game Data, Brand, and Leaderboard Routes
 app.post('/api/territory/:id/brand', authenticate, async (req, res) => {
     const { id: territoryId } = req.params;
     const { brand } = req.body;
@@ -843,6 +842,8 @@ app.post('/shop/mega-prize/vote', authenticate, async (req, res) => {
     }
 });
 
+
+// Leaderboard & Clan Routes
 app.get('/leaderboard', async (req, res) => {
     logApi('Fetching player leaderboard with full stats.');
     try {
@@ -890,12 +891,11 @@ app.get('/leaderboard/clans', async (req, res) => {
         const result = await pool.query(query);
         res.status(200).json(result.rows);
     } catch (err) {
-        logApi('Error fetching clan leaderboard: %O`, err);
+        logApi('Error fetching clan leaderboard: %O', err);
         res.status(500).json({ error: 'Failed to fetch clan leaderboard.' });
     }
 });
 
-// Clan Routes
 app.post('/clans', authenticate, async (req, res) => {
     const { name, tag, description } = req.body;
     const leaderId = req.user.googleId;
