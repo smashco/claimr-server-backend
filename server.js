@@ -256,7 +256,7 @@ const setupDatabase = async () => {
       );
     `);
         logDb('"geofence_zones" table is ready.');
-        
+
         await client.query(`
       CREATE TABLE IF NOT EXISTS sponsors (
         id SERIAL PRIMARY KEY,
@@ -267,7 +267,7 @@ const setupDatabase = async () => {
       );
     `);
         logDb('"sponsors" table is ready.');
-
+        
         await client.query(`
       CREATE TABLE IF NOT EXISTS quests (
             id SERIAL PRIMARY KEY,
@@ -373,7 +373,7 @@ const setupDatabase = async () => {
       );
     `);
         logDb('"system_settings" table is ready.');
-        
+
         await client.query(`
       CREATE TABLE IF NOT EXISTS daily_logins (
         user_id VARCHAR(255) NOT NULL REFERENCES territories(owner_id) ON DELETE CASCADE,
@@ -382,7 +382,7 @@ const setupDatabase = async () => {
       );
     `);
         logDb('"daily_logins" table is ready.');
-        
+
         const superpowerItems = [
           { id: 'lastStand', name: 'Last Stand', description: 'Protects your territory from the next attack.', price: 29 },
           { id: 'infiltrator', name: 'Infiltrator', description: 'Start a run from deep within enemy territory.', price: 29 },
@@ -565,27 +565,24 @@ app.post('/setup-profile', authenticate, async (req, res) => {
     const { googleId } = req.user;
     const { username, imageUrl, displayName, phoneNumber, instagramId } = req.body;
     logApi(`Setting up profile for user ${googleId} with username ${username}.`);
+    
+    // phoneNumber is now optional
     if (!username || !imageUrl || !displayName) {
         return res.status(400).json({ error: 'Missing required profile data.' });
     }
-    let uniqueId, isUnique = false;
-    while (!isUnique) {
-        uniqueId = Math.random().toString(36).substring(2, 8).toUpperCase();
-        const check = await pool.query('SELECT 1 FROM territories WHERE unique_player_id = $1', [uniqueId]);
-        if (check.rowCount === 0) isUnique = true;
-    }
+
     try {
         await pool.query(
-            `INSERT INTO territories (owner_id, unique_player_id, phone_number, instagram_id, owner_name, username, profile_image_url, area, area_sqm, is_paid)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), 0, FALSE)
-             ON CONFLICT (owner_id) DO UPDATE SET
-                username = $6, profile_image_url = $7, owner_name = $5, phone_number = $3, instagram_id = $4;`,
-            [googleId, uniqueId, phoneNumber, instagramId || null, displayName, username, imageUrl]
+            `INSERT INTO territories (owner_id, owner_name, username, profile_image_url, phone_number, instagram_id, area, area_sqm, is_paid)
+             VALUES ($1, $2, $3, $4, $5, $6, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), 0, FALSE)
+             ON CONFLICT (owner_id) DO NOTHING;`,
+            [googleId, displayName, username, imageUrl, phoneNumber || null, instagramId || null]
         );
         res.status(200).json({ success: true, message: 'Profile set up successfully.' });
     } catch (err) {
-        if (err.code === '23505' && err.constraint === 'territories_username_key') return res.status(409).json({ message: 'Username is already taken.' });
-        if (err.code === '23505' && err.constraint === 'territories_unique_player_id_key') return res.status(500).json({ message: 'Failed to generate a unique player ID. Please try again.'});
+        if (err.code === '23505' && err.constraint === 'territories_username_key') {
+            return res.status(409).json({ message: 'Username is already taken.' });
+        }
         logApi(`Error setting up profile for ${googleId}: %O`, err);
         res.status(500).json({ error: 'Failed to set up profile.' });
     }
@@ -619,22 +616,6 @@ app.put('/users/me/preferences', authenticate, async (req, res) => {
     } catch (err) {
         logApi(`Error updating preferences for ${googleId}: %O`, err);
         res.status(500).json({ message: 'Server error while updating preferences.' });
-    }
-});
-
-app.put('/users/me/trail-effect', authenticate, async (req, res) => {
-    const { googleId } = req.user;
-    const { trailEffect } = req.body;
-    logApi(`User ${googleId} updating trail effect to ${trailEffect}`);
-    if (!trailEffect) { 
-        return res.status(400).json({ message: 'trailEffect is required.' }); 
-    }
-    try {
-        await pool.query('UPDATE territories SET trail_effect = $1 WHERE owner_id = $2', [trailEffect, googleId]);
-        res.status(200).json({ success: true, message: 'Trail effect updated.' });
-    } catch (err) {
-        logApi(`Error updating trail effect for ${googleId}: %O`, err);
-        res.status(500).json({ message: 'Server error while updating trail effect.' });
     }
 });
 
@@ -703,7 +684,6 @@ app.get('/users/me/stats', authenticate, async (req, res) => {
     }
 });
 
-
 // Shop & Payment Routes
 app.get('/shop/items', authenticate, async (req, res) => {
     logApi(`Fetching shop items for user ${req.user.googleId}`);
@@ -731,37 +711,6 @@ app.post('/shop/create-order', authenticate, async (req, res) => {
     } catch (err) {
         logPayment(`Order creation failed for ${googleId}: %O`, err);
         res.status(err.message.includes('already own') ? 409 : 500).json({ message: err.message });
-    }
-});
-
-app.post('/shop/create-subscription-order', authenticate, async (req, res) => {
-    const { googleId } = req.user;
-    const SUBSCRIPTION_AMOUNT_PAISE = 6900; // ₹69 in paise
-
-    logPayment(`User ${googleId} requesting to create subscription order.`);
-
-    if (!razorpay) {
-        logPayment('[FAIL] Razorpay is not initialized. Cannot create order.');
-        return res.status(500).json({ message: 'Payment gateway is not configured.' });
-    }
-
-    const options = {
-        amount: SUBSCRIPTION_AMOUNT_PAISE,
-        currency: "INR",
-        receipt: `sub_${googleId.slice(-8)}_${crypto.randomBytes(4).toString('hex')}`,
-        notes: {
-            googleId: googleId,
-            purchaseType: 'subscription'
-        }
-    };
-
-    try {
-        const order = await razorpay.orders.create(options);
-        logPayment(`[SUCCESS] Created subscription order ${order.id} for user ${googleId}.`);
-        res.json({ orderId: order.id, amount: order.amount });
-    } catch (error) {
-        logPayment(`[ERROR] Razorpay order creation failed for ${googleId}: %O`, error);
-        res.status(500).json({ message: 'Failed to create payment order.' });
     }
 });
 
@@ -818,112 +767,7 @@ app.post('/verify-payment', async (req, res) => {
     }
 });
 
-app.get('/subscription/status', authenticate, async (req, res) => {
-    logPayment(`Fetching subscription status for user ${req.user.googleId}`);
-    try {
-        const result = await pool.query('SELECT razorpay_subscription_id, subscription_status FROM territories WHERE owner_id = $1', [req.user.googleId]);
-        if (result.rowCount === 0 || !result.rows[0].razorpay_subscription_id) {
-            return res.status(404).json({ message: 'No active subscription found.' });
-        }
-        
-        const subscription = await razorpay.subscriptions.fetch(result.rows[0].razorpay_subscription_id);
-        res.json({
-            status: subscription.status,
-            current_start: new Date(subscription.current_start * 1000),
-            current_end: new Date(subscription.current_end * 1000),
-            charge_at: new Date(subscription.charge_at * 1000),
-        });
-    } catch (err) {
-        logPayment(`Error fetching subscription status for ${req.user.googleId}: %O`, err);
-        res.status(500).json({ error: 'Server error while fetching status.' });
-    }
-});
-
-app.post('/subscription/cancel', authenticate, async (req, res) => {
-    logPayment(`Attempting to cancel subscription for user ${req.user.googleId}`);
-    try {
-        const result = await pool.query('SELECT razorpay_subscription_id FROM territories WHERE owner_id = $1', [req.user.googleId]);
-        if (result.rowCount === 0 || !result.rows[0].razorpay_subscription_id) {
-            return res.status(404).json({ message: 'No active subscription found.' });
-        }
-        
-        await razorpay.subscriptions.cancel(result.rows[0].razorpay_subscription_id, { cancel_at_cycle_end: false });
-        
-        await pool.query("UPDATE territories SET subscription_status = 'cancelled' WHERE owner_id = $1", [req.user.googleId]);
-
-        res.json({ success: true, message: 'Your subscription has been cancelled.' });
-    } catch (err) {
-        logPayment(`Error cancelling subscription for ${req.user.googleId}: %O`, err);
-        res.status(500).json({ error: 'Server error while cancelling.' });
-    }
-});
-
-app.get('/shop/mega-prize', authenticate, async (req, res) => {
-    const { googleId } = req.user;
-    logApi(`Fetching mega prize data for user ${googleId}`);
-    try {
-        const settingsRes = await pool.query("SELECT setting_value FROM system_settings WHERE setting_key = 'mega_prize_voting_active'");
-        const voting_active = settingsRes.rowCount > 0 && settingsRes.rows[0].setting_value === 'true';
-
-        const candidatesRes = await pool.query(`
-            SELECT c.id, c.name, c.brand, COUNT(v.user_id)::int as vote_count
-            FROM mega_prize_candidates c
-            LEFT JOIN mega_prize_votes v ON c.id = v.candidate_id
-            WHERE c.is_active = TRUE
-            GROUP BY c.id ORDER BY c.id;
-        `);
-        
-        const winnersRes = await pool.query(`
-            SELECT w.prize_name, w.win_date, t.username
-            FROM mega_prize_winners w
-            JOIN territories t ON w.winner_user_id = t.owner_id
-            ORDER BY w.win_date DESC LIMIT 10;
-        `);
-
-        const userVoteRes = await pool.query('SELECT candidate_id FROM mega_prize_votes WHERE user_id = $1', [googleId]);
-
-        res.json({
-            voting_active,
-            candidates: candidatesRes.rows,
-            winners: winnersRes.rows,
-            user_vote_id: userVoteRes.rowCount > 0 ? userVoteRes.rows[0].candidate_id : null,
-        });
-
-    } catch (err) {
-        logApi(`Error fetching mega prize data for user ${googleId}: %O`, err);
-        res.status(500).json({ message: 'Server error while fetching mega prize data.' });
-    }
-});
-
-app.post('/shop/mega-prize/vote', authenticate, async (req, res) => {
-    const { googleId } = req.user;
-    const { candidateId } = req.body;
-    logApi(`User ${googleId} voting for mega prize candidate ${candidateId}`);
-    if (!candidateId) {
-        return res.status(400).json({ message: 'Candidate ID is required.' });
-    }
-    try {
-        const settingsRes = await pool.query("SELECT setting_value FROM system_settings WHERE setting_key = 'mega_prize_voting_active'");
-        if (!(settingsRes.rowCount > 0 && settingsRes.rows[0].setting_value === 'true')) {
-            return res.status(403).json({ message: 'Voting is not currently active.' });
-        }
-        await pool.query(
-            `INSERT INTO mega_prize_votes (user_id, candidate_id) VALUES ($1, $2)
-             ON CONFLICT (user_id) DO UPDATE SET candidate_id = $2, voted_at = CURRENT_TIMESTAMP;`,
-            [googleId, candidateId]
-        );
-        res.status(200).json({ success: true, message: 'Vote cast successfully.' });
-    } catch (err) {
-        logApi(`Error casting vote for user ${googleId}: %O`, err);
-        if (err.code === '23503') { 
-            return res.status(404).json({ message: 'Invalid prize candidate.' });
-        }
-        res.status(500).json({ message: 'Server error while casting vote.' });
-    }
-});
-
-
-// Game Data Routes
+// Leaderboard & Game Data
 app.get('/leaderboard', async (req, res) => {
     logApi('Fetching player leaderboard with full stats.');
     try {
@@ -976,6 +820,7 @@ app.get('/leaderboard/clans', async (req, res) => {
     }
 });
 
+// Clan Routes
 app.post('/clans', authenticate, async (req, res) => {
     const { name, tag, description } = req.body;
     const leaderId = req.user.googleId;
@@ -1062,20 +907,6 @@ app.get('/clans/:id', authenticate, async (req, res) => {
     } catch (err) {
         logApi(`Error fetching details for clan ${id}: %O`, err);
         res.status(500).json({ error: 'Failed to fetch clan details.' });
-    }
-});
-
-app.put('/clans/:id/photo', authenticate, async (req, res) => {
-    const { id } = req.params;
-    const { imageUrl } = req.body;
-    logApi(`Updating photo for clan ${id}`);
-    if (!imageUrl) return res.status(400).json({ error: 'imageUrl is required.' });
-    try {
-        await pool.query('UPDATE clans SET clan_image_url = $1 WHERE id = $2', [imageUrl, id]);
-        res.sendStatus(200);
-    } catch (err) {
-        logApi(`Error updating photo for clan ${id}: %O`, err);
-        res.status(500).json({ error: 'Failed to update clan photo.' });
     }
 });
 
@@ -1184,83 +1015,6 @@ app.post('/clans/:id/requests', authenticate, async (req, res) => {
     } catch (err) {
         logApi(`Error creating join request for ${googleId} to clan ${clanId}: %O`, err);
         res.status(500).json({ message: 'Server error while creating join request.' });
-    }
-});
-
-app.get('/clans/:id/requests', authenticate, async (req, res) => {
-    const { id: clanId } = req.params;
-    const { googleId } = req.user;
-    logApi(`Leader ${googleId} fetching join requests for clan ${clanId}`);
-    try {
-        const leaderCheck = await pool.query('SELECT 1 FROM clans WHERE id = $1 AND leader_id = $2', [clanId, googleId]);
-        if (leaderCheck.rowCount === 0) {
-            return res.status(403).json({ message: 'You are not the leader of this clan.' });
-        }
-        const result = await pool.query(`
-            SELECT cjr.id as request_id, t.owner_id as user_id, t.username, t.profile_image_url, cjr.requested_at
-            FROM clan_join_requests cjr JOIN (SELECT DISTINCT ON (owner_id) * FROM territories) t ON cjr.user_id = t.owner_id
-            WHERE cjr.clan_id = $1 AND cjr.status = 'pending' ORDER BY cjr.requested_at ASC;
-        `, [clanId]);
-        res.status(200).json(result.rows);
-    } catch (err) {
-        logApi(`Error fetching join requests for clan ${clanId}: %O`, err);
-        res.status(500).json({ message: 'Server error while fetching requests.' });
-    }
-});
-
-app.put('/clans/requests/:requestId', authenticate, async (req, res) => {
-    const { requestId } = req.params;
-    const { status } = req.body;
-    const { googleId } = req.user;
-    logApi(`Leader ${googleId} managing join request ${requestId} with status '${status}'`);
-    if (!['approved', 'denied'].includes(status)) {
-        return res.status(400).json({ message: 'Invalid status provided.' });
-    }
-    const client = await pool.connect();
-    try {
-        logDb(`BEGIN transaction for managing join request ${requestId}`);
-        await client.query('BEGIN');
-        const requestResult = await client.query(`SELECT cjr.clan_id, cjr.user_id as applicant_google_id, c.leader_id FROM clan_join_requests cjr JOIN clans c ON cjr.clan_id = c.id WHERE cjr.id = $1;`, [requestId]);
-        if (requestResult.rowCount === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ message: 'Request not found.' });
-        }
-        const { clan_id, applicant_google_id, leader_id } = requestResult.rows[0];
-        if (leader_id !== googleId) {
-            await client.query('ROLLBACK');
-            return res.status(403).json({ message: 'You are not authorized to manage this request.' });
-        }
-        if (status === 'denied') {
-            await client.query('DELETE FROM clan_join_requests WHERE id = $1', [requestId]);
-        }
-        if (status === 'approved') {
-            const memberCountRes = await client.query('SELECT COUNT(*) as count FROM clan_members WHERE clan_id = $1', [clan_id]);
-            if (parseInt(memberCountRes.rows[0].count, 10) >= 20) {
-                await client.query('ROLLBACK');
-                return res.status(409).json({ message: 'Clan is full.' });
-            }
-            await client.query('INSERT INTO clan_members (clan_id, user_id, role) VALUES ($1, $2, $3)', [clan_id, applicant_google_id, 'member']);
-            await client.query('DELETE FROM clan_join_requests WHERE id = $1', [requestId]);
-
-            const newMemberSocketId = Object.keys(players).find(id => players[id].googleId === applicant_google_id);
-            if (newMemberSocketId) {
-                const newClanInfoRes = await client.query(`SELECT c.id, c.name, c.tag, cm.role, (c.base_location IS NOT NULL) as base_is_set FROM clans c JOIN clan_members cm ON c.id = cm.clan_id WHERE c.id = $1 AND cm.user_id = $2;`, [clan_id, applicant_google_id]);
-                if (newClanInfoRes.rowCount > 0) {
-                    const newClanInfo = newClanInfoRes.rows[0];
-                    io.to(newMemberSocketId).emit('clanStatusUpdated', { id: newClanInfo.id.toString(), name: newClanInfo.name, tag: newClanInfo.tag, role: newClanInfo.role, base_is_set: newClanInfo.base_is_set });
-                }
-            }
-        }
-        await client.query('COMMIT');
-        logDb(`COMMIT transaction for managing join request.`);
-        res.status(200).json({ message: `Request successfully ${status}.` });
-    } catch (err) {
-        await client.query('ROLLBACK');
-        logDb(`ROLLBACK transaction for managing join request due to error: ${err.message}`);
-        logApi(`Error managing join request ${requestId}: %O`, err);
-        res.status(500).json({ message: 'Server error while managing request.' });
-    } finally {
-        client.release();
     }
 });
 
@@ -1580,29 +1334,30 @@ io.on('connection', (socket) => {
       return socket.emit('claimRejected', { reason: 'Invalid player data.' });
     }
     logGame(`Player ${player.name} (${socket.id}) is attempting to claim territory.`);
-    const { gameMode, trail, baseClaim } = req;
+    
+    const { gameMode } = req;
     const client = await pool.connect();
+    
     try {
         await client.query('BEGIN');
         let result;
         if (gameMode === 'solo') {
-           // result = await handleSoloClaim(io, socket, player, players, { trail, baseClaim }, client);
+            result = await handleSoloClaim(io, socket, player, players, req, client, superpowerManager);
         } else if (gameMode === 'clan') {
-            result = await handleClanClaim(io, socket, player, players, trail, baseClaim, client);
+            result = await handleClanClaim(io, socket, player, players, req, client, superpowerManager);
         }
         
         if (!result) {
             await client.query('ROLLBACK');
-            logDb(`ROLLBACK transaction for claim by ${player.name}, handler returned null.`);
+            logDb(`ROLLBACK transaction for claim by ${player.name}, handler returned a nullish result.`);
+            socket.emit('claimRejected', { reason: 'Claim processing was unexpectedly halted.' });
             return;
         }
 
-        // <<< THIS IS THE FIX: We now correctly get newTerritoryId from the result
         const { finalTotalArea, areaClaimed, updatedTerritories, newTerritoryId } = result;
         await client.query('COMMIT');
         logDb(`COMMIT transaction for claim by ${player.name}.`);
 
-        // <<< THIS IS THE FIX: We now send newTerritoryId back to the client
         socket.emit('claimSuccessful', { newTotalArea: finalTotalArea, areaClaimed: areaClaimed, newTerritoryId: newTerritoryId });
         
         if (updatedTerritories && updatedTerritories.length > 0) {
@@ -1621,8 +1376,7 @@ io.on('connection', (socket) => {
     } finally {
         client.release();
     }
-});
-
+  });
 
   socket.on('disconnect', () => {
     const player = players[socket.id];
