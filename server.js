@@ -1,31 +1,9 @@
 /*
 ================================================================================
-HOW TO USE DEBUGGING:
---------------------------------------------------------------------------------
-This server now uses the 'debug' library for namespaced logging. To see the
-logs, you must start the server with the DEBUG environment variable.
-
-Examples (run these in your terminal):
-
-1. See ALL debug messages:
-   DEBUG=server:* node server.js
-
-2. See only socket and payment messages:
-   DEBUG=server:socket,server:payment node server.js
-
-3. See all messages EXCEPT database logs:
-   DEBUG=server:*,-server:db node server.js
-
-Available Namespaces:
-- server:lifecycle (Server start, stop, major events)
-- server:db         (Database setup, transactions, critical queries)
-- server:auth       (Authentication middleware, token verification)
-- server:api        (User-facing API endpoints)
-- server:admin      (Admin portal API endpoints)
-- server:payment    (Razorpay and payment verification logic)
-- server:socket     (Socket.IO connection, disconnects, and events)
-- server:game       (Core game logic like claims, trail cuts, etc.)
-- server:superpower (All logic within the superpower_manager)
+DEBUGGING GUIDE:
+- See ALL messages: DEBUG=server:* node server.js
+- See specific messages: DEBUG=server:socket,server:game node server.js
+- Namespaces: lifecycle, db, auth, api, admin, payment, socket, game, superpower
 ================================================================================
 */
 
@@ -118,6 +96,7 @@ const geofenceService = new GeofenceService(pool);
 const players = {};
 
 const setupDatabase = async () => {
+    // ... (This function remains unchanged from the complete version in our previous conversation)
     const client = await pool.connect();
     logDb('Connected to database for setup.');
     try {
@@ -1180,7 +1159,7 @@ io.on('connection', (socket) => {
                 }
             }
         }
-        else if (gameMode === 'solo') {
+        else { // This covers singleRun, areaCapture, and territoryWar for individual players
             const query = `
                 SELECT
                     id,
@@ -1248,7 +1227,9 @@ io.on('connection', (socket) => {
             logGame(`Error checking for chest collision for player ${player.name}: %O`, err);
         }
 
-        if (player.activeTrail.length > 0) {
+        // <<< RE-INTEGRATED FEATURE: TRAIL CUTTING LOGIC >>>
+        // Only run this competitive logic in territoryWar or clan modes.
+        if ((player.gameMode === 'territoryWar' || player.gameMode === 'clan') && player.activeTrail.length > 0) {
             const lastPoint = player.activeTrail[player.activeTrail.length - 1];
             const attackerSegmentWKT = (lastPoint.lng === data.lng && lastPoint.lat === data.lat)
                 ? `POINT(${data.lng} ${data.lat})`
@@ -1259,7 +1240,8 @@ io.on('connection', (socket) => {
             for (const victimId in players) {
                 if (victimId === socket.id) continue;
                 const victim = players[victimId];
-                if (victim && victim.isDrawing && victim.activeTrail.length >= 2) {
+                // Victim must also be in a competitive mode to be cut
+                if (victim && (victim.gameMode === 'territoryWar' || victim.gameMode === 'clan') && victim.isDrawing && victim.activeTrail.length >= 2) {
                     const victimTrailWKT = 'LINESTRING(' + victim.activeTrail.map(p => `${p.lng} ${p.lat}`).join(', ') + ')';
                     const victimTrailGeom = `ST_SetSRID(ST_GeomFromText('${victimTrailWKT}'), 4326)`;
                     try {
@@ -1402,7 +1384,7 @@ io.on('connection', (socket) => {
       logSocket(`Invalid claimTerritory request from ${socket.id}`);
       return socket.emit('claimRejected', { reason: 'Invalid player data.' });
     }
-    logGame(`Player ${player.name} (${socket.id}) is attempting to claim territory.`);
+    logGame(`Player ${player.name} (${socket.id}) is attempting to claim territory in mode [${req.gameMode}].`);
     
     const { gameMode } = req;
     const client = await pool.connect();
@@ -1410,7 +1392,8 @@ io.on('connection', (socket) => {
     try {
         await client.query('BEGIN');
         let result;
-        if (gameMode === 'solo') {
+        // Logic for solo modes (singleRun, areaCapture, territoryWar)
+        if (gameMode === 'singleRun' || gameMode === 'areaCapture' || gameMode === 'territoryWar') {
             result = await handleSoloClaim(io, socket, player, players, req, client, superpowerManager);
         } else if (gameMode === 'clan') {
             result = await handleClanClaim(io, socket, player, players, req, client, superpowerManager);
@@ -1419,7 +1402,7 @@ io.on('connection', (socket) => {
         if (!result) {
             await client.query('ROLLBACK');
             logDb(`ROLLBACK transaction for claim by ${player.name}, handler returned a nullish result.`);
-            socket.emit('claimRejected', { reason: 'Claim processing was unexpectedly halted.' });
+            // A rejection reason should have already been emitted by the handler in this case.
             return;
         }
 

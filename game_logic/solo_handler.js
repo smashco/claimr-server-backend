@@ -6,6 +6,11 @@ const debug = require('debug')('server:game');
 
 const SOLO_BASE_RADIUS_METERS = 30.0;
 
+/**
+ * Handles all solo player claims, differentiating logic based on the game mode.
+ * - 'territoryWar': Enables area stealing, shield checks, and island creation.
+ * - 'areaCapture' / 'singleRun': A simple, non-destructive area claim.
+ */
 async function handleSoloClaim(io, socket, player, players, req, client, superpowerManager) {
    debug(`\n\n[SOLO_HANDLER] =================== NEW SOLO CLAIM ===================`);
   
@@ -13,16 +18,15 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
    const userId = player.googleId;
    const isInitialBaseClaim = !!baseClaim;
 
-   debug(`[SOLO_HANDLER] Claim by: ${player.name} (${userId})`);
+   debug(`[SOLO_HANDLER] Claim by: ${player.name} (${userId}) in mode [${player.gameMode}]`);
    debug(`[SOLO_HANDLER] Claim Type: ${isInitialBaseClaim ? 'INITIAL BASE' : 'EXPANSION'}`);
 
    let newAreaPolygon, newAreaSqM;
-   let newTerritoryId = null; // Variable to hold the ID for the brand wrapper
+   let newTerritoryId = null; 
 
    try {
        if (isInitialBaseClaim) {
-           debug(`[SOLO_HANDLER] Processing Initial Base Claim. Received baseClaim object:`, baseClaim);
-           
+           debug(`[SOLO_HANDLER] Processing Initial Base Claim.`);
            if (!baseClaim || typeof baseClaim.lng !== 'number' || typeof baseClaim.lat !== 'number') {
                throw new Error('Invalid coordinates in baseClaim object. `lat` and `lng` must be numbers.');
            }
@@ -58,56 +62,67 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
    }
 
    const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
-   const victimsRes = await client.query(`
-       SELECT owner_id, username, is_shield_active
-       FROM territories
-       WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
-   `, [userId]);
-   debug(`[SOLO_HANDLER] Found ${victimsRes.rowCount} overlapping enemy territories.`);
-
    const affectedOwnerIds = new Set([userId]);
-   let attackPolygonGeometry = newAreaPolygon.geometry;
+   
+   // --- COMPETITIVE LOGIC FOR TERRITORY WAR ---
+   if (player.gameMode === 'territoryWar') {
+       const victimsRes = await client.query(`
+           SELECT owner_id, username, is_shield_active
+           FROM territories
+           WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
+       `, [userId]);
+       debug(`[SOLO_HANDLER][TerritoryWar] Found ${victimsRes.rowCount} overlapping enemy territories.`);
 
-   for (const victim of victimsRes.rows) {
-       affectedOwnerIds.add(victim.owner_id);
+       let attackBlockedByShield = false;
 
-       if (victim.is_shield_active) {
-           debug(`[SOLO_HANDLER] ATTACK BLOCKED! Attacker ${player.name} hit ${victim.username}'s shield.`);
-           
-           io.to(socket.id).emit('runTerminated', { reason: `Your run was blocked by ${victim.username}'s Last Stand!` });
-           
-           const victimSocketId = Object.keys(players).find(id => players[id].googleId === victim.owner_id);
-           if (victimSocketId) {
-               io.to(victimSocketId).emit('lastStandActivated', { attacker: player.name });
+       // First, check for any active shields.
+       for (const victim of victimsRes.rows) {
+           if (victim.is_shield_active) {
+               attackBlockedByShield = true;
+               affectedOwnerIds.add(victim.owner_id);
+               debug(`[SOLO_HANDLER][TerritoryWar] ATTACK BLOCKED! Attacker ${player.name} hit ${victim.username}'s shield.`);
+               
+               io.to(socket.id).emit('runTerminated', { reason: `Your claim was blocked by ${victim.username}'s Last Stand!` });
+               
+               const victimSocketId = Object.keys(players).find(id => players[id].googleId === victim.owner_id);
+               if (victimSocketId) {
+                   io.to(victimSocketId).emit('lastStandActivated', { attacker: player.name });
+               }
+
+               await superpowerManager.consumePower(victim.owner_id, 'lastStand', client);
+
+               // --- ISLAND CREATION LOGIC ---
+               debug(`[SOLO_HANDLER][TerritoryWar] Creating island/hole in ${victim.username}'s territory.`);
+               const remainingVictimAreaWKT = `ST_Multi(ST_Difference(area, ${newAreaWKT}))`;
+               await client.query(
+                   `UPDATE territories SET area = ${remainingVictimAreaWKT}, area_sqm = ST_Area((${remainingVictimAreaWKT})::geography) WHERE owner_id = $1`, 
+                   [victim.owner_id]
+               );
+
+               player.isDrawing = false;
+               player.activeTrail = [];
+               io.emit('trailCleared', { id: socket.id });
+               
+               // Throw an error to stop the claim process for the attacker and send a rejection.
+               throw new Error(`Your claim was blocked by ${victim.username}'s Last Stand! A hole was carved in their territory.`);
            }
+       }
 
-           await superpowerManager.consumePower(victim.owner_id, 'lastStand', client);
-
-           player.isDrawing = false;
-           player.activeTrail = [];
-           io.emit('trailCleared', { id: socket.id });
-           
-           throw new Error(`Your claim was blocked by ${victim.username}'s Last Stand!`);
+       // If no shields blocked the attack, proceed with area stealing.
+       for (const victim of victimsRes.rows) {
+           affectedOwnerIds.add(victim.owner_id);
+           debug(`[SOLO_HANDLER][TerritoryWar] Calculating damage for victim: ${victim.username}`);
+           const remainingVictimAreaWKT = `ST_Multi(ST_Difference(area, ${newAreaWKT}))`;
+           await client.query(
+               `UPDATE territories SET area = ${remainingVictimAreaWKT}, area_sqm = ST_Area((${remainingVictimAreaWKT})::geography) WHERE owner_id = $1`, 
+               [victim.owner_id]
+           );
        }
    }
-
-   for (const victim of victimsRes.rows) {
-       debug(`[SOLO_HANDLER] Calculating damage for victim: ${victim.username}`);
-       const victimGeomRes = await client.query(`SELECT ST_AsGeoJSON(area) as geojson FROM territories WHERE owner_id = $1`, [victim.owner_id]);
-       const victimPolygon = JSON.parse(victimGeomRes.rows[0].geojson);
-
-       const remainingVictimArea = turf.difference(victimPolygon, attackPolygonGeometry);
-      
-       if (remainingVictimArea) {
-           const newGeoJSON = JSON.stringify(remainingVictimArea.geometry);
-           await client.query(`UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = ST_Area(ST_GeomFromGeoJSON($1)::geography) WHERE owner_id = $2`, [newGeoJSON, victim.owner_id]);
-       } else {
-           await client.query(`UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), area_sqm = 0 WHERE owner_id = $1`, [victim.owner_id]);
-       }
-   }
+   // --- END OF COMPETITIVE LOGIC ---
   
    const userExistingRes = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
-   let finalAreaGeoJSON = JSON.stringify(attackPolygonGeometry);
+   let finalAreaGeoJSON = JSON.stringify(newAreaPolygon.geometry);
 
    if (userExistingRes.rowCount > 0 && userExistingRes.rows[0].area) {
        debug(`[SOLO_HANDLER] Merging new area with existing land for user ${userId}`);
@@ -137,34 +152,37 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
        await updateQuestProgress(userId, 'run_trail', trailLengthKm, client, io, players);
    }
    
-   // <<< SOLUTION: Fetch the complete, updated territory data to send back to the client
-   const finalTerritoryDataQuery = await client.query(`
-        SELECT
-            id,
-            owner_id as "ownerId",
-            username as "ownerName",
-            profile_image_url as "profileImageUrl",
-            identity_color,
-            ST_AsGeoJSON(area) as geojson,
-            area_sqm as area,
-            laps_required,
-            brand_wrapper
-        FROM territories
-        WHERE owner_id = $1;
-   `, [userId]);
-   
-   const newTerritoryData = {
-       ...finalTerritoryDataQuery.rows[0],
-       geojson: finalTerritoryDataQuery.rows[0].geojson ? JSON.parse(finalTerritoryDataQuery.rows[0].geojson) : null
-   };
-   
+   // Fetch all affected territory data to broadcast back to all clients
+   const updatedTerritories = [];
+   const allAffectedIds = Array.from(affectedOwnerIds);
+   if (allAffectedIds.length > 0) {
+        const queryResult = await client.query(`
+            SELECT 
+                id,
+                owner_id as "ownerId", 
+                username as "ownerName", 
+                profile_image_url as "profileImageUrl", 
+                identity_color, 
+                ST_AsGeoJSON(area) as geojson, 
+                area_sqm as area,
+                laps_required,
+                brand_wrapper
+            FROM territories 
+            WHERE owner_id = ANY($1::varchar[])`, 
+            [allAffectedIds]
+        );
+        queryResult.rows.forEach(r => {
+            updatedTerritories.push({...r, geojson: r.geojson ? JSON.parse(r.geojson) : null });
+        });
+    }
+
    debug(`[SOLO_HANDLER] SUCCESS: Claim transaction for ${player.name} is ready to be committed.`);
   
    return {
        finalTotalArea: finalAreaSqM,
        areaClaimed: newAreaSqM,
        newTerritoryId: newTerritoryId,
-       updatedTerritories: [newTerritoryData] // Send back the full object
+       updatedTerritories: updatedTerritories
    };
 }
 
