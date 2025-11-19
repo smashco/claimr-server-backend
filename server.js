@@ -1188,8 +1188,8 @@ io.on('connection', (socket) => {
     }
   });
 
-  // --- CONQUER MODE HANDLERS (START) ---
-  
+  // --- CONQUER MODE HANDLERS ---
+
   socket.on('startConquerAttempt', async ({ territoryId }) => {
     const player = players[socket.id];
     if (!player || !territoryId) return;
@@ -1300,8 +1300,7 @@ io.on('connection', (socket) => {
       client.release();
     }
   });
-  // --- CONQUER MODE HANDLERS (END) ---
-  
+
   socket.on('locationUpdate', async (data) => {
     const player = players[socket.id];
     if (!player || !player.googleId) return;
