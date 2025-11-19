@@ -1198,6 +1198,7 @@ io.on('connection', (socket) => {
 
     const client = await pool.connect();
     try {
+      // 1. Fetch the target territory's shape and difficulty
       const res = await client.query(
         `SELECT id, laps_required, ST_AsGeoJSON(area) as geojson 
          FROM territories WHERE id = $1`,
@@ -1213,6 +1214,7 @@ io.on('connection', (socket) => {
       const target = res.rows[0];
       const geojson = JSON.parse(target.geojson);
       
+      // 2. Extract the outer ring coordinates
       let coordinates = [];
       
       if (geojson.type === 'Polygon') {
@@ -1227,8 +1229,10 @@ io.on('connection', (socket) => {
         return;
       }
 
+      // Map [lng, lat] to {lat, lng} for Flutter
       const path = coordinates.map(coord => ({ lat: coord[1], lng: coord[0] }));
 
+      // 3. Send path and requirements back to client
       socket.emit('conquerAttemptStarted', {
         territoryId: target.id,
         path: path,
@@ -1255,11 +1259,13 @@ io.on('connection', (socket) => {
     try {
       await client.query('BEGIN');
 
+      // 1. Verify territory existence
       const check = await client.query('SELECT owner_id FROM territories WHERE id = $1', [territoryId]);
       if (check.rowCount === 0) {
          throw new Error('Territory no longer exists.');
       }
       
+      // 2. Transfer Ownership & Increase Difficulty
       const updateQuery = `
         UPDATE territories 
         SET owner_id = $1, 
@@ -1276,6 +1282,7 @@ io.on('connection', (socket) => {
 
       await client.query('COMMIT');
 
+      // 3. Broadcast Update
       const updatedRes = await client.query(`
           SELECT 
             id, owner_id as "ownerId", username as "ownerName", 
