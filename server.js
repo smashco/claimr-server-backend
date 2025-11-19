@@ -96,7 +96,6 @@ const geofenceService = new GeofenceService(pool);
 const players = {};
 
 const setupDatabase = async () => {
-    // ... (This function remains unchanged from the complete version in our previous conversation)
     const client = await pool.connect();
     logDb('Connected to database for setup.');
     try {
@@ -1159,7 +1158,7 @@ io.on('connection', (socket) => {
                 }
             }
         }
-        else { // This covers singleRun, areaCapture, and territoryWar for individual players
+        else { 
             const query = `
                 SELECT
                     id,
@@ -1188,6 +1187,120 @@ io.on('connection', (socket) => {
         client.release();
     }
   });
+
+  // --- CONQUER MODE HANDLERS (START) ---
+  
+  socket.on('startConquerAttempt', async ({ territoryId }) => {
+    const player = players[socket.id];
+    if (!player || !territoryId) return;
+
+    logGame(`Player ${player.name} wants to conquer Territory ID: ${territoryId}`);
+
+    const client = await pool.connect();
+    try {
+      const res = await client.query(
+        `SELECT id, laps_required, ST_AsGeoJSON(area) as geojson 
+         FROM territories WHERE id = $1`,
+        [territoryId]
+      );
+
+      if (res.rowCount === 0) {
+        socket.emit('conquerAttemptFailed', { reason: 'Territory not found.' });
+        return;
+      }
+
+      const target = res.rows[0];
+      const geojson = JSON.parse(target.geojson);
+      
+      let coordinates = [];
+      
+      if (geojson.type === 'Polygon') {
+        coordinates = geojson.coordinates[0]; 
+      } else if (geojson.type === 'MultiPolygon') {
+        coordinates = geojson.coordinates[0][0];
+      }
+
+      if (!coordinates || coordinates.length < 3) {
+        socket.emit('conquerAttemptFailed', { reason: 'Invalid territory shape.' });
+        return;
+      }
+
+      const path = coordinates.map(coord => ({ lat: coord[1], lng: coord[0] }));
+
+      socket.emit('conquerAttemptStarted', {
+        territoryId: target.id,
+        path: path,
+        lapsRequired: target.laps_required || 1
+      });
+
+      logGame(`Sent conquer path to ${player.name}. Laps required: ${target.laps_required}`);
+
+    } catch (err) {
+      logGame(`Error starting conquer attempt: ${err.message}`);
+      socket.emit('conquerAttemptFailed', { reason: 'Server error.' });
+    } finally {
+      client.release();
+    }
+  });
+
+  socket.on('completeConquerAttempt', async ({ territoryId }) => {
+    const player = players[socket.id];
+    if (!player || !territoryId) return;
+
+    logGame(`Player ${player.name} COMPLETED conquer run for Territory ID: ${territoryId}`);
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const check = await client.query('SELECT owner_id FROM territories WHERE id = $1', [territoryId]);
+      if (check.rowCount === 0) {
+         throw new Error('Territory no longer exists.');
+      }
+      
+      const updateQuery = `
+        UPDATE territories 
+        SET owner_id = $1, 
+            username = $2, 
+            profile_image_url = (SELECT profile_image_url FROM territories WHERE owner_id = $1 LIMIT 1),
+            identity_color = (SELECT identity_color FROM territories WHERE owner_id = $1 LIMIT 1),
+            laps_required = laps_required + 1,
+            total_distance_run = 0,
+            created_at = CURRENT_TIMESTAMP
+        WHERE id = $3
+        RETURNING *;
+      `;
+      
+      await client.query(updateQuery, [player.googleId, player.name, territoryId]);
+
+      await client.query('COMMIT');
+
+      const updatedRes = await client.query(`
+          SELECT 
+            id, owner_id as "ownerId", username as "ownerName", 
+            profile_image_url as "profileImageUrl", identity_color, 
+            ST_AsGeoJSON(area) as geojson, area_sqm as area, 
+            laps_required, brand_wrapper 
+          FROM territories WHERE id = $1`, 
+          [territoryId]
+      );
+      
+      const updatedTerritory = updatedRes.rows[0];
+      updatedTerritory.geojson = JSON.parse(updatedTerritory.geojson);
+
+      socket.emit('conquerAttemptSuccessful', { territoryId });
+      io.emit('batchTerritoryUpdate', [updatedTerritory]);
+      
+      logGame(`Territory ${territoryId} ownership transferred to ${player.name}`);
+
+    } catch (err) {
+      await client.query('ROLLBACK');
+      logGame(`Error completing conquer attempt: ${err.message}`);
+    } finally {
+      client.release();
+    }
+  });
+  // --- CONQUER MODE HANDLERS (END) ---
   
   socket.on('locationUpdate', async (data) => {
     const player = players[socket.id];
@@ -1227,8 +1340,6 @@ io.on('connection', (socket) => {
             logGame(`Error checking for chest collision for player ${player.name}: %O`, err);
         }
 
-        // <<< RE-INTEGRATED FEATURE: TRAIL CUTTING LOGIC >>>
-        // Only run this competitive logic in territoryWar or clan modes.
         if ((player.gameMode === 'territoryWar' || player.gameMode === 'clan') && player.activeTrail.length > 0) {
             const lastPoint = player.activeTrail[player.activeTrail.length - 1];
             const attackerSegmentWKT = (lastPoint.lng === data.lng && lastPoint.lat === data.lat)
@@ -1240,7 +1351,6 @@ io.on('connection', (socket) => {
             for (const victimId in players) {
                 if (victimId === socket.id) continue;
                 const victim = players[victimId];
-                // Victim must also be in a competitive mode to be cut
                 if (victim && (victim.gameMode === 'territoryWar' || victim.gameMode === 'clan') && victim.isDrawing && victim.activeTrail.length >= 2) {
                     const victimTrailWKT = 'LINESTRING(' + victim.activeTrail.map(p => `${p.lng} ${p.lat}`).join(', ') + ')';
                     const victimTrailGeom = `ST_SetSRID(ST_GeomFromText('${victimTrailWKT}'), 4326)`;
@@ -1392,7 +1502,6 @@ io.on('connection', (socket) => {
     try {
         await client.query('BEGIN');
         let result;
-        // Logic for solo modes (singleRun, areaCapture, territoryWar)
         if (gameMode === 'singleRun' || gameMode === 'areaCapture' || gameMode === 'territoryWar') {
             result = await handleSoloClaim(io, socket, player, players, req, client, superpowerManager);
         } else if (gameMode === 'clan') {
@@ -1402,7 +1511,6 @@ io.on('connection', (socket) => {
         if (!result) {
             await client.query('ROLLBACK');
             logDb(`ROLLBACK transaction for claim by ${player.name}, handler returned a nullish result.`);
-            // A rejection reason should have already been emitted by the handler in this case.
             return;
         }
 
