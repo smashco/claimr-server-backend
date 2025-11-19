@@ -1194,7 +1194,7 @@ io.on('connection', (socket) => {
     const player = players[socket.id];
     if (!player || !territoryId) return;
 
-    logGame(`Player ${player.name} wants to conquer Territory ID: ${territoryId}`);
+    logGame(`[CONQUER] Player ${player.name} starting attempt on Territory ID: ${territoryId}`);
 
     const client = await pool.connect();
     try {
@@ -1205,6 +1205,7 @@ io.on('connection', (socket) => {
       );
 
       if (res.rowCount === 0) {
+        logGame(`[CONQUER] FAILED: Territory ${territoryId} not found.`);
         socket.emit('conquerAttemptFailed', { reason: 'Territory not found.' });
         return;
       }
@@ -1215,12 +1216,13 @@ io.on('connection', (socket) => {
       let coordinates = [];
       
       if (geojson.type === 'Polygon') {
-        coordinates = geojson.coordinates[0]; 
+        coordinates = geojson.coordinates[0]; // Outer ring
       } else if (geojson.type === 'MultiPolygon') {
         coordinates = geojson.coordinates[0][0];
       }
 
       if (!coordinates || coordinates.length < 3) {
+        logGame(`[CONQUER] FAILED: Territory ${territoryId} has invalid shape.`);
         socket.emit('conquerAttemptFailed', { reason: 'Invalid territory shape.' });
         return;
       }
@@ -1233,10 +1235,10 @@ io.on('connection', (socket) => {
         lapsRequired: target.laps_required || 1
       });
 
-      logGame(`Sent conquer path to ${player.name}. Laps required: ${target.laps_required}`);
+      logGame(`[CONQUER] Sent conquer path to ${player.name}. Laps required: ${target.laps_required}`);
 
     } catch (err) {
-      logGame(`Error starting conquer attempt: ${err.message}`);
+      logGame(`[CONQUER] Error starting conquer attempt: ${err.message}`);
       socket.emit('conquerAttemptFailed', { reason: 'Server error.' });
     } finally {
       client.release();
@@ -1247,7 +1249,7 @@ io.on('connection', (socket) => {
     const player = players[socket.id];
     if (!player || !territoryId) return;
 
-    logGame(`Player ${player.name} COMPLETED conquer run for Territory ID: ${territoryId}`);
+    logGame(`[CONQUER] Player ${player.name} COMPLETED conquer run for Territory ID: ${territoryId}`);
 
     const client = await pool.connect();
     try {
@@ -1267,8 +1269,7 @@ io.on('connection', (socket) => {
             laps_required = laps_required + 1,
             total_distance_run = 0,
             created_at = CURRENT_TIMESTAMP
-        WHERE id = $3
-        RETURNING *;
+        WHERE id = $3;
       `;
       
       await client.query(updateQuery, [player.googleId, player.name, territoryId]);
@@ -1291,16 +1292,16 @@ io.on('connection', (socket) => {
       socket.emit('conquerAttemptSuccessful', { territoryId });
       io.emit('batchTerritoryUpdate', [updatedTerritory]);
       
-      logGame(`Territory ${territoryId} ownership transferred to ${player.name}`);
+      logGame(`[CONQUER] Territory ${territoryId} ownership transferred to ${player.name}`);
 
     } catch (err) {
       await client.query('ROLLBACK');
-      logGame(`Error completing conquer attempt: ${err.message}`);
+      logGame(`[CONQUER] Error completing conquer attempt: ${err.message}`);
     } finally {
       client.release();
     }
   });
-
+  
   socket.on('locationUpdate', async (data) => {
     const player = players[socket.id];
     if (!player || !player.googleId) return;
