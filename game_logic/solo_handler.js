@@ -8,8 +8,8 @@ const SOLO_BASE_RADIUS_METERS = 30.0;
 
 /**
  * Handles all solo player claims, differentiating logic based on the game mode.
- * - 'territoryWar': Enables area stealing, shield checks, and island creation.
- * - 'areaCapture' / 'singleRun': A simple, non-destructive area claim.
+ * - 'territoryWar' & 'areaCapture': Enables area stealing, shield checks, and island creation.
+ * - 'singleRun': A simple, non-destructive area claim.
  */
 async function handleSoloClaim(io, socket, player, players, req, client, superpowerManager) {
    debug(`\n\n[SOLO_HANDLER] =================== NEW SOLO CLAIM ===================`);
@@ -64,14 +64,15 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
    const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
    const affectedOwnerIds = new Set([userId]);
    
-   // --- COMPETITIVE LOGIC FOR TERRITORY WAR ---
-   if (player.gameMode === 'territoryWar') {
+   // --- COMPETITIVE LOGIC FOR TERRITORY WAR & AREA CAPTURE ---
+   if (player.gameMode === 'territoryWar' || player.gameMode === 'areaCapture') {
+       debug(`[SOLO_HANDLER][COMPETITIVE] Running competitive logic for mode: ${player.gameMode}`);
        const victimsRes = await client.query(`
            SELECT owner_id, username, is_shield_active
            FROM territories
            WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
        `, [userId]);
-       debug(`[SOLO_HANDLER][TerritoryWar] Found ${victimsRes.rowCount} overlapping enemy territories.`);
+       debug(`[SOLO_HANDLER][COMPETITIVE] Found ${victimsRes.rowCount} overlapping enemy territories.`);
 
        let attackBlockedByShield = false;
 
@@ -80,7 +81,7 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
            if (victim.is_shield_active) {
                attackBlockedByShield = true;
                affectedOwnerIds.add(victim.owner_id);
-               debug(`[SOLO_HANDLER][TerritoryWar] ATTACK BLOCKED! Attacker ${player.name} hit ${victim.username}'s shield.`);
+               debug(`[SOLO_HANDLER][COMPETITIVE] ATTACK BLOCKED! Attacker ${player.name} hit ${victim.username}'s shield.`);
                
                io.to(socket.id).emit('runTerminated', { reason: `Your claim was blocked by ${victim.username}'s Last Stand!` });
                
@@ -92,7 +93,7 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
                await superpowerManager.consumePower(victim.owner_id, 'lastStand', client);
 
                // --- ISLAND CREATION LOGIC ---
-               debug(`[SOLO_HANDLER][TerritoryWar] Creating island/hole in ${victim.username}'s territory.`);
+               debug(`[SOLO_HANDLER][COMPETITIVE] Creating island/hole in ${victim.username}'s territory.`);
                const remainingVictimAreaWKT = `ST_Multi(ST_Difference(area, ${newAreaWKT}))`;
                await client.query(
                    `UPDATE territories SET area = ${remainingVictimAreaWKT}, area_sqm = ST_Area((${remainingVictimAreaWKT})::geography) WHERE owner_id = $1`, 
@@ -111,7 +112,7 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
        // If no shields blocked the attack, proceed with area stealing.
        for (const victim of victimsRes.rows) {
            affectedOwnerIds.add(victim.owner_id);
-           debug(`[SOLO_HANDLER][TerritoryWar] Calculating damage for victim: ${victim.username}`);
+           debug(`[SOLO_HANDLER][COMPETITIVE] Calculating damage for victim: ${victim.username}`);
            const remainingVictimAreaWKT = `ST_Multi(ST_Difference(area, ${newAreaWKT}))`;
            await client.query(
                `UPDATE territories SET area = ${remainingVictimAreaWKT}, area_sqm = ST_Area((${remainingVictimAreaWKT})::geography) WHERE owner_id = $1`, 

@@ -1124,6 +1124,10 @@ io.on('connection', (socket) => {
             isInfiltratorActive: false,
             isTrailDefenseActive: false,
             isCarveModeActive: isCarveModeActive,
+            // New state for Conquer Mode
+            isConquering: false,
+            conquerTargetId: null,
+            conquerLapsCompleted: 0
         };
 
         const geofencePolygons = await geofenceService.getGeofencePolygons();
@@ -1201,7 +1205,6 @@ io.on('connection', (socket) => {
 
     const client = await pool.connect();
     try {
-      // 1. Fetch the target territory's shape and difficulty from the database
       const res = await client.query(
         `SELECT id, laps_required, ST_AsGeoJSON(area) as geojson 
          FROM territories WHERE id = $1`,
@@ -1217,12 +1220,10 @@ io.on('connection', (socket) => {
       const target = res.rows[0];
       const geojson = JSON.parse(target.geojson);
       
-      // 2. Extract the outer boundary coordinates to create the "race track"
       let coordinates = [];
       if (geojson.type === 'Polygon') {
-        coordinates = geojson.coordinates[0]; // The first array is the outer ring
+        coordinates = geojson.coordinates[0];
       } else if (geojson.type === 'MultiPolygon') {
-        // For a multi-part area, just use the first part's outer ring for simplicity
         coordinates = geojson.coordinates[0][0];
       }
 
@@ -1232,10 +1233,14 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // 3. Format coordinates for the client: from [lng, lat] to {lat, lng}
       const path = coordinates.map(coord => ({ lat: coord[1], lng: coord[0] }));
+      
+      // Set server-side state for this player
+      player.isConquering = true;
+      player.conquerTargetId = territoryId;
+      player.conquerLapsCompleted = 0;
+      logGame(`[CONQUER] Player ${player.name} state set to CONQUERING territory ${territoryId}`);
 
-      // 4. Send the path and lap requirement back to the client to start the run
       socket.emit('conquerAttemptStarted', {
         territoryId: target.id,
         path: path,
@@ -1252,71 +1257,74 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('completeConquerAttempt', async ({ territoryId }) => {
-    const player = players[socket.id];
-    if (!player || !territoryId) {
-        logGame(`[CONQUER-ERROR] Invalid 'completeConquerAttempt' from socket ${socket.id}`);
-        return;
-    }
-
-    logGame(`[CONQUER] Player ${player.name} has COMPLETED conquer run for Territory ID: ${territoryId}`);
-
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-
-      // 1. Double-check that the territory still exists
-      const check = await client.query('SELECT owner_id FROM territories WHERE id = $1', [territoryId]);
-      if (check.rowCount === 0) {
-         throw new Error('Territory was destroyed before you could conquer it.');
+  socket.on('lapCompleted', async ({ territoryId }) => {
+      const player = players[socket.id];
+      if (!player || !player.isConquering || player.conquerTargetId !== territoryId) {
+          logGame(`[CONQUER-ERROR] Invalid 'lapCompleted' from ${player.name}. State: isConquering=${player.isConquering}, target=${player.conquerTargetId}, received=${territoryId}`);
+          return;
       }
-      
-      // 2. Update the territory's ownership in the database
-      // This query also increases 'laps_required' by 1 to make it harder to steal back
-      const updateQuery = `
-        UPDATE territories 
-        SET 
-            owner_id = $1, 
-            username = $2, 
-            profile_image_url = (SELECT profile_image_url FROM territories WHERE owner_id = $1 LIMIT 1),
-            identity_color = (SELECT identity_color FROM territories WHERE owner_id = $1 LIMIT 1),
-            laps_required = laps_required + 1,
-            brand_wrapper = NULL, -- Optional: Reset brand on capture
-            created_at = CURRENT_TIMESTAMP
-        WHERE id = $3;
-      `;
-      
-      await client.query(updateQuery, [player.googleId, player.name, territoryId]);
 
-      await client.query('COMMIT');
+      player.conquerLapsCompleted++;
+      logGame(`[CONQUER] Player ${player.name} completed lap ${player.conquerLapsCompleted} for territory ${territoryId}`);
 
-      // 3. Fetch the newly updated territory data to send to all clients
-      const updatedRes = await client.query(`
-          SELECT 
-            id, owner_id as "ownerId", username as "ownerName", 
-            profile_image_url as "profileImageUrl", identity_color, 
-            ST_AsGeoJSON(area) as geojson, area_sqm as area, 
-            laps_required, brand_wrapper 
-          FROM territories WHERE id = $1`, 
-          [territoryId]
-      );
+      const client = await pool.connect();
+      try {
+          const res = await client.query('SELECT laps_required FROM territories WHERE id = $1', [territoryId]);
+          if (res.rowCount === 0) {
+              throw new Error("Target territory vanished mid-conquest.");
+          }
+          const lapsRequired = res.rows[0].laps_required;
+
+          if (player.conquerLapsCompleted >= lapsRequired) {
+              logGame(`[CONQUER] Player ${player.name} has met the lap requirement (${lapsRequired}). Finalizing conquest.`);
+              
+              await client.query('BEGIN');
+              
+              const updateQuery = `
+                  UPDATE territories 
+                  SET 
+                      owner_id = $1, 
+                      username = $2, 
+                      profile_image_url = (SELECT profile_image_url FROM territories WHERE owner_id = $1 LIMIT 1),
+                      identity_color = (SELECT identity_color FROM territories WHERE owner_id = $1 LIMIT 1),
+                      laps_required = laps_required + 1,
+                      brand_wrapper = NULL,
+                      created_at = CURRENT_TIMESTAMP
+                  WHERE id = $3;
+              `;
+              await client.query(updateQuery, [player.googleId, player.name, territoryId]);
+              
+              await client.query('COMMIT');
+              
+              const updatedRes = await client.query(`
+                  SELECT 
+                      id, owner_id as "ownerId", username as "ownerName", 
+                      profile_image_url as "profileImageUrl", identity_color, 
+                      ST_AsGeoJSON(area) as geojson, area_sqm as area, 
+                      laps_required, brand_wrapper 
+                  FROM territories WHERE id = $1`, 
+                  [territoryId]
+              );
       
-      const updatedTerritory = updatedRes.rows[0];
-      updatedTerritory.geojson = JSON.parse(updatedTerritory.geojson);
+              const updatedTerritory = updatedRes.rows[0];
+              updatedTerritory.geojson = JSON.parse(updatedTerritory.geojson);
 
-      // 4. Notify the conqueror of their success and broadcast the map update to everyone
-      socket.emit('conquerAttemptSuccessful', { territoryId });
-      io.emit('batchTerritoryUpdate', [updatedTerritory]);
-      
-      logGame(`[CONQUER] SUCCESS: Territory ${territoryId} ownership transferred to ${player.name}`);
-
-    } catch (err) {
-      await client.query('ROLLBACK');
-      logGame(`[CONQUER-ERROR] Error completing conquer attempt: ${err.message}`);
-      socket.emit('conquerAttemptFailed', { reason: 'Could not finalize conquest.' });
-    } finally {
-      client.release();
-    }
+              socket.emit('conquerAttemptSuccessful', { territoryId });
+              io.emit('batchTerritoryUpdate', [updatedTerritory]);
+              
+              logGame(`[CONQUER] SUCCESS: Territory ${territoryId} ownership transferred to ${player.name}`);
+          }
+      } catch (err) {
+          await client.query('ROLLBACK');
+          logGame(`[CONQUER-ERROR] Error during lapCompleted processing: ${err.message}`);
+          socket.emit('conquerAttemptFailed', { reason: 'Could not finalize conquest.' });
+      } finally {
+          // Reset player state regardless of outcome
+          player.isConquering = false;
+          player.conquerTargetId = null;
+          player.conquerLapsCompleted = 0;
+          client.release();
+      }
   });
   
   socket.on('locationUpdate', async (data) => {
