@@ -1124,10 +1124,9 @@ io.on('connection', (socket) => {
             isInfiltratorActive: false,
             isTrailDefenseActive: false,
             isCarveModeActive: isCarveModeActive,
-            // New state for Conquer Mode
-            isConquering: false,
-            conquerTargetId: null,
-            conquerLapsCompleted: 0
+            isConquering: false, // New: Conquer Mode state
+            conquerTargetId: null, // New
+            conquerLapsCompleted: 0 // New
         };
 
         const geofencePolygons = await geofenceService.getGeofencePolygons();
@@ -1205,6 +1204,7 @@ io.on('connection', (socket) => {
 
     const client = await pool.connect();
     try {
+      // 1. Fetch the target territory's shape and difficulty
       const res = await client.query(
         `SELECT id, laps_required, ST_AsGeoJSON(area) as geojson 
          FROM territories WHERE id = $1`,
@@ -1220,9 +1220,10 @@ io.on('connection', (socket) => {
       const target = res.rows[0];
       const geojson = JSON.parse(target.geojson);
       
+      // 2. Extract the outer ring coordinates
       let coordinates = [];
       if (geojson.type === 'Polygon') {
-        coordinates = geojson.coordinates[0];
+        coordinates = geojson.coordinates[0]; // Outer ring
       } else if (geojson.type === 'MultiPolygon') {
         coordinates = geojson.coordinates[0][0];
       }
@@ -1280,6 +1281,7 @@ io.on('connection', (socket) => {
               
               await client.query('BEGIN');
               
+              // Reset player stats if they conquer it
               const updateQuery = `
                   UPDATE territories 
                   SET 
@@ -1313,16 +1315,17 @@ io.on('connection', (socket) => {
               io.emit('batchTerritoryUpdate', [updatedTerritory]);
               
               logGame(`[CONQUER] SUCCESS: Territory ${territoryId} ownership transferred to ${player.name}`);
+              
+              // Reset player state
+              player.isConquering = false;
+              player.conquerTargetId = null;
+              player.conquerLapsCompleted = 0;
           }
       } catch (err) {
           await client.query('ROLLBACK');
           logGame(`[CONQUER-ERROR] Error during lapCompleted processing: ${err.message}`);
           socket.emit('conquerAttemptFailed', { reason: 'Could not finalize conquest.' });
       } finally {
-          // Reset player state regardless of outcome
-          player.isConquering = false;
-          player.conquerTargetId = null;
-          player.conquerLapsCompleted = 0;
           client.release();
       }
   });
