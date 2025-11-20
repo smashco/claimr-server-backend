@@ -1221,17 +1221,28 @@ io.on('connection', (socket) => {
         raceHandler.rejectChallenge(challengeId, socket.id);
     });
 
-    // --- CONQUEST MODE HANDLERS ---
-    socket.on('startConquerAttempt', async ({ territoryId }) => {
+    // --- CONQUEST MODE HANDLERS (Free-Form Arena System) ---
+    socket.on('createConquestArena', async ({ territoryId }) => {
         try {
-            await conquestHandler.startConquerAttempt(socket.id, territoryId);
+            await conquestHandler.createConquestArena(socket.id, territoryId);
         } catch (err) {
-            socket.emit('conquerAttemptFailed', { reason: err.message });
+            socket.emit('arenaCreationFailed', { reason: err.message });
         }
     });
 
-    socket.on('lapCompleted', ({ territoryId }) => {
-        conquestHandler.recordLap(socket.id, territoryId);
+    socket.on('startConquest', () => {
+        try {
+            conquestHandler.startConquest(socket.id);
+        } catch (err) {
+            socket.emit('conquestStartFailed', { reason: err.message });
+        }
+    });
+
+    socket.on('lapCompleted', ({ lapPath }) => {
+        const result = conquestHandler.recordLap(socket.id, lapPath);
+        if (result) {
+            socket.emit('lapResult', result);
+        }
     });
 
     socket.on('linkBases', async ({ baseA_Id, baseB_Id }) => {
@@ -1256,6 +1267,9 @@ io.on('connection', (socket) => {
         if (!player || !player.googleId) return;
 
         player.lastKnownPosition = data;
+
+        // Check if player entered conquest arena
+        conquestHandler.checkArenaEntry(socket.id, { lat: data.lat, lng: data.lng });
 
         if (player.isDrawing) {
             const playerPointWKT = `ST_SetSRID(ST_Point(${data.lng}, ${data.lat}), 4326)`;
