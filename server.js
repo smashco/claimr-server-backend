@@ -1333,6 +1333,7 @@ io.on('connection', (socket) => {
 
                                 victim.isDrawing = false;
                                 victim.activeTrail = [];
+                                victim.cooldownUntil = Date.now() + 30000; // 30s cooldown
                                 io.emit('trailCleared', { id: victimId });
                             }
                         } catch (err) {
@@ -1351,6 +1352,12 @@ io.on('connection', (socket) => {
     socket.on('startDrawingTrail', async () => {
         const player = players[socket.id];
         if (!player || player.gameMode === 'spectator' || player.isDrawing) return;
+
+        if (player.cooldownUntil && Date.now() < player.cooldownUntil) {
+            const remaining = Math.ceil((player.cooldownUntil - Date.now()) / 1000);
+            socket.emit('error', { message: `Cooldown active! Wait ${remaining}s.` });
+            return;
+        }
 
         player.isDrawing = true;
         player.activeTrail = [];

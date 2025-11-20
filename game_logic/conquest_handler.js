@@ -17,11 +17,22 @@ class ConquestHandler {
         if (!attacker) throw new Error("Player not found.");
 
         // Verify territory exists and is not owned by attacker
-        const res = await this.pool.query('SELECT id, owner_id, laps_required, area FROM territories WHERE id = $1', [territoryId]);
+        const res = await this.pool.query('SELECT id, owner_id, laps_required, ST_AsGeoJSON(area) as geojson FROM territories WHERE id = $1', [territoryId]);
         if (res.rowCount === 0) throw new Error("Territory not found.");
         const territory = res.rows[0];
 
         if (territory.owner_id === attacker.googleId) throw new Error("You already own this territory.");
+
+        // Parse GeoJSON to get path
+        let path = [];
+        if (territory.geojson) {
+            const geojson = JSON.parse(territory.geojson);
+            if (geojson.type === 'Polygon') {
+                path = geojson.coordinates[0].map(coord => ({ lat: coord[1], lng: coord[0] }));
+            } else if (geojson.type === 'MultiPolygon') {
+                path = geojson.coordinates[0][0].map(coord => ({ lat: coord[1], lng: coord[0] }));
+            }
+        }
 
         // Start conquest state
         const conquestState = {
@@ -40,7 +51,8 @@ class ConquestHandler {
         this.io.to(attackerId).emit('conquerAttemptStarted', {
             territoryId,
             lapsRequired: conquestState.lapsRequired,
-            expiresAt: conquestState.expiresAt
+            expiresAt: conquestState.expiresAt,
+            path: path
         });
 
         const ownerSocketId = Object.keys(this.players).find(k => this.players[k].googleId === territory.owner_id);
