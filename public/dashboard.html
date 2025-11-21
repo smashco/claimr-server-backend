@@ -480,11 +480,15 @@
         function renderAds(ads) {
             const tableBody = document.getElementById('ads-table-body');
             tableBody.innerHTML = '';
-            if (ads.length === 0) {
-                tableBody.innerHTML = '<tr><td colspan="7" class="text-center">No ads found.</td></tr>';
+
+            // Filter out deleted ads
+            const activeAds = ads.filter(ad => ad.status !== 'DELETED');
+
+            if (activeAds.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="7" class="text-center">No active ads found.</td></tr>';
                 return;
             }
-            ads.forEach(ad => {
+            activeAds.forEach(ad => {
                 const row = document.createElement('tr');
 
                 const statusBadge = { 'ACTIVE': 'bg-success', 'PAUSED': 'bg-warning text-dark', 'DELETED': 'bg-danger' }[ad.status] || 'bg-secondary';
