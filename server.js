@@ -459,13 +459,12 @@ app.get('/api/brands/territories', async (req, res) => {
         // Let's just return basic info + a mock lap count if not present.
 
         const result = await pool.query(`
-            SELECT t.id, t.username as name, t.area_sqm, t.owner_id, ST_X(ST_Centroid(t.area)) as center_lng, ST_Y(ST_Centroid(t.area)) as center_lat, t.identity_color,
-                   ST_AsGeoJSON(t.area) as geometry,
-                   t.laps_required,
-                   COALESCE(u.username, 'Unclaimed') as owner_name
-            FROM territories t
-            LEFT JOIN territories u ON t.owner_id = u.owner_id
-            WHERE t.area_sqm > 0 -- Only show claimed territories with actual area
+            SELECT id, username as name, area_sqm, owner_id, ST_X(ST_Centroid(area)) as center_lng, ST_Y(ST_Centroid(area)) as center_lat, identity_color,
+                   ST_AsGeoJSON(area) as geometry,
+                   laps_required,
+                   owner_name
+            FROM territories
+            WHERE area_sqm > 0
         `);
 
         // Transform for frontend
@@ -476,10 +475,12 @@ app.get('/api/brands/territories', async (req, res) => {
             geometry: JSON.parse(row.geometry),
             areaSqFt: row.area_sqm ? (row.area_sqm * 10.764) : 0, // Convert sqm to sqft
             laps: row.laps_required || 1,
-            ownerName: row.owner_name,
+            ownerName: row.owner_name || 'Unclaimed',
             identityColor: row.identity_color,
             rentPrice: Math.round((row.area_sqm * 10.764 * 20) + ((row.laps_required || 1) * 500)) // Adjusted price formula
         }));
+
+        console.log(`[API] Fetched ${territories.length} territories. Sample lap count (ID 166):`, territories.find(t => t.id === 166)?.laps);
 
         res.json(territories);
     } catch (err) {
