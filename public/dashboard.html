@@ -493,17 +493,17 @@
                 let actionsHtml = '<div class="btn-group">';
 
                 if (ad.approval_status === 'PENDING') {
-                    actionsHtml += `<button class="btn btn-sm btn-success" onclick="manageAd(${ad.id}, 'approve')">Approve</button>`;
-                    actionsHtml += `<button class="btn btn-sm btn-danger" onclick="manageAd(${ad.id}, 'reject')">Reject</button>`;
+                    actionsHtml += `<button class="btn btn-sm btn-success ad-action-btn" data-ad-id="${ad.id}" data-action="approve">Approve</button>`;
+                    actionsHtml += `<button class="btn btn-sm btn-danger ad-action-btn" data-ad-id="${ad.id}" data-action="reject">Reject</button>`;
                 }
 
                 if (ad.status === 'ACTIVE') {
-                    actionsHtml += `<button class="btn btn-sm btn-warning" onclick="manageAd(${ad.id}, 'pause')">Pause</button>`;
+                    actionsHtml += `<button class="btn btn-sm btn-warning ad-action-btn" data-ad-id="${ad.id}" data-action="pause">Pause</button>`;
                 } else if (ad.status === 'PAUSED') {
-                    actionsHtml += `<button class="btn btn-sm btn-success" onclick="manageAd(${ad.id}, 'resume')">Resume</button>`;
+                    actionsHtml += `<button class="btn btn-sm btn-success ad-action-btn" data-ad-id="${ad.id}" data-action="resume">Resume</button>`;
                 }
 
-                actionsHtml += `<button class="btn btn-sm btn-outline-danger" onclick="manageAd(${ad.id}, 'delete')">Delete</button>`;
+                actionsHtml += `<button class="btn btn-sm btn-outline-danger ad-action-btn" data-ad-id="${ad.id}" data-action="delete">Delete</button>`;
                 actionsHtml += '</div>';
 
                 row.innerHTML = `
@@ -537,6 +537,27 @@
                 alert(`Error: ${error.message}`);
             }
         }
+
+
+        // Event delegation for ad action buttons - attach immediately since script is at bottom
+        const adsTableBody = document.getElementById('ads-table-body');
+        if (adsTableBody) {
+            adsTableBody.addEventListener('click', function (e) {
+                console.log('Click detected on ads table', e.target);
+                if (e.target.classList.contains('ad-action-btn')) {
+                    const adId = e.target.getAttribute('data-ad-id');
+                    const action = e.target.getAttribute('data-action');
+                    console.log(`Button clicked: adId=${adId}, action=${action}`);
+                    if (adId && action) {
+                        window.manageAd(adId, action);
+                    }
+                }
+            });
+            console.log('Event listener attached to ads table body');
+        } else {
+            console.error('ads-table-body element not found!');
+        }
+
 
 
         async function fetchPlayers() {
