@@ -1118,7 +1118,7 @@ io.on('connection', (socket) => {
             const clanId = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].clan_id : null;
             const role = memberInfoRes.rowCount > 0 ? memberInfoRes.rows[0].role : null;
 
-            const playerProfileRes = await client.query('SELECT has_shield, is_carve_mode_active, username IS NOT NULL as has_record, superpowers FROM territories WHERE owner_id = $1 LIMIT 1', [googleId]);
+            const playerProfileRes = await client.query('SELECT has_shield, is_carve_mode_active, username IS NOT NULL as has_record, superpowers, identity_color, profile_image_url FROM territories WHERE owner_id = $1 LIMIT 1', [googleId]);
 
             const playerRecord = playerProfileRes.rows[0];
             const hasShield = playerRecord ? playerRecord.has_shield : false;
@@ -1151,7 +1151,9 @@ io.on('connection', (socket) => {
                 // CONQUER STATE
                 isConquering: false,
                 conquerTargetId: null,
-                conquerLapsCompleted: 0
+                conquerLapsCompleted: 0,
+                identityColor: playerRecord ? playerRecord.identity_color : null,
+                profileImageUrl: playerRecord ? playerRecord.profile_image_url : null
             };
 
             const geofencePolygons = await geofenceService.getGeofencePolygons();
@@ -1574,7 +1576,9 @@ async function broadcastAllPlayers() {
                 name: profile.username || p.name,
                 imageUrl: profile.imageUrl,
                 identityColor: profile.identityColor,
-                lastKnownPosition: p.lastKnownPosition
+                lastKnownPosition: p.lastKnownPosition,
+                isDrawing: p.isDrawing,
+                activeTrail: p.activeTrail
             };
         });
         io.emit('allPlayersUpdate', allPlayersData);

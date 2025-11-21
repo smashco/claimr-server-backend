@@ -287,42 +287,46 @@ class ConquestHandler {
     }
 
     _calculatePathSimilarity(path1, path2) {
-        // Simple path similarity based on point-to-point distance
-        // More sophisticated algorithm could use Fréchet distance or DTW
+        // Robust similarity check using Symmetric Average Minimum Distance
+        // This handles different sampling rates and speed variations better than index matching
         if (!path1 || !path2 || path1.length === 0 || path2.length === 0) return 0;
 
-        const minLength = Math.min(path1.length, path2.length);
-        let totalDistance = 0;
-        let matchingPoints = 0;
+        const getAverageMinDistance = (sourcePath, targetPath) => {
+            let totalMinDist = 0;
+            for (const p1 of sourcePath) {
+                let minDist = Infinity;
+                for (const p2 of targetPath) {
+                    // Simple Euclidean approximation for speed (sufficient for small areas)
+                    // Or use Haversine if precision needed. Using Haversine here for consistency.
+                    const R = 6371e3;
+                    const φ1 = p1.lat * Math.PI / 180;
+                    const φ2 = p2.lat * Math.PI / 180;
+                    const Δφ = (p2.lat - p1.lat) * Math.PI / 180;
+                    const Δλ = (p2.lng - p1.lng) * Math.PI / 180;
+                    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+                        Math.cos(φ1) * Math.cos(φ2) *
+                        Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+                    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                    const d = R * c;
 
-        for (let i = 0; i < minLength; i++) {
-            const p1 = path1[i];
-            const p2 = path2[i];
-
-            // Calculate distance between corresponding points
-            const R = 6371e3;
-            const φ1 = p1.lat * Math.PI / 180;
-            const φ2 = p2.lat * Math.PI / 180;
-            const Δφ = (p2.lat - p1.lat) * Math.PI / 180;
-            const Δλ = (p2.lng - p1.lng) * Math.PI / 180;
-
-            const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-                Math.cos(φ1) * Math.cos(φ2) *
-                Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-            const distance = R * c;
-
-            totalDistance += distance;
-
-            // Points within 50m are considered matching
-            if (distance < 50) {
-                matchingPoints++;
+                    if (d < minDist) minDist = d;
+                }
+                totalMinDist += minDist;
             }
-        }
+            return totalMinDist / sourcePath.length;
+        };
 
-        // Similarity score based on matching points
-        const similarity = matchingPoints / minLength;
-        return similarity;
+        // Check forward and backward to ensure paths cover each other
+        const avgDist1 = getAverageMinDistance(path1, path2);
+        const avgDist2 = getAverageMinDistance(path2, path1);
+
+        // If average deviation is less than 30 meters, consider it a match
+        // We convert this to a 0-1 score. 0m error = 1.0, 50m error = 0.0
+        const avgError = (avgDist1 + avgDist2) / 2;
+        const threshold = 50; // meters
+
+        if (avgError > threshold) return 0;
+        return 1 - (avgError / threshold);
     }
 
     async _finalizeConquest(attackerId) {
