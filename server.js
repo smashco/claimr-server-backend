@@ -538,17 +538,37 @@ app.post('/setup-profile', authenticate, async (req, res) => {
     }
 
     try {
-        await pool.query(
-            `INSERT INTO territories (owner_id, owner_name, username, profile_image_url, phone_number, instagram_id, area, area_sqm, is_paid)
-             VALUES ($1, $2, $3, $4, $5, $6, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), 0, FALSE)
-             ON CONFLICT (owner_id) DO NOTHING;`,
-            [googleId, displayName, username, imageUrl, phoneNumber || null, instagramId || null]
+        // Manual username uniqueness check (since constraint was dropped)
+        const usernameCheck = await pool.query(
+            'SELECT id FROM territories WHERE username = $1 AND owner_id != $2 LIMIT 1',
+            [username, googleId]
         );
-        res.status(200).json({ success: true, message: 'Profile set up successfully.' });
-    } catch (err) {
-        if (err.code === '23505' && err.constraint === 'territories_username_key') {
+        if (usernameCheck.rows.length > 0) {
             return res.status(409).json({ message: 'Username is already taken.' });
         }
+
+        // Check if user already has any territories
+        const existing = await pool.query('SELECT id FROM territories WHERE owner_id = $1 LIMIT 1', [googleId]);
+
+        if (existing.rows.length > 0) {
+            // Update existing territories with new profile info
+            await pool.query(
+                `UPDATE territories 
+                 SET owner_name = $2, username = $3, profile_image_url = $4, phone_number = $5, instagram_id = $6
+                 WHERE owner_id = $1`,
+                [googleId, displayName, username, imageUrl, phoneNumber || null, instagramId || null]
+            );
+        } else {
+            // Insert new profile territory
+            await pool.query(
+                `INSERT INTO territories (owner_id, owner_name, username, profile_image_url, phone_number, instagram_id, area, area_sqm, is_paid)
+                 VALUES ($1, $2, $3, $4, $5, $6, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), 0, FALSE)`,
+                [googleId, displayName, username, imageUrl, phoneNumber || null, instagramId || null]
+            );
+        }
+
+        res.status(200).json({ success: true, message: 'Profile set up successfully.' });
+    } catch (err) {
         logApi(`Error setting up profile for ${googleId}: %O`, err);
         res.status(500).json({ error: 'Failed to set up profile.' });
     }
