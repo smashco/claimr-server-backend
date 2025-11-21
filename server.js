@@ -477,7 +477,7 @@ app.get('/api/brands/territories', async (req, res) => {
             laps: row.laps_required || 1,
             ownerName: row.owner_name || 'Unclaimed',
             identityColor: row.identity_color,
-            rentPrice: Math.round((row.area_sqm * 10.764 * 20) + ((row.laps_required || 1) * 500)) // Adjusted price formula
+            rentPrice: Math.ceil(row.area_sqm * 10.764 * 0.005 * 3) // 3 days default at 0.005/sqft/day
         }));
 
         console.log(`[API] Fetched ${territories.length} territories. Sample lap count (ID 166):`, territories.find(t => t.id === 166)?.laps);
@@ -500,13 +500,13 @@ app.post('/api/brands/calculate-price', (req, res) => {
     // Let's say Base Rate = 20 + (Laps * 5)
     // Total Price = Area * Base Rate
 
-    const lapCount = laps || 1;
-    const baseRate = 20 + ((lapCount - 1) * 5);
-    const totalPrice = areaSqFt * baseRate;
+    const { durationDays = 1 } = req.body;
+    const ratePerSqFtPerDay = 0.005;
+    const totalPrice = areaSqFt * ratePerSqFtPerDay * durationDays;
 
     res.json({
-        price: Math.round(totalPrice),
-        ratePerSqFt: baseRate,
+        price: Math.ceil(totalPrice),
+        ratePerSqFt: ratePerSqFtPerDay,
         currency: 'INR'
     });
 });
@@ -547,26 +547,54 @@ app.post('/api/brands/create-ad', upload.single('adContent'), async (req, res) =
     }
 });
 
-app.post('/api/brands/verify-payment', async (req, res) => {
-    const { adId, paymentId } = req.body;
-    // In a real app, verify signature with Razorpay
-    // For now, just update status
+// --- RAZORPAY INTEGRATION ---
 
+
+
+app.post('/api/brands/create-order', async (req, res) => {
+    const { amount, currency = 'INR', receipt } = req.body;
     try {
-        await pool.query(`
-            UPDATE ads SET payment_status = 'PAID' WHERE id = $1
-        `, [adId]);
-
-        // Notify game server to update map? 
-        // We can emit a socket event if we want real-time updates
-        io.emit('adUpdated', { adId });
-
-        res.json({ success: true, message: 'Payment verified, ad active!' });
-    } catch (err) {
-        console.error('Error verifying payment:', err);
-        res.status(500).json({ error: 'Internal server error' });
+        const options = {
+            amount: amount * 100, // Amount in paise
+            currency,
+            receipt,
+        };
+        const order = await razorpay.orders.create(options);
+        res.json(order);
+    } catch (error) {
+        console.error('Razorpay Order Error:', error);
+        res.status(500).json({ error: 'Failed to create order' });
     }
 });
+
+app.post('/api/brands/verify-payment', async (req, res) => {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, adId } = req.body;
+
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSignature = crypto
+        .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+        .update(body.toString())
+        .digest('hex');
+
+    if (expectedSignature === razorpay_signature) {
+        // Payment successful, update ad status
+        if (adId) {
+            try {
+                await pool.query(
+                    "UPDATE ads SET payment_status = 'PAID', payment_id = $1 WHERE id = $2",
+                    [razorpay_payment_id, adId]
+                );
+                console.log(`Ad ${adId} marked as PAID.`);
+            } catch (err) {
+                console.error('Error updating ad status:', err);
+            }
+        }
+        res.json({ success: true, message: "Payment verified" });
+    } else {
+        res.status(400).json({ success: false, error: "Invalid signature" });
+    }
+});
+
 
 // --- ROUTES ---
 app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
