@@ -547,6 +547,37 @@ app.post('/api/brands/create-ad', upload.single('adContent'), async (req, res) =
     }
 });
 
+// --- MOBILE APP API ---
+
+app.get('/api/ads', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT a.id, a.territory_id, a.brand_name, a.ad_content_url, a.ad_type, 
+                   t.area as territory_geometry
+            FROM ads a
+            JOIN territories t ON a.territory_id = t.id
+            WHERE a.payment_status = 'PAID' 
+              AND a.approval_status = 'APPROVED' 
+              AND a.status = 'ACTIVE'
+              AND a.end_time > NOW()
+        `);
+
+        const ads = result.rows.map(row => ({
+            id: row.id,
+            territoryId: row.territory_id,
+            brandName: row.brand_name,
+            contentUrl: row.ad_content_url,
+            type: row.ad_type,
+            geometry: row.territory_geometry // PostGIS geometry
+        }));
+
+        res.json(ads);
+    } catch (err) {
+        console.error('Error fetching ads:', err);
+        res.status(500).json({ error: 'Failed to fetch ads' });
+    }
+});
+
 // --- RAZORPAY INTEGRATION ---
 
 

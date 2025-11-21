@@ -46,9 +46,12 @@
            <li class="nav-item" role="presentation">
                <button class="nav-link" id="shop-tab" data-bs-toggle="tab" data-bs-target="#shop-tab-pane" type="button" role="tab">Shop & Prizes</button>
            </li>
-           <li class="nav-item" role="presentation">
+            <li class="nav-item" role="presentation">
                 <button class="nav-link" id="game-tab" data-bs-toggle="tab" data-bs-target="#game-tab-pane" type="button" role="tab">Game Management</button>
-           </li>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="ads-tab" data-bs-toggle="tab" data-bs-target="#ads-tab-pane" type="button" role="tab">Ads Management</button>
+            </li>
        </ul>
 
        <div class="tab-content" id="myTabContent">
@@ -285,6 +288,32 @@
            <!-- =========================== NEW SECTION ENDS HERE =======================// -->
            <!-- =======================================================================// -->
 
+           <div class="tab-pane fade p-3" id="ads-tab-pane" role="tabpanel">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Ads Overview</h5>
+                        <div class="table-responsive">
+                            <table class="table table-dark table-striped table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Brand</th>
+                                        <th>Territory</th>
+                                        <th>Type</th>
+                                        <th>Status</th>
+                                        <th>Approval</th>
+                                        <th>Content</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="ads-table-body">
+                                    <tr><td colspan="7" class="text-center">Loading ads...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+           </div>
+
        </div>
    </div>
 
@@ -361,8 +390,74 @@
            fetchChests();
            fetchShopData();
            fetchMegaPrizeData();
-           fetchGameManagementData();
-       }
+            fetchGameManagementData();
+            fetchAds();
+        }
+
+        async function fetchAds() {
+            try {
+                const ads = await apiFetch('/admin/api/ads');
+                renderAds(ads);
+            } catch (error) {
+                console.error('Error fetching ads:', error);
+            }
+        }
+
+        function renderAds(ads) {
+            const tableBody = document.getElementById('ads-table-body');
+            tableBody.innerHTML = '';
+            if (ads.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="7" class="text-center">No ads found.</td></tr>';
+                return;
+            }
+            ads.forEach(ad => {
+                const row = document.createElement('tr');
+                
+                const statusBadge = { 'ACTIVE': 'bg-success', 'PAUSED': 'bg-warning text-dark', 'DELETED': 'bg-danger' }[ad.status] || 'bg-secondary';
+                const approvalBadge = { 'APPROVED': 'bg-success', 'PENDING': 'bg-warning text-dark', 'REJECTED': 'bg-danger' }[ad.approval_status] || 'bg-secondary';
+
+                let actionsHtml = '<div class="btn-group">';
+                
+                if (ad.approval_status === 'PENDING') {
+                    actionsHtml += `<button class="btn btn-sm btn-success" onclick="manageAd(${ad.id}, 'approve')">Approve</button>`;
+                    actionsHtml += `<button class="btn btn-sm btn-danger" onclick="manageAd(${ad.id}, 'reject')">Reject</button>`;
+                }
+
+                if (ad.status === 'ACTIVE') {
+                    actionsHtml += `<button class="btn btn-sm btn-warning" onclick="manageAd(${ad.id}, 'pause')">Pause</button>`;
+                } else if (ad.status === 'PAUSED') {
+                    actionsHtml += `<button class="btn btn-sm btn-success" onclick="manageAd(${ad.id}, 'resume')">Resume</button>`;
+                }
+
+                actionsHtml += `<button class="btn btn-sm btn-outline-danger" onclick="manageAd(${ad.id}, 'delete')">Delete</button>`;
+                actionsHtml += '</div>';
+
+                row.innerHTML = `
+                    <td>${ad.brand_name}</td>
+                    <td>${ad.territory_name || ad.territory_id}</td>
+                    <td>${ad.ad_type}</td>
+                    <td><span class="badge ${statusBadge}">${ad.status}</span></td>
+                    <td><span class="badge ${approvalBadge}">${ad.approval_status}</span></td>
+                    <td><a href="${ad.ad_content_url}" target="_blank" class="btn btn-sm btn-info">View</a></td>
+                    <td>${actionsHtml}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+
+        async function manageAd(id, action) {
+            if (!confirm(`Are you sure you want to ${action} this ad?`)) return;
+            try {
+                let method = 'POST';
+                if (action === 'delete') method = 'DELETE';
+                
+                const result = await apiFetch(`/admin/api/ads/${id}/${action}`, { method });
+                alert(result.message);
+                fetchAds();
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
 
 
        async function fetchPlayers() {
