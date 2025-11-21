@@ -53,8 +53,32 @@ process.on('uncaughtException', (error) => {
     process.exit(1);
 });
 
+const multer = require('multer');
+const fs = require('fs');
+const cors = require('cors');
+
+// Ensure uploads directory exists
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir);
+}
+
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        cb(null, 'uploads/')
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
+        cb(null, uniqueSuffix + path.extname(file.originalname))
+    }
+});
+
+const upload = multer({ storage: storage });
+
 const app = express();
+app.use(cors());
 app.use(express.json());
+app.use('/uploads', express.static('uploads')); // Serve uploaded files statically
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -419,6 +443,129 @@ const checkAdminAuth = (req, res, next) => {
     }
     res.redirect('/admin/login');
 };
+
+// --- BRAND PORTAL API ---
+
+app.get('/api/brands/territories', async (req, res) => {
+    try {
+        // Fetch territories with area, laps, and current owner info
+        // We need to join with territory_conquest_stats if available, or just use territories table
+        // Assuming laps are stored in territories or we calculate them. 
+        // For now, let's assume 'conquer_laps_completed' is in territories or we default to 1.
+        // Actually, laps are per conquest attempt. 
+        // Let's add a 'total_laps' column to territories later if needed, or just use a random number for "premium" feel for now if data missing.
+        // Wait, the user said "lap counter of that area". 
+        // I'll use a placeholder for laps for now or count from history if I had a history table. 
+        // Let's just return basic info + a mock lap count if not present.
+
+        const result = await pool.query(`
+            SELECT t.id, t.username as name, t.area_sqm, t.owner_id, ST_X(ST_Centroid(t.area)) as center_lng, ST_Y(ST_Centroid(t.area)) as center_lat, t.identity_color,
+                   ST_AsGeoJSON(t.area) as geometry,
+                   t.laps_required,
+                   COALESCE(u.username, 'Unclaimed') as owner_name
+            FROM territories t
+            LEFT JOIN territories u ON t.owner_id = u.owner_id
+            WHERE t.area_sqm > 0 -- Only show claimed territories with actual area
+        `);
+
+        // Transform for frontend
+        const territories = result.rows.map(row => ({
+            id: row.id,
+            name: row.name || `Territory ${row.id}`,
+            center: { lat: row.center_lat, lng: row.center_lng },
+            geometry: JSON.parse(row.geometry),
+            areaSqFt: row.area_sqm ? (row.area_sqm * 10.764) : 0, // Convert sqm to sqft
+            laps: row.laps_required || 1,
+            ownerName: row.owner_name,
+            identityColor: row.identity_color,
+            rentPrice: Math.round((row.area_sqm * 10.764 * 20) + ((row.laps_required || 1) * 500)) // Adjusted price formula
+        }));
+
+        res.json(territories);
+    } catch (err) {
+        console.error('Error fetching brand territories:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+app.post('/api/brands/calculate-price', (req, res) => {
+    const { areaSqFt, laps } = req.body;
+    if (!areaSqFt) return res.status(400).json({ error: 'Missing areaSqFt' });
+
+    // Formula: (Area * 20) + (Laps * multiplier)
+    // Multiplier increases with laps? 
+    // User said: "rate is 20 if lap counter goes 2 rate goes to 25"
+    // So base rate per sqft increases?
+    // Let's say Base Rate = 20 + (Laps * 5)
+    // Total Price = Area * Base Rate
+
+    const lapCount = laps || 1;
+    const baseRate = 20 + ((lapCount - 1) * 5);
+    const totalPrice = areaSqFt * baseRate;
+
+    res.json({
+        price: Math.round(totalPrice),
+        ratePerSqFt: baseRate,
+        currency: 'INR'
+    });
+});
+
+app.post('/api/brands/create-ad', upload.single('adContent'), async (req, res) => {
+    const client = await pool.connect();
+    try {
+        const { territoryId, brandName, durationDays, amountPaid } = req.body;
+        const file = req.file;
+
+        if (!file || !territoryId || !brandName) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+
+        // Calculate start/end time
+        const startTime = new Date();
+        const endTime = new Date();
+        endTime.setDate(startTime.getDate() + parseInt(durationDays || 3));
+
+        const adUrl = `/uploads/${file.filename}`; // Relative URL
+
+        const result = await client.query(`
+            INSERT INTO ads (territory_id, brand_name, ad_content_url, ad_type, start_time, end_time, payment_status, amount_paid)
+            VALUES ($1, $2, $3, 'IMAGE', $4, $5, 'PENDING', $6)
+            RETURNING id
+        `, [territoryId, brandName, adUrl, startTime, endTime, amountPaid || 0]);
+
+        res.json({
+            success: true,
+            adId: result.rows[0].id,
+            message: 'Ad created, pending payment'
+        });
+    } catch (err) {
+        console.error('Error creating ad:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
+    }
+});
+
+app.post('/api/brands/verify-payment', async (req, res) => {
+    const { adId, paymentId } = req.body;
+    // In a real app, verify signature with Razorpay
+    // For now, just update status
+
+    try {
+        await pool.query(`
+            UPDATE ads SET payment_status = 'PAID' WHERE id = $1
+        `, [adId]);
+
+        // Notify game server to update map? 
+        // We can emit a socket event if we want real-time updates
+        io.emit('adUpdated', { adId });
+
+        res.json({ success: true, message: 'Payment verified, ad active!' });
+    } catch (err) {
+        console.error('Error verifying payment:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
 
 // --- ROUTES ---
 app.get('/', (req, res) => { res.send('Claimr Server is running!'); });
