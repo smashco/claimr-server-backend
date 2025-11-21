@@ -527,8 +527,13 @@
                 let method = 'POST';
                 if (action === 'delete') method = 'DELETE';
 
-                console.log(`Calling API: /admin/api/ads/${id}/${action} with method ${method}`);
-                const result = await apiFetch(`/admin/api/ads/${id}/${action}`, { method });
+                let url = `/admin/api/ads/${id}/${action}`;
+                if (action === 'delete') {
+                    url = `/admin/api/ads/${id}`;
+                }
+
+                console.log(`Calling API: ${url} with method ${method}`);
+                const result = await apiFetch(url, { method });
                 console.log('API result:', result);
                 alert(result.message);
                 fetchAds();
