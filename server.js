@@ -30,6 +30,8 @@ const logGame = debug('server:game');
 
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
+const { S3Client } = require('@aws-sdk/client-s3');
+const multerS3 = require('multer-s3');
 
 // Import managers and handlers
 const SuperpowerManager = require('./superpower_manager');
@@ -57,23 +59,28 @@ const multer = require('multer');
 const fs = require('fs');
 const cors = require('cors');
 
-// Ensure uploads directory exists
-const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir);
-}
-
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, 'uploads/')
-    },
-    filename: function (req, file, cb) {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
-        cb(null, uniqueSuffix + path.extname(file.originalname))
+// AWS S3 Configuration
+const s3 = new S3Client({
+    region: process.env.AWS_REGION,
+    credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
     }
 });
 
-const upload = multer({ storage: storage });
+const upload = multer({
+    storage: multerS3({
+        s3: s3,
+        bucket: process.env.S3_BUCKET_NAME,
+        metadata: function (req, file, cb) {
+            cb(null, { fieldName: file.fieldname });
+        },
+        key: function (req, file, cb) {
+            const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+            cb(null, 'uploads/' + uniqueSuffix + path.extname(file.originalname));
+        }
+    })
+});
 
 const app = express();
 app.use(cors());
@@ -526,7 +533,7 @@ app.post('/api/brands/create-ad', upload.single('adContent'), async (req, res) =
         const endTime = new Date();
         endTime.setDate(startTime.getDate() + parseInt(durationDays || 3));
 
-        const adUrl = `/uploads/${file.filename}`; // Relative URL
+        const adUrl = file.location; // S3 URL from multer-s3
 
         const result = await client.query(`
             INSERT INTO ads (territory_id, brand_name, ad_content_url, ad_type, start_time, end_time, payment_status, amount_paid)
