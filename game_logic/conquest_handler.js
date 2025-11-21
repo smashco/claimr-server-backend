@@ -241,6 +241,7 @@ class ConquestHandler {
         const similarity = this._calculatePathSimilarity(lapPath, conquest.referencePath);
 
         if (similarity < 0.7) { // 70% similarity threshold (flexible)
+            debug(`Conquest failed for ${attackerId}: Similarity ${Math.round(similarity * 100)}% < 70%. AvgError: ${Math.round((1 - similarity) * 50)}m`);
             this.activeConquests.delete(attackerId);
             return {
                 success: false,
