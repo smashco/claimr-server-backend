@@ -489,7 +489,7 @@ module.exports = (pool, io, geofenceService, players) => {
     router.get('/ads', async (req, res) => {
         try {
             const result = await pool.query(`
-                SELECT a.*, t.name as territory_name 
+                SELECT a.*, t.username as territory_name 
                 FROM ads a
                 JOIN territories t ON a.territory_id = t.id
                 ORDER BY a.created_at DESC
