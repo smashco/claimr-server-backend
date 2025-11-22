@@ -554,6 +554,17 @@ app.post('/api/brands/create-ad', upload.single('adContent'), async (req, res) =
     }
 });
 
+app.delete('/api/brands/ads/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        await pool.query("UPDATE ads SET status = 'DELETED' WHERE id = $1", [id]);
+        res.json({ success: true, message: 'Ad deleted successfully' });
+    } catch (err) {
+        console.error('Error deleting ad:', err);
+        res.status(500).json({ error: 'Failed to delete ad' });
+    }
+});
+
 app.get('/api/brands/dashboard-stats', async (req, res) => {
     const { brandName } = req.query;
     if (!brandName) {
@@ -563,17 +574,17 @@ app.get('/api/brands/dashboard-stats', async (req, res) => {
     console.log(`[API] Fetching dashboard stats for brand: '${brandName}'`);
 
     try {
-        // Fetch all ads for this brand (case-insensitive)
+        // Fetch latest ad per territory for this brand (case-insensitive)
         const adsResult = await pool.query(`
-            SELECT a.id, a.brand_name, a.ad_content_url, a.status, a.approval_status, a.payment_status, a.amount_paid, a.start_time, a.end_time,
-                   t.username as territory_name, t.area_sqm
+            SELECT DISTINCT ON (a.territory_id) a.id, a.brand_name, a.ad_content_url, a.status, a.approval_status, a.payment_status, a.amount_paid, a.start_time, a.end_time,
+                   t.id as territory_id, t.username as territory_name, t.area_sqm, ST_AsGeoJSON(t.area) as geojson
             FROM ads a
             JOIN territories t ON a.territory_id = t.id
             WHERE LOWER(a.brand_name) = LOWER($1)
-            ORDER BY a.created_at DESC
+            ORDER BY a.territory_id, a.created_at DESC
         `, [brandName]);
 
-        console.log(`[API] Found ${adsResult.rowCount} ads for brand '${brandName}'`);
+        console.log(`[API] Found ${adsResult.rowCount} unique active campaigns for brand '${brandName}'`);
 
         const campaigns = adsResult.rows.map(row => {
             const now = new Date();
