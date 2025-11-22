@@ -612,8 +612,13 @@ app.get('/api/brands/dashboard-stats', async (req, res) => {
             return {
                 id: row.id,
                 name: row.territory_name || 'Unknown Territory',
+                territory_name: row.territory_name,
+                territory_id: row.territory_id,
                 status: status,
                 views: views,
+                area_sqm: row.area_sqm,
+                geojson: row.geojson,
+                end_time: row.end_time,
                 expires: timeLeft > 0 ? `${Math.ceil(timeLeft / (1000 * 60 * 60))}h` : 'Expired',
                 amountPaid: row.amount_paid || 0
             };
@@ -640,31 +645,54 @@ app.get('/api/brands/dashboard-stats', async (req, res) => {
 
 app.get('/api/brands/available-territories', async (req, res) => {
     try {
-        // Fetch territories that are valid for renting
-        // We don't have city/country, so we'll just return what we have
+        // Fetch DISTINCT territories to avoid duplicates
         const result = await pool.query(`
-            SELECT id, username, area_sqm, ST_AsGeoJSON(area) as geojson, identity_color
+            SELECT DISTINCT ON (id) id, username, area_sqm, ST_AsGeoJSON(area) as geojson, 
+                   ST_Y(ST_Centroid(area)) as lat, ST_X(ST_Centroid(area)) as lng, identity_color
             FROM territories
             WHERE owner_id IS NOT NULL AND area_sqm > 0
-            ORDER BY area_sqm DESC
+            ORDER BY id, area_sqm DESC
             LIMIT 50
         `);
 
-        const territories = result.rows.map(row => {
-            const geojson = JSON.parse(row.geojson);
-            // Calculate center roughly from geometry or if we had a center column
-            // For now, let's just send the data. Frontend can calculate center.
-            return {
-                id: row.id,
-                name: row.username,
-                areaSqFt: row.area_sqm, // Assuming sqm for now, frontend labels it sqft sometimes
-                price: Math.floor(row.area_sqm * 0.015), // Mock price calculation
-                geojson: geojson,
-                identityColor: row.identity_color
-            };
-        });
+        // Helper function for reverse geocoding (simplified - using Nominatim)
+        const getLocationName = async (lat, lng) => {
+            try {
+                const response = await fetch(
+                    `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=10`,
+                    { headers: { 'User-Agent': 'ClaimrBrandPortal/1.0' } }
+                );
+                const data = await response.json();
+                const city = data.address?.city || data.address?.town || data.address?.village || 'Unknown';
+                const country = data.address?.country || 'Unknown';
+                return { city, country };
+            } catch (err) {
+                console.error('Geocoding error:', err);
+                return { city: 'Unknown', country: 'Unknown' };
+            }
+        };
 
-        res.json(territories);
+        // Process territories with location data
+        const territoriesWithLocation = await Promise.all(
+            result.rows.map(async (row) => {
+                const geojson = JSON.parse(row.geojson);
+                const location = await getLocationName(row.lat, row.lng);
+
+                return {
+                    id: row.id,
+                    name: row.username,
+                    areaSqFt: row.area_sqm,
+                    price: Math.floor(row.area_sqm * 0.015),
+                    geojson: geojson,
+                    identityColor: row.identity_color,
+                    city: location.city,
+                    country: location.country,
+                    center: { lat: row.lat, lng: row.lng }
+                };
+            })
+        );
+
+        res.json(territoriesWithLocation);
     } catch (err) {
         console.error('Error fetching available territories:', err);
         res.status(500).json({ error: 'Failed to fetch territories' });
