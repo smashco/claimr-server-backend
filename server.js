@@ -175,6 +175,7 @@ const setupDatabase = async () => {
 
         await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS laps_required INTEGER DEFAULT 1;');
         await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS brand_wrapper VARCHAR(100);');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS brand_url TEXT;');
         await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS unique_player_id VARCHAR(10) UNIQUE;');
         await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS phone_number VARCHAR(20);');
         await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS instagram_id VARCHAR(100);');
@@ -1564,7 +1565,8 @@ io.on('connection', (socket) => {
                     ST_AsGeoJSON(area) as geojson,
                     area_sqm as area,
                     laps_required,
-                    brand_wrapper
+                    brand_wrapper,
+                    brand_url
                 FROM territories
                 WHERE area IS NOT NULL AND NOT ST_IsEmpty(area);
             `;
