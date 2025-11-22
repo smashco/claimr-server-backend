@@ -638,6 +638,39 @@ app.get('/api/brands/dashboard-stats', async (req, res) => {
     }
 });
 
+app.get('/api/brands/available-territories', async (req, res) => {
+    try {
+        // Fetch territories that are valid for renting
+        // We don't have city/country, so we'll just return what we have
+        const result = await pool.query(`
+            SELECT id, username, area_sqm, ST_AsGeoJSON(area) as geojson, identity_color
+            FROM territories
+            WHERE owner_id IS NOT NULL AND area_sqm > 0
+            ORDER BY area_sqm DESC
+            LIMIT 50
+        `);
+
+        const territories = result.rows.map(row => {
+            const geojson = JSON.parse(row.geojson);
+            // Calculate center roughly from geometry or if we had a center column
+            // For now, let's just send the data. Frontend can calculate center.
+            return {
+                id: row.id,
+                name: row.username,
+                areaSqFt: row.area_sqm, // Assuming sqm for now, frontend labels it sqft sometimes
+                price: Math.floor(row.area_sqm * 0.015), // Mock price calculation
+                geojson: geojson,
+                identityColor: row.identity_color
+            };
+        });
+
+        res.json(territories);
+    } catch (err) {
+        console.error('Error fetching available territories:', err);
+        res.status(500).json({ error: 'Failed to fetch territories' });
+    }
+});
+
 // --- MOBILE APP API ---
 
 app.get('/api/ads', async (req, res) => {
