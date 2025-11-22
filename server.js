@@ -554,6 +554,79 @@ app.post('/api/brands/create-ad', upload.single('adContent'), async (req, res) =
     }
 });
 
+app.get('/api/brands/dashboard-stats', async (req, res) => {
+    const { brandName } = req.query;
+    if (!brandName) {
+        return res.status(400).json({ error: 'Missing brandName' });
+    }
+
+    console.log(`[API] Fetching dashboard stats for brand: '${brandName}'`);
+
+    try {
+        // Fetch all ads for this brand (case-insensitive)
+        const adsResult = await pool.query(`
+            SELECT a.id, a.brand_name, a.ad_content_url, a.status, a.approval_status, a.payment_status, a.amount_paid, a.start_time, a.end_time,
+                   t.username as territory_name, t.area_sqm
+            FROM ads a
+            JOIN territories t ON a.territory_id = t.id
+            WHERE LOWER(a.brand_name) = LOWER($1)
+            ORDER BY a.created_at DESC
+        `, [brandName]);
+
+        console.log(`[API] Found ${adsResult.rowCount} ads for brand '${brandName}'`);
+
+        const campaigns = adsResult.rows.map(row => {
+            const now = new Date();
+            const end = new Date(row.end_time);
+            const timeLeft = end.getTime() - now.getTime();
+
+            // Calculate mock views based on area and time active
+            const hoursActive = (now.getTime() - new Date(row.start_time).getTime()) / (1000 * 60 * 60);
+            const views = Math.floor((row.area_sqm || 100) * (hoursActive > 0 ? hoursActive : 0) * 0.5);
+
+            let status = 'Active';
+
+            if (row.approval_status === 'REJECTED') {
+                status = 'Rejected';
+            } else if (row.approval_status === 'PENDING') {
+                status = 'Pending Approval';
+            } else if (row.payment_status !== 'PAID') {
+                status = 'Pending Payment';
+            } else if (timeLeft < 0) {
+                status = 'Expired';
+            } else if (timeLeft < 3600000) {
+                status = 'Ending Soon'; // < 1 hour
+            }
+
+            return {
+                id: row.id,
+                name: row.territory_name || 'Unknown Territory',
+                status: status,
+                views: views,
+                expires: timeLeft > 0 ? `${Math.ceil(timeLeft / (1000 * 60 * 60))}h` : 'Expired',
+                amountPaid: row.amount_paid || 0
+            };
+        });
+
+        // Calculate totals
+        const totalAds = campaigns.filter(c => c.status === 'Active' || c.status === 'Ending Soon').length;
+        const totalViews = campaigns.reduce((acc, curr) => acc + curr.views, 0);
+        const totalSpend = campaigns.reduce((acc, curr) => acc + parseFloat(curr.amountPaid), 0);
+
+        res.json({
+            stats: {
+                activeAds: totalAds,
+                totalViews: totalViews,
+                totalSpend: totalSpend
+            },
+            campaigns: campaigns
+        });
+    } catch (err) {
+        console.error('Error fetching dashboard stats:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // --- MOBILE APP API ---
 
 app.get('/api/ads', async (req, res) => {
