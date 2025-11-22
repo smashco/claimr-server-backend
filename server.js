@@ -580,7 +580,7 @@ app.get('/api/brands/dashboard-stats', async (req, res) => {
                    t.id as territory_id, t.username as territory_name, t.area_sqm, ST_AsGeoJSON(t.area) as geojson
             FROM ads a
             JOIN territories t ON a.territory_id = t.id
-            WHERE LOWER(a.brand_name) = LOWER($1)
+            WHERE LOWER(a.brand_name) = LOWER($1) AND a.status != 'DELETED'
             ORDER BY a.territory_id, a.created_at DESC
         `, [brandName]);
 
