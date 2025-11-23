@@ -88,7 +88,7 @@ app.use(express.json());
 app.use('/uploads', express.static('uploads')); // Serve uploaded files statically
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST", "PUT", "DELETE"] } });
@@ -519,30 +519,30 @@ app.post('/api/brands/calculate-price', (req, res) => {
     });
 });
 
-app.post('/api/brands/create-ad', upload.single('adContent'), async (req, res) => {
+app.post('/api/brands/create-ad', upload.fields([{ name: 'adContent', maxCount: 1 }, { name: 'overlayContent', maxCount: 1 }]), async (req, res) => {
     const client = await pool.connect();
     try {
-        const { territoryId, brandName, durationDays, amountPaid } = req.body;
-        const file = req.file;
+        const { territoryId, brandName, durationDays, amountPaid, backgroundColor } = req.body;
 
-        if (!file || !territoryId || !brandName) {
-            return res.status(400).json({ error: 'Missing required fields' });
+        if (!req.files || !req.files['adContent'] || !req.files['overlayContent']) {
+            return res.status(400).json({ error: 'Missing required files' });
         }
 
-        // Calculate start/end time
+        const adContentUrl = req.files['adContent'][0].location;
+        const overlayUrl = req.files['overlayContent'][0].location;
+
+        // Calculate start and end times
         const startTime = new Date();
         const endTime = new Date();
-        endTime.setDate(startTime.getDate() + parseInt(durationDays || 3));
+        endTime.setDate(endTime.getDate() + parseInt(durationDays));
 
-        const adUrl = file.location; // S3 URL from multer-s3
-
+        // Create Ad (Pending Payment)
         const result = await client.query(`
-            INSERT INTO ads (territory_id, brand_name, ad_content_url, ad_type, start_time, end_time, payment_status, amount_paid)
-            VALUES ($1, $2, $3, 'IMAGE', $4, $5, 'PENDING', $6)
-            RETURNING id
-        `, [territoryId, brandName, adUrl, startTime, endTime, amountPaid || 0]);
-
-        res.json({
+            INSERT INTO ads (territory_id, brand_name, ad_content_url, background_color, overlay_url, ad_type, start_time, end_time, payment_status, amount_paid)
+            VALUES ($1, $2, $3, $4, $5, 'IMAGE', $6, $7, 'PENDING', $8)
+            RETURNING id`,
+            [territoryId, brandName, adContentUrl, backgroundColor, overlayUrl, startTime, endTime, amountPaid]
+        ); res.json({
             success: true,
             adId: result.rows[0].id,
             message: 'Ad created, pending payment'
@@ -1557,18 +1557,23 @@ io.on('connection', (socket) => {
             else {
                 const query = `
                 SELECT
-                    id,
-                    owner_id as "ownerId",
-                    username as "ownerName",
-                    profile_image_url as "profileImageUrl",
-                    identity_color,
-                    ST_AsGeoJSON(area) as geojson,
-                    area_sqm as area,
-                    laps_required,
-                    brand_wrapper,
-                    brand_url
-                FROM territories
-                WHERE area IS NOT NULL AND NOT ST_IsEmpty(area);
+                    t.id,
+                    t.owner_id as "ownerId",
+                    t.username as "ownerName",
+                    t.profile_image_url as "profileImageUrl",
+                    t.identity_color,
+                    ST_AsGeoJSON(t.area) as geojson,
+                    t.area_sqm as area,
+                    t.laps_required,
+                    t.brand_wrapper,
+                    t.brand_url,
+                    a.background_color as "adBackgroundColor",
+                    a.overlay_url as "adOverlayUrl",
+                    a.ad_content_url as "adContentUrl",
+                    a.brand_name as "adBrandName"
+                FROM territories t
+                LEFT JOIN ads a ON t.id = a.territory_id AND a.payment_status = 'PAID' AND a.start_time <= NOW() AND a.end_time >= NOW()
+                WHERE t.area IS NOT NULL AND NOT ST_IsEmpty(t.area);
             `;
                 const territoryResult = await client.query(query);
                 activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));

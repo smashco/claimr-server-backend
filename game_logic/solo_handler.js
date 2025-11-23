@@ -162,17 +162,22 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
     if (allAffectedIds.length > 0) {
         const queryResult = await client.query(`
             SELECT 
-                id,
-                owner_id as "ownerId", 
-                username as "ownerName", 
-                profile_image_url as "profileImageUrl", 
-                identity_color, 
-                ST_AsGeoJSON(area) as geojson, 
-                area_sqm as area,
-                laps_required,
-                brand_wrapper
-            FROM territories 
-            WHERE owner_id = ANY($1::varchar[])`,
+                t.id,
+                t.owner_id as "ownerId", 
+                t.username as "ownerName", 
+                t.profile_image_url as "profileImageUrl", 
+                t.identity_color, 
+                ST_AsGeoJSON(t.area) as geojson, 
+                t.area_sqm as area,
+                t.laps_required,
+                t.brand_wrapper,
+                t.brand_url,
+                a.background_color as "adBackgroundColor",
+                a.overlay_url as "adOverlayUrl",
+                a.ad_content_url as "adContentUrl"
+            FROM territories t
+            LEFT JOIN ads a ON t.id = a.territory_id AND a.payment_status = 'PAID' AND a.start_time <= NOW() AND a.end_time >= NOW()
+            WHERE t.owner_id = ANY($1::varchar[])`,
             [allAffectedIds]
         );
         queryResult.rows.forEach(r => {

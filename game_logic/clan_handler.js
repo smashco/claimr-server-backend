@@ -23,7 +23,7 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
         socket.emit('claimRejected', { reason: 'Expansion trail must have at least 3 points.' });
         return null;
     }
-    
+
     const pointsForPolygon = [...trail.map(p => [p.lng, p.lat]), trail[0] ? [trail[0].lng, trail[0].lat] : null].filter(Boolean);
     let newAreaPolygon;
     try {
@@ -35,7 +35,7 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
     }
 
     const newAreaSqM = turf.area(newAreaPolygon);
-    if (newAreaSqM < 100) { 
+    if (newAreaSqM < 100) {
         socket.emit('claimRejected', { reason: 'Area is too small to claim (min 100sqm).' });
         return null;
     }
@@ -56,7 +56,7 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
         socket.emit('claimRejected', { reason: 'Expansion must connect to your clan\'s existing territory.' });
         return null;
     }
-    
+
     const newAreaWKT = `ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}')`;
     const affectedOwnerIds = new Set();
     affectedOwnerIds.add(clanId.toString());
@@ -66,20 +66,40 @@ async function handleClanClaim(io, socket, player, trail, baseClaim, client) {
     const unionResult = await client.query(`
         SELECT ST_AsGeoJSON(ST_Union(ST_GeomFromGeoJSON($1), ${newAreaWKT})) AS united_area;
     `, [existingClanAreaGeoJSON]);
-    
+
     const finalClanAreaGeoJSON = unionResult.rows[0].united_area;
     const finalClanAreaSqM = turf.area(JSON.parse(finalClanAreaGeoJSON));
     console.log(`[ClanClaim] Unioned new area for clan ${clanId}. Total: ${finalClanAreaSqM}`);
-    
+
     await client.query(`
         UPDATE clan_territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2
         WHERE clan_id = $3;
     `, [finalClanAreaGeoJSON, finalClanAreaSqM, clanId]);
 
+    const updatedTerritories = [];
+    const queryResult = await client.query(`
+        SELECT 
+            clan_id as "ownerId", 
+            name as "ownerName", 
+            clan_image_url as "profileImageUrl", 
+            '#CCCCCC' as identity_color, 
+            ST_AsGeoJSON(area) as geojson, 
+            area_sqm as area
+        FROM clan_territories ct
+        JOIN clans c ON ct.clan_id = c.id
+        WHERE ct.clan_id = $1
+    `, [clanId]);
+
+    if (queryResult.rows.length > 0) {
+        const r = queryResult.rows[0];
+        updatedTerritories.push({ ...r, geojson: JSON.parse(r.geojson) });
+    }
+
     return {
         finalTotalArea: finalClanAreaSqM,
         areaClaimed: newAreaSqM,
-        ownerIdsToUpdate: Array.from(affectedOwnerIds)
+        updatedTerritories: updatedTerritories,
+        newTerritoryId: null // Clan territories might not have a single ID in the same way, or we can ignore
     };
 }
 
