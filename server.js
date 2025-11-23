@@ -90,6 +90,12 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
 
+// Redirect legacy /design to /brand/design
+app.get('/design', (req, res) => {
+    const query = req.url.split('?')[1];
+    res.redirect('/brand/design' + (query ? '?' + query : ''));
+});
+
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST", "PUT", "DELETE"] } });
 
