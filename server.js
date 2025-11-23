@@ -224,6 +224,7 @@ const setupDatabase = async () => {
         await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS trail_effect VARCHAR(50) DEFAULT \'default\';');
         await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS banned_until TIMESTAMP WITH TIME ZONE;');
         await client.query('ALTER TABLE territories DROP COLUMN IF EXISTS is_banned;');
+        await client.query('ALTER TABLE territories ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;');
         logDb('Ensured all columns exist on "territories" table.');
 
         await client.query(`
@@ -800,6 +801,7 @@ app.get('/api/player/rent-earnings', authenticate, async (req, res) => {
                 a.end_time,
                 t.id as territory_id,
                 t.area_sqm,
+                t.claimed_at,
                 a.created_at
             FROM ads a
             JOIN territories t ON a.territory_id = t.id
@@ -825,6 +827,7 @@ app.get('/api/player/rent-earnings', authenticate, async (req, res) => {
                 areaSqm: row.area_sqm,
                 startTime: row.start_time,
                 endTime: row.end_time,
+                claimedAt: row.claimed_at, // Send claim time to frontend
                 daysRemaining: Math.ceil((new Date(row.end_time) - new Date()) / (1000 * 60 * 60 * 24))
             }))
         });

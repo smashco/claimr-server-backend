@@ -256,8 +256,8 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
         // Multi-base mode: INSERT new territory row
         debug(`[SOLO_HANDLER] Multi-base mode: Inserting new territory row`);
         updateResult = await client.query(
-            `INSERT INTO territories (owner_id, username, profile_image_url, identity_color, area, area_sqm, laps_required)
-                 VALUES ($1, $2, $3, $4, ST_GeomFromGeoJSON($5), $6, 1)
+            `INSERT INTO territories (owner_id, username, profile_image_url, identity_color, area, area_sqm, laps_required, claimed_at)
+                 VALUES ($1, $2, $3, $4, ST_GeomFromGeoJSON($5), $6, 1, NOW())
                  RETURNING id`,
             [userId, player.name, player.profileImageUrl, player.identityColor, finalAreaGeoJSON, finalAreaSqM]
         );
@@ -265,7 +265,7 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
         // Normal mode: UPDATE existing territory
         debug(`[SOLO_HANDLER] Normal mode: Updating existing territory`);
         updateResult = await client.query(
-            `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3 RETURNING id`,
+            `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2, claimed_at = NOW() WHERE owner_id = $3 RETURNING id`,
             [finalAreaGeoJSON, finalAreaSqM, userId]
         );
     }
