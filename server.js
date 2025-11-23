@@ -851,6 +851,38 @@ app.post('/api/brands/verify-payment', async (req, res) => {
                     [razorpay_payment_id, adId]
                 );
                 console.log(`Ad ${adId} marked as PAID.`);
+
+                // Send notification to territory owner
+                try {
+                    const adInfo = await pool.query(`
+                        SELECT a.brand_name, a.amount_paid, t.owner_id, t.username
+                        FROM ads a
+                        JOIN territories t ON a.territory_id = t.id
+                        WHERE a.id = $1
+                    `, [adId]);
+
+                    if (adInfo.rows.length > 0) {
+                        const { brand_name, amount_paid, owner_id, username } = adInfo.rows[0];
+
+                        // Send notification via WebSocket to the territory owner
+                        const ownerSocket = Array.from(io.sockets.sockets.values())
+                            .find(s => s.handshake.query.userId === owner_id);
+
+                        if (ownerSocket) {
+                            ownerSocket.emit('adRented', {
+                                brandName: brand_name,
+                                amount: amount_paid,
+                                message: `${brand_name} has rented your territory for ₹${amount_paid}! View your earnings in the Rent Screen.`
+                            });
+                            console.log(`Notification sent to ${username} about ad rental`);
+                        } else {
+                            console.log(`User ${username} not connected, notification not sent`);
+                        }
+                    }
+                } catch (notifErr) {
+                    console.error('Error sending notification:', notifErr);
+                    // Don't fail the payment verification if notification fails
+                }
             } catch (err) {
                 console.error('Error updating ad status:', err);
             }
