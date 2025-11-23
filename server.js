@@ -735,7 +735,7 @@ app.get('/api/ads', async (req, res) => {
         console.log('[API] All ads in DB:', allAds.rows);
 
         const result = await pool.query(`
-            SELECT a.id, a.territory_id, a.brand_name, a.ad_content_url, a.ad_type, 
+            SELECT a.id, a.territory_id, a.brand_name, a.ad_content_url, a.overlay_url, a.ad_type, 
                    t.area as territory_geometry
             FROM ads a
             JOIN territories t ON a.territory_id = t.id
@@ -750,6 +750,7 @@ app.get('/api/ads', async (req, res) => {
             territoryId: row.territory_id,
             brandName: row.brand_name,
             contentUrl: row.ad_content_url,
+            overlayUrl: row.overlay_url,
             type: row.ad_type,
             geometry: row.territory_geometry // PostGIS geometry
         }));
