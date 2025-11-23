@@ -144,8 +144,27 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
 
     if (userExistingRes.rowCount > 0 && userExistingRes.rows[0].area) {
         if (hasActiveAds) {
-            // Player has active ads - allow multiple disconnected bases
-            debug(`[SOLO_HANDLER] Active ads detected. Allowing disconnected base creation.`);
+            // Player has active ads - check if they've expanded their existing base
+            debug(`[SOLO_HANDLER] Active ads detected. Checking base expansion requirement.`);
+
+            // Calculate area of initial 30m circle: π * 30^2 ≈ 2827 sqm
+            const INITIAL_BASE_AREA = Math.PI * SOLO_BASE_RADIUS_METERS * SOLO_BASE_RADIUS_METERS;
+            const EXPANSION_THRESHOLD = INITIAL_BASE_AREA * 1.5; // Must be 50% larger than initial circle
+
+            // Get total area of existing territories
+            const areaCheckRes = await client.query(`
+                SELECT SUM(area_sqm) as total_area
+                FROM territories
+                WHERE owner_id = $1
+            `, [userId]);
+
+            const totalExistingArea = parseFloat(areaCheckRes.rows[0].total_area) || 0;
+            debug(`[SOLO_HANDLER] Total existing area: ${totalExistingArea.toFixed(2)} sqm, Threshold: ${EXPANSION_THRESHOLD.toFixed(2)} sqm`);
+
+            if (totalExistingArea < EXPANSION_THRESHOLD) {
+                throw new Error(`You must expand your existing base beyond the initial circle before creating a new base! (Need ${(EXPANSION_THRESHOLD - totalExistingArea).toFixed(0)} more sqm)`);
+            }
+
             // Do NOT merge - keep as separate territory
             // The new area will be inserted as a new row instead of merged
         } else {

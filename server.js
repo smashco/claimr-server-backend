@@ -763,6 +763,56 @@ app.get('/api/ads', async (req, res) => {
     }
 });
 
+// Get rent earnings for a player
+app.get('/api/player/rent-earnings', async (req, res) => {
+    const { userId } = req.query;
+    if (!userId) {
+        return res.status(400).json({ error: 'Missing userId' });
+    }
+
+    try {
+        // Get all active ads on player's territories
+        const result = await pool.query(`
+            SELECT 
+                a.id as ad_id,
+                a.brand_name,
+                a.amount_paid,
+                a.start_time,
+                a.end_time,
+                t.id as territory_id,
+                t.area_sqm,
+                a.created_at
+            FROM ads a
+            JOIN territories t ON a.territory_id = t.id
+            WHERE t.owner_id = $1
+              AND a.payment_status = 'PAID'
+              AND a.end_time >= NOW()
+            ORDER BY a.created_at DESC
+        `, [userId]);
+
+        const totalEarnings = result.rows.reduce((sum, row) => sum + parseFloat(row.amount_paid || 0), 0);
+        const activeAds = result.rows.length;
+
+        res.json({
+            totalEarnings: totalEarnings.toFixed(2),
+            activeAds,
+            rentals: result.rows.map(row => ({
+                adId: row.ad_id,
+                brandName: row.brand_name,
+                amount: parseFloat(row.amount_paid).toFixed(2),
+                territoryId: row.territory_id,
+                areaSqm: row.area_sqm,
+                startTime: row.start_time,
+                endTime: row.end_time,
+                daysRemaining: Math.ceil((new Date(row.end_time) - new Date()) / (1000 * 60 * 60 * 24))
+            }))
+        });
+    } catch (err) {
+        console.error('Error fetching rent earnings:', err);
+        res.status(500).json({ error: 'Failed to fetch rent earnings' });
+    }
+});
+
 // --- RAZORPAY INTEGRATION ---
 
 
