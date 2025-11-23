@@ -2109,6 +2109,103 @@ async function checkForScheduledReset() {
     }
 }
 
+// Check for expired ads and merge territories
+async function checkExpiredAds() {
+    const client = await pool.connect();
+    try {
+        // Find users who had active ads that just expired
+        const expiredAdsRes = await client.query(`
+            SELECT DISTINCT t.owner_id
+            FROM ads a
+            JOIN territories t ON a.territory_id = t.id
+            WHERE a.payment_status = 'PAID'
+              AND a.end_time < NOW()
+              AND a.end_time > NOW() - INTERVAL '5 minutes'
+        `);
+
+        for (const row of expiredAdsRes.rows) {
+            const ownerId = row.owner_id;
+
+            // Check if this user still has any active ads
+            const activeAdsCheck = await client.query(`
+                SELECT COUNT(*) as count
+                FROM ads a
+                JOIN territories t ON a.territory_id = t.id
+                WHERE t.owner_id = $1
+                  AND a.payment_status = 'PAID'
+                  AND a.start_time <= NOW()
+                  AND a.end_time >= NOW()
+            `, [ownerId]);
+
+            const hasActiveAds = parseInt(activeAdsCheck.rows[0].count) > 0;
+
+            // If no more active ads, merge all territories for this user
+            if (!hasActiveAds) {
+                console.log(`[AD_EXPIRATION] User ${ownerId} has no more active ads. Merging territories...`);
+
+                // Get all territories for this user
+                const territoriesRes = await client.query(`
+                    SELECT id, area
+                    FROM territories
+                    WHERE owner_id = $1
+                `, [ownerId]);
+
+                if (territoriesRes.rows.length > 1) {
+                    // Merge all territories into one
+                    const mergedAreaRes = await client.query(`
+                        SELECT ST_AsGeoJSON(ST_Union(area)) as merged_geojson
+                        FROM territories
+                        WHERE owner_id = $1
+                    `, [ownerId]);
+
+                    const mergedGeoJSON = mergedAreaRes.rows[0].merged_geojson;
+
+                    // Calculate total area
+                    const areaRes = await client.query(`
+                        SELECT ST_Area(ST_GeomFromGeoJSON($1)::geography) as total_area
+                    `, [mergedGeoJSON]);
+
+                    const totalArea = areaRes.rows[0].total_area;
+
+                    // Update the first territory with merged area
+                    const firstTerritoryId = territoriesRes.rows[0].id;
+                    await client.query(`
+                        UPDATE territories
+                        SET area = ST_GeomFromGeoJSON($1), area_sqm = $2
+                        WHERE id = $3
+                    `, [mergedGeoJSON, totalArea, firstTerritoryId]);
+
+                    // Delete other territories
+                    const otherTerritoryIds = territoriesRes.rows.slice(1).map(t => t.id);
+                    if (otherTerritoryIds.length > 0) {
+                        await client.query(`
+                            DELETE FROM territories
+                            WHERE id = ANY($1::int[])
+                        `, [otherTerritoryIds]);
+                    }
+
+                    console.log(`[AD_EXPIRATION] Merged ${territoriesRes.rows.length} territories for user ${ownerId}`);
+
+                    // Broadcast territory update
+                    io.emit('batchTerritoryUpdate', {
+                        updatedTerritories: [{
+                            id: firstTerritoryId,
+                            ownerId: ownerId,
+                            geojson: JSON.parse(mergedGeoJSON),
+                            area: totalArea
+                        }],
+                        deletedTerritoryIds: otherTerritoryIds
+                    });
+                }
+            }
+        }
+    } catch (err) {
+        console.error('[AD_EXPIRATION] Error checking expired ads:', err);
+    } finally {
+        client.release();
+    }
+}
+
 const main = async () => {
     server.listen(PORT, '0.0.0.0', () => {
         logLifecycle(`Server listening on 0.0.0.0:${PORT}`);
@@ -2116,7 +2213,8 @@ const main = async () => {
             console.error("[SERVER] FATAL: Failed to setup database after server start:", err);
             process.exit(1);
         });
-        setInterval(checkForScheduledReset, 60 * 1000);
+        setInterval(checkForScheduledReset, 60 * 1000); // Check every minute
+        setInterval(checkExpiredAds, 5 * 60 * 1000); // Check every 5 minutes
     });
 };
 
