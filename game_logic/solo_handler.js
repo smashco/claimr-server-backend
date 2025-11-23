@@ -125,23 +125,78 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
     }
     // --- END OF COMPETITIVE LOGIC ---
 
+    // Check if player has any active ads
+    const activeAdsCheck = await client.query(`
+        SELECT COUNT(*) as ad_count
+        FROM ads a
+        JOIN territories t ON a.territory_id = t.id
+        WHERE t.owner_id = $1
+          AND a.payment_status = 'PAID'
+          AND a.start_time <= NOW()
+          AND a.end_time >= NOW()
+    `, [userId]);
+
+    const hasActiveAds = parseInt(activeAdsCheck.rows[0].ad_count) > 0;
+    debug(`[SOLO_HANDLER] Player has active ads: ${hasActiveAds}`);
+
     const userExistingRes = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
     let finalAreaGeoJSON = JSON.stringify(newAreaPolygon.geometry);
 
     if (userExistingRes.rowCount > 0 && userExistingRes.rows[0].area) {
-        debug(`[SOLO_HANDLER] Merging new area with existing land for user ${userId}`);
-        const unionRes = await client.query(`SELECT ST_AsGeoJSON(ST_Union(area, ST_GeomFromGeoJSON($1))) as geojson FROM territories WHERE owner_id = $2`, [finalAreaGeoJSON, userId]);
-        finalAreaGeoJSON = unionRes.rows[0].geojson;
+        if (hasActiveAds) {
+            // Player has active ads - allow multiple disconnected bases
+            debug(`[SOLO_HANDLER] Active ads detected. Allowing disconnected base creation.`);
+            // Do NOT merge - keep as separate territory
+            // The new area will be inserted as a new row instead of merged
+        } else {
+            // No active ads - enforce normal expansion (must touch existing territory)
+            debug(`[SOLO_HANDLER] No active ads. Checking if new area touches existing territory.`);
+
+            // Check if new area touches existing territory
+            const touchCheckRes = await client.query(`
+                SELECT ST_Touches(
+                    area,
+                    ST_GeomFromGeoJSON($1)
+                ) as touches
+                FROM territories
+                WHERE owner_id = $2
+            `, [finalAreaGeoJSON, userId]);
+
+            const touchesExisting = touchCheckRes.rows.some(row => row.touches);
+
+            if (!touchesExisting && !isInitialBaseClaim) {
+                throw new Error('Expansion must touch your existing territory. Create an ad to unlock multi-base mode!');
+            }
+
+            // Normal merging behavior
+            debug(`[SOLO_HANDLER] Merging new area with existing land for user ${userId}`);
+            const unionRes = await client.query(`SELECT ST_AsGeoJSON(ST_Union(area, ST_GeomFromGeoJSON($1))) as geojson FROM territories WHERE owner_id = $2`, [finalAreaGeoJSON, userId]);
+            finalAreaGeoJSON = unionRes.rows[0].geojson;
+        }
     }
 
     const finalAreaSqMRes = await client.query(`SELECT ST_Area(ST_GeomFromGeoJSON($1)::geography) as area`, [finalAreaGeoJSON]);
     const finalAreaSqM = finalAreaSqMRes.rows[0].area || 0;
     debug(`[SOLO_HANDLER] Final total area for ${player.name}: ${finalAreaSqM.toFixed(2)} sqm`);
 
-    const updateResult = await client.query(
-        `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3 RETURNING id`,
-        [finalAreaGeoJSON, finalAreaSqM, userId]
-    );
+    let updateResult;
+    if (hasActiveAds && userExistingRes.rowCount > 0) {
+        // Multi-base mode: INSERT new territory row
+        debug(`[SOLO_HANDLER] Multi-base mode: Inserting new territory row`);
+        updateResult = await client.query(
+            `INSERT INTO territories (owner_id, username, profile_image_url, identity_color, area, area_sqm, laps_required)
+             VALUES ($1, $2, $3, $4, ST_GeomFromGeoJSON($5), $6, 1)
+             RETURNING id`,
+            [userId, player.name, player.profileImageUrl, player.identityColor, finalAreaGeoJSON, finalAreaSqM]
+        );
+    } else {
+        // Normal mode: UPDATE existing territory
+        debug(`[SOLO_HANDLER] Normal mode: Updating existing territory`);
+        updateResult = await client.query(
+            `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3 RETURNING id`,
+            [finalAreaGeoJSON, finalAreaSqM, userId]
+        );
+    }
 
     if (updateResult.rowCount > 0) {
         newTerritoryId = updateResult.rows[0].id;
