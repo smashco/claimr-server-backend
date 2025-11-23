@@ -1685,6 +1685,15 @@ io.on('connection', (socket) => {
             `;
                 const territoryResult = await client.query(query);
                 activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
+
+                // Debug: Log active ads found
+                const territoriesWithAds = activeTerritories.filter(t => t.adBackgroundColor);
+                if (territoriesWithAds.length > 0) {
+                    console.log(`[DEBUG] Found ${territoriesWithAds.length} territories with active ads for player ${socket.id}`);
+                    territoriesWithAds.forEach(t => {
+                        console.log(`[DEBUG] Territory ${t.id} has ad: ${t.adBrandName} (Bg: ${t.adBackgroundColor})`);
+                    });
+                }
             }
 
             logSocket(`Found ${activeTerritories.length} [${gameMode}] territories. Sending 'existingTerritories' to ${socket.id}.`);

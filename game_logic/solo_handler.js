@@ -186,7 +186,20 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
             const touchesExisting = touchCheckRes.rows.some(row => row.touches);
 
             if (!touchesExisting && !isInitialBaseClaim) {
-                throw new Error('Expansion must touch your existing territory. Create an ad to unlock multi-base mode!');
+                // Debugging: Calculate actual distance
+                const distanceRes = await client.query(`
+                    SELECT MIN(ST_Distance(
+                        area::geography,
+                        ST_GeomFromGeoJSON($1)::geography
+                    )) as min_distance
+                    FROM territories
+                    WHERE owner_id = $2
+                `, [finalAreaGeoJSON, userId]);
+
+                const dist = distanceRes.rows[0].min_distance;
+                debug(`[SOLO_HANDLER] Expansion failed. Min distance to existing territory: ${dist} meters`);
+
+                throw new Error(`Expansion failed: New area is ${dist ? dist.toFixed(1) : 'unknown'}m away from your territory. Must be within 2m.`);
             }
 
             // Normal merging behavior
