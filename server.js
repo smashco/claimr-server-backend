@@ -99,6 +99,14 @@ app.use((req, res, next) => {
 app.use('/uploads', express.static('uploads')); // Serve uploaded files statically
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+
+// Explicitly serve Brand Portal HTML files to avoid directory conflicts
+['dashboard', 'design', 'login', 'register', 'map'].forEach(page => {
+    app.get(`/brand/${page}`, (req, res) => {
+        res.sendFile(path.join(__dirname, 'public/brand', `${page}.html`));
+    });
+});
+
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'], redirect: false }));
 
 // Redirect legacy /design to /brand/design
