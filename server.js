@@ -496,12 +496,20 @@ app.get('/api/brands/territories', async (req, res) => {
         // Let's just return basic info + a mock lap count if not present.
 
         const result = await pool.query(`
-            SELECT id, username as name, area_sqm, owner_id, ST_X(ST_Centroid(area)) as center_lng, ST_Y(ST_Centroid(area)) as center_lat, identity_color,
-                   ST_AsGeoJSON(area) as geometry,
-                   laps_required,
-                   owner_name
-            FROM territories
-            WHERE area_sqm > 0
+            SELECT t.id, t.username as name, t.area_sqm, t.owner_id, 
+                   ST_X(ST_Centroid(t.area)) as center_lng, ST_Y(ST_Centroid(t.area)) as center_lat, 
+                   t.identity_color,
+                   ST_AsGeoJSON(t.area) as geometry,
+                   t.laps_required,
+                   t.owner_name,
+                   EXISTS (
+                       SELECT 1 FROM ads a 
+                       WHERE a.territory_id = t.id 
+                         AND (a.status IS NULL OR a.status != 'DELETED')
+                         AND a.end_time > NOW()
+                   ) as has_active_ad
+            FROM territories t
+            WHERE t.area_sqm > 0
         `);
 
         // Transform for frontend
@@ -514,7 +522,8 @@ app.get('/api/brands/territories', async (req, res) => {
             laps: row.laps_required || 1,
             ownerName: row.owner_name || 'Unclaimed',
             identityColor: row.identity_color,
-            rentPrice: Math.ceil(row.area_sqm * 10.764 * 0.005 * 3) // 3 days default at 0.005/sqft/day
+            rentPrice: Math.ceil(row.area_sqm * 10.764 * 0.005 * 3), // 3 days default at 0.005/sqft/day
+            activeAd: row.has_active_ad
         }));
 
         console.log(`[API] Fetched ${territories.length} territories. Sample lap count (ID 166):`, territories.find(t => t.id === 166)?.laps);
