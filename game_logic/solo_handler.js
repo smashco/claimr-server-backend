@@ -172,11 +172,12 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
             // No active ads - enforce normal expansion (must touch existing territory)
             debug(`[SOLO_HANDLER] No active ads. Checking if new area touches existing territory.`);
 
-            // Check if new area touches existing territory
+            // Check if new area touches or overlaps existing territory (with 2m tolerance)
             const touchCheckRes = await client.query(`
-                SELECT ST_Touches(
-                    area,
-                    ST_GeomFromGeoJSON($1)
+                SELECT ST_DWithin(
+                    area::geography,
+                    ST_GeomFromGeoJSON($1)::geography,
+                    2
                 ) as touches
                 FROM territories
                 WHERE owner_id = $2
