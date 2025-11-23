@@ -252,41 +252,42 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
     // I'll use a variable `isDisconnectedExpansion` initialized to false.
     // But I can't modify it inside the if block if defined outside? Yes I can (let).
 
-    // Multi-base mode: INSERT new territory row
-    debug(`[SOLO_HANDLER] Multi-base mode: Inserting new territory row`);
-    updateResult = await client.query(
-        `INSERT INTO territories (owner_id, username, profile_image_url, identity_color, area, area_sqm, laps_required)
-             VALUES ($1, $2, $3, $4, ST_GeomFromGeoJSON($5), $6, 1)
-             RETURNING id`,
-        [userId, player.name, player.profileImageUrl, player.identityColor, finalAreaGeoJSON, finalAreaSqM]
-    );
-} else {
-    // Normal mode: UPDATE existing territory
-    debug(`[SOLO_HANDLER] Normal mode: Updating existing territory`);
-    updateResult = await client.query(
-        `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3 RETURNING id`,
-        [finalAreaGeoJSON, finalAreaSqM, userId]
-    );
-}
+    if (hasActiveAds && !isInitialBaseClaim) {
+        // Multi-base mode: INSERT new territory row
+        debug(`[SOLO_HANDLER] Multi-base mode: Inserting new territory row`);
+        updateResult = await client.query(
+            `INSERT INTO territories (owner_id, username, profile_image_url, identity_color, area, area_sqm, laps_required)
+                 VALUES ($1, $2, $3, $4, ST_GeomFromGeoJSON($5), $6, 1)
+                 RETURNING id`,
+            [userId, player.name, player.profileImageUrl, player.identityColor, finalAreaGeoJSON, finalAreaSqM]
+        );
+    } else {
+        // Normal mode: UPDATE existing territory
+        debug(`[SOLO_HANDLER] Normal mode: Updating existing territory`);
+        updateResult = await client.query(
+            `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3 RETURNING id`,
+            [finalAreaGeoJSON, finalAreaSqM, userId]
+        );
+    }
 
-if (updateResult.rowCount > 0) {
-    newTerritoryId = updateResult.rows[0].id;
-}
+    if (updateResult.rowCount > 0) {
+        newTerritoryId = updateResult.rows[0].id;
+    }
 
-await updateQuestProgress(userId, 'cover_area', Math.round(newAreaSqM), client, io, players);
+    await updateQuestProgress(userId, 'cover_area', Math.round(newAreaSqM), client, io, players);
 
-if (!isInitialBaseClaim && trail && trail.length > 0) {
-    const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
-    const trailLengthKm = turf.length(trailLineString, { units: 'kilometers' });
-    debug(`[SOLO_HANDLER] Trail length for this claim was ${trailLengthKm.toFixed(3)} km.`);
-    await updateQuestProgress(userId, 'run_trail', trailLengthKm, client, io, players);
-}
+    if (!isInitialBaseClaim && trail && trail.length > 0) {
+        const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
+        const trailLengthKm = turf.length(trailLineString, { units: 'kilometers' });
+        debug(`[SOLO_HANDLER] Trail length for this claim was ${trailLengthKm.toFixed(3)} km.`);
+        await updateQuestProgress(userId, 'run_trail', trailLengthKm, client, io, players);
+    }
 
-// Fetch all affected territory data to broadcast back to all clients
-const updatedTerritories = [];
-const allAffectedIds = Array.from(affectedOwnerIds);
-if (allAffectedIds.length > 0) {
-    const queryResult = await client.query(`
+    // Fetch all affected territory data to broadcast back to all clients
+    const updatedTerritories = [];
+    const allAffectedIds = Array.from(affectedOwnerIds);
+    if (allAffectedIds.length > 0) {
+        const queryResult = await client.query(`
             SELECT 
                 t.id,
                 t.owner_id as "ownerId", 
@@ -304,21 +305,21 @@ if (allAffectedIds.length > 0) {
             FROM territories t
             LEFT JOIN ads a ON t.id = a.territory_id AND a.payment_status = 'PAID' AND (a.status IS NULL OR a.status != 'DELETED') AND a.start_time <= NOW() AND a.end_time >= NOW()
             WHERE t.owner_id = ANY($1::varchar[])`,
-        [allAffectedIds]
-    );
-    queryResult.rows.forEach(r => {
-        updatedTerritories.push({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null });
-    });
-}
+            [allAffectedIds]
+        );
+        queryResult.rows.forEach(r => {
+            updatedTerritories.push({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null });
+        });
+    }
 
-debug(`[SOLO_HANDLER] SUCCESS: Claim transaction for ${player.name} is ready to be committed.`);
+    debug(`[SOLO_HANDLER] SUCCESS: Claim transaction for ${player.name} is ready to be committed.`);
 
-return {
-    finalTotalArea: finalAreaSqM,
-    areaClaimed: newAreaSqM,
-    newTerritoryId: newTerritoryId,
-    updatedTerritories: updatedTerritories
-};
+    return {
+        finalTotalArea: finalAreaSqM,
+        areaClaimed: newAreaSqM,
+        newTerritoryId: newTerritoryId,
+        updatedTerritories: updatedTerritories
+    };
 }
 
 module.exports = handleSoloClaim;
