@@ -687,6 +687,9 @@ app.get('/api/brands/available-territories', async (req, res) => {
 
         // Helper function for reverse geocoding (simplified - using Nominatim)
         const getLocationName = async (lat, lng) => {
+            // Mocking to prevent rate limiting/timeouts during demo
+            return { city: 'Mumbai', country: 'India' };
+            /*
             try {
                 const response = await fetch(
                     `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=10`,
@@ -700,6 +703,7 @@ app.get('/api/brands/available-territories', async (req, res) => {
                 console.error('Geocoding error:', err);
                 return { city: 'Unknown', country: 'Unknown' };
             }
+            */
         };
 
         // Process territories with location data
