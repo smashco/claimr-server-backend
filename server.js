@@ -1680,7 +1680,7 @@ io.on('connection', (socket) => {
                     a.ad_content_url as "adContentUrl",
                     a.brand_name as "adBrandName"
                 FROM territories t
-                LEFT JOIN ads a ON t.id = a.territory_id AND a.payment_status = 'PAID' AND a.start_time <= NOW() AND a.end_time >= NOW()
+                LEFT JOIN ads a ON t.id = a.territory_id AND a.payment_status = 'PAID' AND (a.status IS NULL OR a.status != 'DELETED') AND a.start_time <= NOW() AND a.end_time >= NOW()
                 WHERE t.area IS NOT NULL AND NOT ST_IsEmpty(t.area);
             `;
                 const territoryResult = await client.query(query);
@@ -2133,6 +2133,7 @@ async function checkExpiredAds() {
                 JOIN territories t ON a.territory_id = t.id
                 WHERE t.owner_id = $1
                   AND a.payment_status = 'PAID'
+                  AND (a.status IS NULL OR a.status != 'DELETED')
                   AND a.start_time <= NOW()
                   AND a.end_time >= NOW()
             `, [ownerId]);

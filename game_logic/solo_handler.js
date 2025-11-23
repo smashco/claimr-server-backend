@@ -132,6 +132,7 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
         JOIN territories t ON a.territory_id = t.id
         WHERE t.owner_id = $1
           AND a.payment_status = 'PAID'
+          AND (a.status IS NULL OR a.status != 'DELETED')
           AND a.start_time <= NOW()
           AND a.end_time >= NOW()
     `, [userId]);
