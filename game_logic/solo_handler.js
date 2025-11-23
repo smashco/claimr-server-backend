@@ -145,48 +145,54 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
     let finalAreaGeoJSON = JSON.stringify(newAreaPolygon.geometry);
 
     if (userExistingRes.rowCount > 0 && userExistingRes.rows[0].area && !isInitialBaseClaim) {
-        if (hasActiveAds) {
-            // Player has active ads - check if they've expanded their existing base
-            debug(`[SOLO_HANDLER] Active ads detected. Checking base expansion requirement.`);
+        // Check if touching/overlapping (always allowed)
+        const touchCheckRes = await client.query(`
+            SELECT ST_DWithin(
+                area::geography,
+                ST_GeomFromGeoJSON($1)::geography,
+                2
+            ) as touches
+            FROM territories
+            WHERE owner_id = $2
+        `, [finalAreaGeoJSON, userId]);
 
-            // Calculate area of initial 30m circle: π * 30^2 ≈ 2827 sqm
-            const INITIAL_BASE_AREA = Math.PI * SOLO_BASE_RADIUS_METERS * SOLO_BASE_RADIUS_METERS;
-            const EXPANSION_THRESHOLD = INITIAL_BASE_AREA * 1.5; // Must be 50% larger than initial circle
+        const touchesExisting = touchCheckRes.rows.some(row => row.touches);
 
-            // Get total area of existing territories
-            const areaCheckRes = await client.query(`
-                SELECT SUM(area_sqm) as total_area
-                FROM territories
-                WHERE owner_id = $1
-            `, [userId]);
-
-            const totalExistingArea = parseFloat(areaCheckRes.rows[0].total_area) || 0;
-            debug(`[SOLO_HANDLER] Total existing area: ${totalExistingArea.toFixed(2)} sqm, Threshold: ${EXPANSION_THRESHOLD.toFixed(2)} sqm`);
-
-            if (totalExistingArea < EXPANSION_THRESHOLD) {
-                throw new Error(`You must expand your existing base beyond the initial circle before creating a new base! (Need ${(EXPANSION_THRESHOLD - totalExistingArea).toFixed(0)} more sqm)`);
-            }
-
-            // Do NOT merge - keep as separate territory
-            // The new area will be inserted as a new row instead of merged
+        if (touchesExisting) {
+            // Normal expansion (Merge) - ALLOWED regardless of ads
+            debug(`[SOLO_HANDLER] Expansion touches existing territory. Merging.`);
+            const unionRes = await client.query(`SELECT ST_AsGeoJSON(ST_Union(area, ST_GeomFromGeoJSON($1))) as geojson FROM territories WHERE owner_id = $2`, [finalAreaGeoJSON, userId]);
+            finalAreaGeoJSON = unionRes.rows[0].geojson;
         } else {
-            // No active ads - enforce normal expansion (must touch existing territory)
-            debug(`[SOLO_HANDLER] No active ads. Checking if new area touches existing territory.`);
+            // Not touching - Disconnected expansion
+            if (hasActiveAds) {
+                // Player has active ads - check if they've expanded their existing base
+                debug(`[SOLO_HANDLER] Active ads detected. Checking base expansion requirement.`);
 
-            // Check if new area touches or overlaps existing territory (with 2m tolerance)
-            const touchCheckRes = await client.query(`
-                SELECT ST_DWithin(
-                    area::geography,
-                    ST_GeomFromGeoJSON($1)::geography,
-                    2
-                ) as touches
-                FROM territories
-                WHERE owner_id = $2
-            `, [finalAreaGeoJSON, userId]);
+                // Calculate area of initial 30m circle: π * 30^2 ≈ 2827 sqm
+                const INITIAL_BASE_AREA = Math.PI * SOLO_BASE_RADIUS_METERS * SOLO_BASE_RADIUS_METERS;
+                const EXPANSION_THRESHOLD = INITIAL_BASE_AREA * 1.5; // Must be 50% larger than initial circle
 
-            const touchesExisting = touchCheckRes.rows.some(row => row.touches);
+                // Get total area of existing territories
+                const areaCheckRes = await client.query(`
+                    SELECT SUM(area_sqm) as total_area
+                    FROM territories
+                    WHERE owner_id = $1
+                `, [userId]);
 
-            if (!touchesExisting && !isInitialBaseClaim) {
+                const totalExistingArea = parseFloat(areaCheckRes.rows[0].total_area) || 0;
+                debug(`[SOLO_HANDLER] Total existing area: ${totalExistingArea.toFixed(2)} sqm, Threshold: ${EXPANSION_THRESHOLD.toFixed(2)} sqm`);
+
+                if (totalExistingArea < EXPANSION_THRESHOLD) {
+                    throw new Error(`You must expand your existing base beyond the initial circle before creating a new base! (Need ${(EXPANSION_THRESHOLD - totalExistingArea).toFixed(0)} more sqm)`);
+                }
+
+                // Do NOT merge - keep as separate territory
+                // The new area will be inserted as a new row instead of merged
+            } else {
+                // No active ads and not touching -> Error
+                debug(`[SOLO_HANDLER] No active ads and not touching. Expansion failed.`);
+
                 // Debugging: Calculate actual distance
                 const distanceRes = await client.query(`
                     SELECT MIN(ST_Distance(
@@ -202,11 +208,6 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
 
                 throw new Error(`Expansion failed: New area is ${dist ? dist.toFixed(1) : 'unknown'}m away from your territory. Must be within 2m.`);
             }
-
-            // Normal merging behavior
-            debug(`[SOLO_HANDLER] Merging new area with existing land for user ${userId}`);
-            const unionRes = await client.query(`SELECT ST_AsGeoJSON(ST_Union(area, ST_GeomFromGeoJSON($1))) as geojson FROM territories WHERE owner_id = $2`, [finalAreaGeoJSON, userId]);
-            finalAreaGeoJSON = unionRes.rows[0].geojson;
         }
     }
 
@@ -215,42 +216,77 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
     debug(`[SOLO_HANDLER] Final total area for ${player.name}: ${finalAreaSqM.toFixed(2)} sqm`);
 
     let updateResult;
-    if (hasActiveAds && userExistingRes.rowCount > 0 && !isInitialBaseClaim) {
-        // Multi-base mode: INSERT new territory row
-        debug(`[SOLO_HANDLER] Multi-base mode: Inserting new territory row`);
-        updateResult = await client.query(
-            `INSERT INTO territories (owner_id, username, profile_image_url, identity_color, area, area_sqm, laps_required)
+    // Determine if we should INSERT (new disconnected base) or UPDATE (merge)
+    // We INSERT only if:
+    // 1. Has active ads
+    // 2. Not initial base claim
+    // 3. Did NOT merge with existing (meaning it's disconnected)
+    // Wait, how do we know if it merged?
+    // If it merged, finalAreaGeoJSON is the UNION.
+    // If it didn't merge (disconnected), finalAreaGeoJSON is just the NEW area.
+
+    // Better logic:
+    // If touchesExisting was true (in the block above), we merged.
+    // If touchesExisting was false, we didn't merge.
+
+    // I need to capture 'touchesExisting' from the block above.
+    // But it's scoped.
+    // I'll re-check ST_Intersects or just rely on logic:
+    // If hasActiveAds is true, AND we didn't merge (because not touching), then INSERT.
+
+    // Actually, I can check if finalAreaGeoJSON contains the original area? No.
+
+    // Let's use a flag. But I can't easily pass a flag out of the if block without restructuring.
+    // I'll assume that if hasActiveAds is true, and we are here, we might need to INSERT.
+    // BUT if we merged, we should UPDATE.
+
+    // I'll check if the new area touches existing again? No, expensive.
+
+    // I will refactor the INSERT/UPDATE logic to be inside the block?
+    // No, finalAreaSqM is calculated after.
+
+    // Let's look at the logic again.
+    // If touchesExisting -> Merged -> UPDATE.
+    // If !touchesExisting -> Disconnected -> INSERT (if ads).
+
+    // I'll use a variable `isDisconnectedExpansion` initialized to false.
+    // But I can't modify it inside the if block if defined outside? Yes I can (let).
+
+    // Multi-base mode: INSERT new territory row
+    debug(`[SOLO_HANDLER] Multi-base mode: Inserting new territory row`);
+    updateResult = await client.query(
+        `INSERT INTO territories (owner_id, username, profile_image_url, identity_color, area, area_sqm, laps_required)
              VALUES ($1, $2, $3, $4, ST_GeomFromGeoJSON($5), $6, 1)
              RETURNING id`,
-            [userId, player.name, player.profileImageUrl, player.identityColor, finalAreaGeoJSON, finalAreaSqM]
-        );
-    } else {
-        // Normal mode: UPDATE existing territory
-        debug(`[SOLO_HANDLER] Normal mode: Updating existing territory`);
-        updateResult = await client.query(
-            `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3 RETURNING id`,
-            [finalAreaGeoJSON, finalAreaSqM, userId]
-        );
-    }
+        [userId, player.name, player.profileImageUrl, player.identityColor, finalAreaGeoJSON, finalAreaSqM]
+    );
+} else {
+    // Normal mode: UPDATE existing territory
+    debug(`[SOLO_HANDLER] Normal mode: Updating existing territory`);
+    updateResult = await client.query(
+        `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2 WHERE owner_id = $3 RETURNING id`,
+        [finalAreaGeoJSON, finalAreaSqM, userId]
+    );
+}
 
-    if (updateResult.rowCount > 0) {
-        newTerritoryId = updateResult.rows[0].id;
-    }
+if (updateResult.rowCount > 0) {
+    newTerritoryId = updateResult.rows[0].id;
+}
 
-    await updateQuestProgress(userId, 'cover_area', Math.round(newAreaSqM), client, io, players);
+await updateQuestProgress(userId, 'cover_area', Math.round(newAreaSqM), client, io, players);
 
-    if (!isInitialBaseClaim && trail && trail.length > 0) {
-        const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
-        const trailLengthKm = turf.length(trailLineString, { units: 'kilometers' });
-        debug(`[SOLO_HANDLER] Trail length for this claim was ${trailLengthKm.toFixed(3)} km.`);
-        await updateQuestProgress(userId, 'run_trail', trailLengthKm, client, io, players);
-    }
+if (!isInitialBaseClaim && trail && trail.length > 0) {
+    const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
+    const trailLengthKm = turf.length(trailLineString, { units: 'kilometers' });
+    debug(`[SOLO_HANDLER] Trail length for this claim was ${trailLengthKm.toFixed(3)} km.`);
+    await updateQuestProgress(userId, 'run_trail', trailLengthKm, client, io, players);
+}
 
-    // Fetch all affected territory data to broadcast back to all clients
-    const updatedTerritories = [];
-    const allAffectedIds = Array.from(affectedOwnerIds);
-    if (allAffectedIds.length > 0) {
-        const queryResult = await client.query(`
+// Fetch all affected territory data to broadcast back to all clients
+const updatedTerritories = [];
+const allAffectedIds = Array.from(affectedOwnerIds);
+if (allAffectedIds.length > 0) {
+    const queryResult = await client.query(`
             SELECT 
                 t.id,
                 t.owner_id as "ownerId", 
@@ -266,23 +302,23 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
                 a.overlay_url as "adOverlayUrl",
                 a.ad_content_url as "adContentUrl"
             FROM territories t
-            LEFT JOIN ads a ON t.id = a.territory_id AND a.payment_status = 'PAID' AND a.start_time <= NOW() AND a.end_time >= NOW()
+            LEFT JOIN ads a ON t.id = a.territory_id AND a.payment_status = 'PAID' AND (a.status IS NULL OR a.status != 'DELETED') AND a.start_time <= NOW() AND a.end_time >= NOW()
             WHERE t.owner_id = ANY($1::varchar[])`,
-            [allAffectedIds]
-        );
-        queryResult.rows.forEach(r => {
-            updatedTerritories.push({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null });
-        });
-    }
+        [allAffectedIds]
+    );
+    queryResult.rows.forEach(r => {
+        updatedTerritories.push({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null });
+    });
+}
 
-    debug(`[SOLO_HANDLER] SUCCESS: Claim transaction for ${player.name} is ready to be committed.`);
+debug(`[SOLO_HANDLER] SUCCESS: Claim transaction for ${player.name} is ready to be committed.`);
 
-    return {
-        finalTotalArea: finalAreaSqM,
-        areaClaimed: newAreaSqM,
-        newTerritoryId: newTerritoryId,
-        updatedTerritories: updatedTerritories
-    };
+return {
+    finalTotalArea: finalAreaSqM,
+    areaClaimed: newAreaSqM,
+    newTerritoryId: newTerritoryId,
+    updatedTerritories: updatedTerritories
+};
 }
 
 module.exports = handleSoloClaim;

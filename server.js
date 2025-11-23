@@ -741,8 +741,9 @@ app.get('/api/ads', async (req, res) => {
             JOIN territories t ON a.territory_id = t.id
             WHERE a.payment_status = 'PAID' 
               AND a.approval_status = 'APPROVED' 
-              AND a.status = 'ACTIVE'
-              AND a.end_time > NOW()
+              AND (a.status IS NULL OR a.status != 'DELETED')
+              AND a.start_time <= NOW() 
+              AND a.end_time >= NOW()
         `);
 
         const ads = result.rows.map(row => ({
@@ -786,6 +787,7 @@ app.get('/api/player/rent-earnings', async (req, res) => {
             JOIN territories t ON a.territory_id = t.id
             WHERE t.owner_id = $1
               AND a.payment_status = 'PAID'
+              AND (a.status IS NULL OR a.status != 'DELETED')
               AND a.end_time >= NOW()
             ORDER BY a.created_at DESC
         `, [userId]);
@@ -2006,11 +2008,20 @@ io.on('connection', (socket) => {
             await client.query('COMMIT');
             logDb(`COMMIT transaction for claim by ${player.name}.`);
 
+            const newTerritoryData = updatedTerritories.find(t => t.ownerId === player.googleId);
+
+            logGame(`[CLAIM] Emitting claimSuccessful to ${player.name}. newTerritoryData: ${newTerritoryData ? 'FOUND' : 'NULL'}, updatedTerritories count: ${updatedTerritories.length}`);
+            if (newTerritoryData) {
+                logGame(`[CLAIM] Territory data - ID: ${newTerritoryData.id}, Owner: ${newTerritoryData.ownerId}, Area: ${newTerritoryData.area}`);
+            } else {
+                logGame(`[CLAIM] WARNING: newTerritoryData is NULL! Player googleId: ${player.googleId}, updatedTerritories ownerIds: ${updatedTerritories.map(t => t.ownerId).join(', ')}`);
+            }
+
             socket.emit('claimSuccessful', {
                 newTotalArea: finalTotalArea,
                 areaClaimed: areaClaimed,
                 newTerritoryId: newTerritoryId,
-                newTerritoryData: updatedTerritories.find(t => t.ownerId === player.googleId)
+                newTerritoryData: newTerritoryData
             });
 
             io.emit('batchTerritoryUpdate', updatedTerritories);
