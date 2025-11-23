@@ -101,6 +101,10 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // Explicitly serve Brand Portal HTML files to avoid directory conflicts
+app.get('/brand', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public/brand', 'index.html'));
+});
+
 ['dashboard', 'design', 'login', 'register', 'map'].forEach(page => {
     app.get(`/brand/${page}`, (req, res) => {
         res.sendFile(path.join(__dirname, 'public/brand', `${page}.html`));
