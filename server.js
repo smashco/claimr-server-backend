@@ -85,6 +85,17 @@ const upload = multer({
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Middleware to strip trailing slashes
+app.use((req, res, next) => {
+    if (req.path.substr(-1) === '/' && req.path.length > 1) {
+        const query = req.url.slice(req.path.length);
+        res.redirect(301, req.path.slice(0, -1) + query);
+    } else {
+        next();
+    }
+});
+
 app.use('/uploads', express.static('uploads')); // Serve uploaded files statically
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
