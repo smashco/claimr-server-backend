@@ -142,7 +142,7 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
     const userExistingRes = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
     let finalAreaGeoJSON = JSON.stringify(newAreaPolygon.geometry);
 
-    if (userExistingRes.rowCount > 0 && userExistingRes.rows[0].area) {
+    if (userExistingRes.rowCount > 0 && userExistingRes.rows[0].area && !isInitialBaseClaim) {
         if (hasActiveAds) {
             // Player has active ads - check if they've expanded their existing base
             debug(`[SOLO_HANDLER] Active ads detected. Checking base expansion requirement.`);
@@ -199,7 +199,7 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
     debug(`[SOLO_HANDLER] Final total area for ${player.name}: ${finalAreaSqM.toFixed(2)} sqm`);
 
     let updateResult;
-    if (hasActiveAds && userExistingRes.rowCount > 0) {
+    if (hasActiveAds && userExistingRes.rowCount > 0 && !isInitialBaseClaim) {
         // Multi-base mode: INSERT new territory row
         debug(`[SOLO_HANDLER] Multi-base mode: Inserting new territory row`);
         updateResult = await client.query(
