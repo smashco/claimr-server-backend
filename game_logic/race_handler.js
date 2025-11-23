@@ -11,13 +11,19 @@ class RaceHandler {
 
     // --- CHALLENGE LOGIC ---
 
-    createChallenge(challengerId, opponentId) {
+    createChallenge(challengerId, opponentGoogleId) {
         const challenger = this.players[challengerId];
-        const opponent = this.players[opponentId];
 
-        if (!challenger || !opponent) {
+        // Find opponent by Google ID (opponentGoogleId is sent from client)
+        const opponentSocketId = Object.keys(this.players).find(
+            socketId => this.players[socketId].googleId === opponentGoogleId
+        );
+
+        if (!challenger || !opponentSocketId) {
             throw new Error("Player not found.");
         }
+
+        const opponent = this.players[opponentSocketId];
 
         // Check if players are close enough (500m)
         const dist = turf.distance(
@@ -34,12 +40,12 @@ class RaceHandler {
         this.pendingChallenges.set(challengeId, {
             id: challengeId,
             challengerId,
-            opponentId,
+            opponentId: opponentSocketId, // Store socket ID, not Google ID
             expiresAt: Date.now() + 30000 // 30 seconds to accept
         });
 
-        // Notify opponent
-        this.io.to(opponentId).emit('raceChallengeReceived', {
+        // Notify opponent using their socket ID
+        this.io.to(opponentSocketId).emit('raceChallengeReceived', {
             challengeId,
             challengerName: challenger.name,
             distanceKm: dist
@@ -75,17 +81,17 @@ class RaceHandler {
 
     _startRace(p1Id, p2Id) {
         const raceId = `active-race-${Date.now()}`;
-        
+
         // Determine a finish line 500m away based on Challenger's heading (simplified: just pick a point 500m North for now, 
         // ideally we'd use their current bearing but we might not have it. 
         // BETTER: Use the midpoint + 500m in a random direction or just 500m from Challenger)
-        
+
         const p1 = this.players[p1Id];
         const startPoint = turf.point([p1.lastKnownPosition.lng, p1.lastKnownPosition.lat]);
         // Project 500m (0.5km) North (0 degrees) for simplicity, or random bearing
         const bearing = Math.floor(Math.random() * 360);
         const finishPoint = turf.destination(startPoint, 0.5, bearing, { units: 'kilometers' });
-        
+
         const raceState = {
             id: raceId,
             participants: [p1Id, p2Id],
