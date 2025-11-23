@@ -1678,7 +1678,9 @@ io.on('connection', (socket) => {
                     a.background_color as "adBackgroundColor",
                     a.overlay_url as "adOverlayUrl",
                     a.ad_content_url as "adContentUrl",
-                    a.brand_name as "adBrandName"
+                    a.brand_name as "adBrandName",
+                    a.id as "adId",
+                    a.status as "adStatus"
                 FROM territories t
                 LEFT JOIN ads a ON t.id = a.territory_id AND a.payment_status = 'PAID' AND (a.status IS NULL OR a.status != 'DELETED') AND a.start_time <= NOW() AND a.end_time >= NOW()
                 WHERE t.area IS NOT NULL AND NOT ST_IsEmpty(t.area);
@@ -1691,7 +1693,7 @@ io.on('connection', (socket) => {
                 if (territoriesWithAds.length > 0) {
                     console.log(`[DEBUG] Found ${territoriesWithAds.length} territories with active ads for player ${socket.id}`);
                     territoriesWithAds.forEach(t => {
-                        console.log(`[DEBUG] Territory ${t.id} has ad: ${t.adBrandName} (Bg: ${t.adBackgroundColor})`);
+                        console.log(`[DEBUG] Territory ${t.id} has ad: ${t.adBrandName} (ID: ${t.adId}, Status: ${t.adStatus}, Bg: ${t.adBackgroundColor})`);
                     });
                 }
             }
