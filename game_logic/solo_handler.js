@@ -135,6 +135,7 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
           AND (a.status IS NULL OR a.status != 'DELETED')
           AND a.start_time <= NOW()
           AND a.end_time >= NOW()
+          AND a.overlay_url != 'https://runerrxadsstoragesmith.s3.ap-south-1.amazonaws.com/uploads/1763880012208-292432749.png'
     `, [userId]);
 
     const hasActiveAds = parseInt(activeAdsCheck.rows[0].ad_count) > 0;
