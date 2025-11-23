@@ -809,7 +809,8 @@ app.get('/api/player/rent-earnings', async (req, res) => {
             ORDER BY a.created_at DESC
         `, [userId]);
 
-        const totalEarnings = result.rows.reduce((sum, row) => sum + parseFloat(row.amount_paid || 0), 0);
+        // Player gets 50% of the rent paid by the brand
+        const totalEarnings = result.rows.reduce((sum, row) => sum + (parseFloat(row.amount_paid || 0) * 0.5), 0);
         const activeAds = result.rows.length;
 
         res.json({
@@ -818,7 +819,7 @@ app.get('/api/player/rent-earnings', async (req, res) => {
             rentals: result.rows.map(row => ({
                 adId: row.ad_id,
                 brandName: row.brand_name,
-                amount: parseFloat(row.amount_paid).toFixed(2),
+                amount: (parseFloat(row.amount_paid) * 0.5).toFixed(2), // Display 50% share
                 territoryId: row.territory_id,
                 areaSqm: row.area_sqm,
                 startTime: row.start_time,
