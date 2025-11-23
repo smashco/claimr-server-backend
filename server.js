@@ -99,7 +99,7 @@ app.use((req, res, next) => {
 app.use('/uploads', express.static('uploads')); // Serve uploaded files statically
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
+app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'], redirect: false }));
 
 // Redirect legacy /design to /brand/design
 app.get('/design', (req, res) => {
