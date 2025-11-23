@@ -782,10 +782,11 @@ app.get('/api/ads', async (req, res) => {
 });
 
 // Get rent earnings for a player
-app.get('/api/player/rent-earnings', async (req, res) => {
-    const { userId } = req.query;
+app.get('/api/player/rent-earnings', authenticate, async (req, res) => {
+    const userId = req.user.googleId; // Use the ID from the authenticated token (handles Google vs Firebase UID)
+
     if (!userId) {
-        return res.status(400).json({ error: 'Missing userId' });
+        return res.status(400).json({ error: 'User not authenticated' });
     }
 
     try {
