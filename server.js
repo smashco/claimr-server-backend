@@ -748,10 +748,6 @@ app.get('/api/brands/available-territories', async (req, res) => {
 app.get('/api/ads', async (req, res) => {
     console.log('[API] /api/ads called');
     try {
-        // Debug: fetch all ads to see what's going on
-        const allAds = await pool.query('SELECT id, payment_status, approval_status, status, end_time FROM ads');
-        console.log('[API] All ads in DB:', allAds.rows);
-
         const result = await pool.query(`
             SELECT a.id, a.territory_id, a.brand_name, a.ad_content_url, a.overlay_url, a.ad_type, 
                    t.area as territory_geometry

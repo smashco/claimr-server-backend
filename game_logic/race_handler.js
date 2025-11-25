@@ -82,15 +82,17 @@ class RaceHandler {
     _startRace(p1Id, p2Id) {
         const raceId = `active-race-${Date.now()}`;
 
-        // Determine a finish line 500m away based on Challenger's heading (simplified: just pick a point 500m North for now, 
-        // ideally we'd use their current bearing but we might not have it. 
-        // BETTER: Use the midpoint + 500m in a random direction or just 500m from Challenger)
-
         const p1 = this.players[p1Id];
-        const startPoint = turf.point([p1.lastKnownPosition.lng, p1.lastKnownPosition.lat]);
-        // Project 500m (0.5km) North (0 degrees) for simplicity, or random bearing
+        const p2 = this.players[p2Id];
+
+        // Calculate midpoint between both players for fairness
+        const p1Point = turf.point([p1.lastKnownPosition.lng, p1.lastKnownPosition.lat]);
+        const p2Point = turf.point([p2.lastKnownPosition.lng, p2.lastKnownPosition.lat]);
+        const midpoint = turf.midpoint(p1Point, p2Point);
+
+        // Project 500m (0.5km) from midpoint in a random direction
         const bearing = Math.floor(Math.random() * 360);
-        const finishPoint = turf.destination(startPoint, 0.5, bearing, { units: 'kilometers' });
+        const finishPoint = turf.destination(midpoint, 0.5, bearing, { units: 'kilometers' });
 
         const raceState = {
             id: raceId,
@@ -103,16 +105,21 @@ class RaceHandler {
 
         this.activeRaces.set(raceId, raceState);
 
-        // Notify both players
+        // Notify both players with the SAME finish line
+        const finishLineData = {
+            lat: finishPoint.geometry.coordinates[1],
+            lng: finishPoint.geometry.coordinates[0]
+        };
+
         [p1Id, p2Id].forEach(pid => {
             this.io.to(pid).emit('raceStarted', {
                 raceId,
-                finishLine: { lat: finishPoint.geometry.coordinates[1], lng: finishPoint.geometry.coordinates[0] },
+                finishLine: finishLineData,
                 opponentName: pid === p1Id ? this.players[p2Id].name : this.players[p1Id].name
             });
         });
 
-        debug(`Race started: ${raceId}`);
+        debug(`Race started: ${raceId}, Finish: ${finishLineData.lat}, ${finishLineData.lng}`);
     }
 
     checkRaceProgress(playerId, lat, lng) {
