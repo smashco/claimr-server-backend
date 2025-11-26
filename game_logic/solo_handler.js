@@ -268,6 +268,17 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
             `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2, claimed_at = NOW() WHERE owner_id = $3 RETURNING id`,
             [finalAreaGeoJSON, finalAreaSqM, userId]
         );
+
+        // Fallback: If UPDATE found no rows (e.g. user has no territory yet), INSERT it.
+        if (updateResult.rowCount === 0) {
+            debug(`[SOLO_HANDLER] UPDATE returned 0 rows. Inserting new territory instead.`);
+            updateResult = await client.query(
+                `INSERT INTO territories (owner_id, username, profile_image_url, identity_color, area, area_sqm, laps_required, claimed_at)
+                 VALUES ($1, $2, $3, $4, ST_GeomFromGeoJSON($5), $6, 1, NOW())
+                 RETURNING id`,
+                [userId, player.name, player.profileImageUrl, player.identityColor, finalAreaGeoJSON, finalAreaSqM]
+            );
+        }
     }
 
     if (updateResult.rowCount > 0) {
