@@ -32,23 +32,23 @@ async function handleSoloClaim(io, socket, player, players, data, client) {
     } else {
         throw new Error("Invalid claim data: No trail, base, or conquer info provided.");
     }
-    
+
     newAreaSqM = turf.area(newAreaPolygon);
     if (newAreaSqM < 100 && !baseClaim) {
         throw new Error('Claimed area is too small.');
     }
 
     const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
-    
-    // Find all territories that are touched by this new polygon
+
+    // Find all territories that are touched by this new polygon (only in same game mode)
     const victimsRes = await client.query(`
         SELECT owner_id, username, is_shield_active
         FROM territories
-        WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
-    `, [userId]);
-    
+        WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1 AND game_mode = $2;
+    `, [userId, player.gameMode]);
+
     const affectedOwnerIds = new Set([userId]);
-    
+
     // First, check for any active shields before proceeding
     for (const victim of victimsRes.rows) {
         if (victim.is_shield_active) {
@@ -63,7 +63,7 @@ async function handleSoloClaim(io, socket, player, players, data, client) {
         debug(`[SOLO_HANDLER_V2] Calculating damage for victim: ${victim.username}`);
         const remainingVictimAreaWKT = `ST_Multi(ST_Difference(area, ${newAreaWKT}))`;
         await client.query(
-            `UPDATE territories SET area = ${remainingVictimAreaWKT}, area_sqm = ST_Area((${remainingVictimAreaWKT})::geography) WHERE owner_id = $1`, 
+            `UPDATE territories SET area = ${remainingVictimAreaWKT}, area_sqm = ST_Area((${remainingVictimAreaWKT})::geography) WHERE owner_id = $1`,
             [victim.owner_id]
         );
     }
@@ -77,7 +77,7 @@ async function handleSoloClaim(io, socket, player, players, data, client) {
          RETURNING area_sqm`,
         [userId]
     );
-    
+
     if (result.rowCount === 0) {
         throw new Error("Attacker's profile not found in territories table.");
     }
@@ -85,7 +85,7 @@ async function handleSoloClaim(io, socket, player, players, data, client) {
 
     // Update quest progress
     await updateQuestProgress(userId, 'cover_area', newAreaSqM, client, io, players);
-    
+
     if (trail && trail.length >= 2) {
         const trailLineString = turf.lineString(trail.map(p => [p.lng, p.lat]));
         const trailLengthKm = turf.length(trailLineString, { units: 'kilometers' });
@@ -106,14 +106,14 @@ async function handleSoloClaim(io, socket, player, players, data, client) {
                 laps_required,
                 brand_wrapper
             FROM territories 
-            WHERE owner_id = ANY($1::varchar[])`, 
+            WHERE owner_id = ANY($1::varchar[])`,
             [Array.from(affectedOwnerIds)]
         );
         queryResult.rows.forEach(r => {
-            updatedTerritories.push({...r, id: r.ownerId, geojson: r.geojson ? JSON.parse(r.geojson) : null });
+            updatedTerritories.push({ ...r, id: r.ownerId, geojson: r.geojson ? JSON.parse(r.geojson) : null });
         });
     }
-    
+
     debug(`[SOLO_HANDLER_V2] Claim successful for ${player.name}. New total area: ${finalTotalArea.toFixed(2)}`);
     return {
         finalTotalArea: finalTotalArea,

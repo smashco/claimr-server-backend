@@ -40,7 +40,10 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
             debug(`[SOLO_HANDLER] Base area calculated: ${newAreaSqM.toFixed(2)} sqm`);
 
             const newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
-            const overlapCheck = await client.query(`SELECT 1 FROM territories WHERE ST_Intersects(area, ${newAreaWKT});`);
+            const overlapCheck = await client.query(
+                `SELECT 1 FROM territories WHERE ST_Intersects(area, ${newAreaWKT}) AND game_mode = $1;`,
+                [player.gameMode]
+            );
             if (overlapCheck.rowCount > 0) {
                 throw new Error('Base overlaps existing territory.');
             }
@@ -80,12 +83,12 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
     if (player.gameMode === 'territoryWar' || player.gameMode === 'areaCapture') {
         debug(`[SOLO_HANDLER][COMPETITIVE] Running Shield logic for mode: ${player.gameMode}`);
 
-        // Find overlapping territories
+        // Find overlapping territories (only in same game mode)
         const victimsRes = await client.query(`
             SELECT owner_id, username
             FROM territories
-            WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1;
-        `, [userId]);
+            WHERE ST_Intersects(area, ${newAreaWKT}) AND owner_id != $1 AND game_mode = $2;
+        `, [userId, player.gameMode]);
 
         if (victimsRes.rowCount > 0) {
             debug(`[SOLO_HANDLER][COMPETITIVE] Found ${victimsRes.rowCount} overlapping territories. Applying Shield.`);
