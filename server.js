@@ -1719,6 +1719,8 @@ io.on('connection', (socket) => {
                 const territoryResult = await client.query(query, [gameMode]);
                 activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
 
+                logSocket(`[MODE FILTER] Found ${activeTerritories.length} territories for mode '${gameMode}'`);
+
                 // Debug: Log active ads found
                 const territoriesWithAds = activeTerritories.filter(t => t.adBackgroundColor);
                 if (territoriesWithAds.length > 0) {
