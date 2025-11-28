@@ -16,7 +16,9 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
 
     const { trail, baseClaim } = req;
     const userId = player.googleId;
-    const isInitialBaseClaim = !!baseClaim;
+    // It is an initial base claim ONLY if there is a baseClaim AND no valid trail.
+    // If there is a trail, it's an expansion (even if baseClaim is provided for the start node).
+    const isInitialBaseClaim = !!baseClaim && (!trail || trail.length < 3);
 
     debug(`[SOLO_HANDLER] Claim by: ${player.name} (${userId}) in mode [${player.gameMode}]`);
     debug(`[SOLO_HANDLER] Claim Type: ${isInitialBaseClaim ? 'INITIAL BASE' : 'EXPANSION'}`);
@@ -49,6 +51,17 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
             }
             const points = [...trail.map(p => [p.lng, p.lat]), [trail[0].lng, trail[0].lat]];
             newAreaPolygon = turf.polygon([points]);
+
+            // NEW: If baseClaim is provided with expansion, UNION it with the trail polygon
+            if (baseClaim && typeof baseClaim.lng === 'number' && typeof baseClaim.lat === 'number') {
+                debug(`[SOLO_HANDLER] Expansion includes start node base. Merging...`);
+                const center = [baseClaim.lng, baseClaim.lat];
+                const radius = baseClaim.radius || SOLO_BASE_RADIUS_METERS;
+                const baseCircle = turf.circle(center, radius, { units: 'meters' });
+
+                newAreaPolygon = turf.union(newAreaPolygon, baseCircle);
+            }
+
             newAreaSqM = turf.area(newAreaPolygon);
             debug(`[SOLO_HANDLER] Expansion Area calculated: ${newAreaSqM.toFixed(2)} sqm`);
 
@@ -268,17 +281,6 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
             `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2, claimed_at = NOW() WHERE owner_id = $3 RETURNING id`,
             [finalAreaGeoJSON, finalAreaSqM, userId]
         );
-
-        // Fallback: If UPDATE found no rows (e.g. user has no territory yet), INSERT it.
-        if (updateResult.rowCount === 0) {
-            debug(`[SOLO_HANDLER] UPDATE returned 0 rows. Inserting new territory instead.`);
-            updateResult = await client.query(
-                `INSERT INTO territories (owner_id, username, profile_image_url, identity_color, area, area_sqm, laps_required, claimed_at)
-                 VALUES ($1, $2, $3, $4, ST_GeomFromGeoJSON($5), $6, 1, NOW())
-                 RETURNING id`,
-                [userId, player.name, player.profileImageUrl, player.identityColor, finalAreaGeoJSON, finalAreaSqM]
-            );
-        }
     }
 
     if (updateResult.rowCount > 0) {
