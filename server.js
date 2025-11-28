@@ -1650,6 +1650,10 @@ io.on('connection', (socket) => {
                 profileImageUrl: playerRecord ? playerRecord.profile_image_url : null
             };
 
+            // Join mode-specific room for isolation
+            socket.join(gameMode);
+            logSocket(`Player ${name} joined room: ${gameMode}`);
+
             const geofencePolygons = await geofenceService.getGeofencePolygons();
             socket.emit('geofenceUpdate', geofencePolygons);
 
@@ -1708,9 +1712,11 @@ io.on('connection', (socket) => {
                     AND a.start_time <= NOW() 
                     AND a.end_time >= NOW()
                     AND a.overlay_url != 'https://runerrxadsstoragesmith.s3.ap-south-1.amazonaws.com/uploads/1763880012208-292432749.png'
-                WHERE t.area IS NOT NULL AND NOT ST_IsEmpty(t.area);
+                WHERE t.area IS NOT NULL 
+                AND NOT ST_IsEmpty(t.area)
+                AND t.game_mode = $1;
             `;
-                const territoryResult = await client.query(query);
+                const territoryResult = await client.query(query, [gameMode]);
                 activeTerritories = territoryResult.rows.filter(row => row.geojson).map(row => ({ ...row, geojson: JSON.parse(row.geojson) }));
 
                 // Debug: Log active ads found
@@ -2042,11 +2048,11 @@ io.on('connection', (socket) => {
                 newTerritoryData: newTerritoryData
             });
 
-            io.emit('batchTerritoryUpdate', updatedTerritories);
+            io.to(player.gameMode).emit('batchTerritoryUpdate', updatedTerritories);
 
             player.isDrawing = false;
             player.activeTrail = [];
-            io.emit('trailCleared', { id: socket.id });
+            io.to(player.gameMode).emit('trailCleared', { id: socket.id });
 
         } catch (err) {
             await client.query('ROLLBACK');
@@ -2103,10 +2109,22 @@ async function broadcastAllPlayers() {
                 identityColor: profile.identityColor,
                 lastKnownPosition: p.lastKnownPosition,
                 isDrawing: p.isDrawing,
-                activeTrail: p.activeTrail
+                activeTrail: p.activeTrail,
+                gameMode: p.gameMode
             };
         });
-        io.emit('allPlayersUpdate', allPlayersData);
+
+        // Group players by game mode and broadcast to each room
+        const playersByMode = allPlayersData.reduce((acc, player) => {
+            if (!acc[player.gameMode]) acc[player.gameMode] = [];
+            acc[player.gameMode].push(player);
+            return acc;
+        }, {});
+
+        // Broadcast to each mode room separately
+        for (const [mode, modePlayers] of Object.entries(playersByMode)) {
+            io.to(mode).emit('allPlayersUpdate', modePlayers);
+        }
     } catch (e) {
         logSocket('Error during broadcastAllPlayers: %O', e);
     }
