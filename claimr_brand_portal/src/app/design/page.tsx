@@ -46,10 +46,12 @@ function DesignPageContent() {
     }, [territoryId, router]);
 
     const handleSave = (data: { fullImage: string, overlayImage: string, backgroundColor: string }) => {
-        // Note: Removed localStorage caching to prevent QuotaExceededError
-        // Designs are uploaded to S3 via the API instead
-
         if (territoryId) {
+            // Save design data to localStorage (same as dashboard flow)
+            localStorage.setItem(`design_${territoryId}`, data.fullImage);
+            localStorage.setItem(`design_${territoryId}_overlay`, data.overlayImage);
+            localStorage.setItem(`design_${territoryId}_bg`, data.backgroundColor);
+
             // Navigate back to dashboard with success param
             router.push('/dashboard?designSaved=true&territoryId=' + territoryId);
         }

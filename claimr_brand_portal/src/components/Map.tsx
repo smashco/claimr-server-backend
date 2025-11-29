@@ -356,6 +356,12 @@ export default function MapComponent({ onDesignClick, focusTerritory, openModalO
                     onRentSuccess={() => {
                         loadTerritories(); // Refresh map data
                     }}
+                    onDesignClick={onDesignClick ? () => {
+                        if (selectedTerritory) {
+                            onDesignClick(selectedTerritory);
+                            setShowRentModal(false);
+                        }
+                    } : undefined}
                 />
             )}
         </>
