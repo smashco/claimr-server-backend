@@ -14,11 +14,26 @@ module.exports = (pool, io, geofenceService, players) => {
     // --- Player Management ---
     router.get('/players', async (req, res) => {
         try {
-            const result = await pool.query('SELECT owner_id, username, area_sqm, superpowers, banned_until FROM territories ORDER BY username');
+            const result = await pool.query(`
+                SELECT 
+                    owner_id, 
+                    username, 
+                    superpowers, 
+                    banned_until,
+                    SUM(area_sqm) as total_area_sqm,
+                    SUM(CASE WHEN game_mode = 'areaCapture' THEN area_sqm ELSE 0 END) as area_capture_sqm,
+                    SUM(CASE WHEN game_mode = 'territoryWar' THEN area_sqm ELSE 0 END) as territory_war_sqm
+                FROM territories 
+                GROUP BY owner_id, username, superpowers, banned_until
+                ORDER BY username
+            `);
             const playersList = result.rows.map(dbPlayer => {
                 const onlinePlayer = Object.values(players).find(p => p.googleId === dbPlayer.owner_id);
                 return {
                     ...dbPlayer,
+                    area_sqm: parseFloat(dbPlayer.total_area_sqm || 0), // Ensure number
+                    area_capture_sqm: parseFloat(dbPlayer.area_capture_sqm || 0),
+                    territory_war_sqm: parseFloat(dbPlayer.territory_war_sqm || 0),
                     isOnline: !!onlinePlayer,
                     lastKnownPosition: onlinePlayer ? onlinePlayer.lastKnownPosition : null
                 };

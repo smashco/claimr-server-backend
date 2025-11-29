@@ -147,12 +147,13 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
         FROM ads a
         JOIN territories t ON a.territory_id = t.id
         WHERE t.owner_id = $1
+          AND t.game_mode = $2
           AND a.payment_status = 'PAID'
           AND (a.status IS NULL OR a.status != 'DELETED')
           AND a.start_time <= NOW()
           AND a.end_time >= NOW()
           AND a.overlay_url != 'https://runerrxadsstoragesmith.s3.ap-south-1.amazonaws.com/uploads/1763880012208-292432749.png'
-    `, [userId]);
+    `, [userId, player.gameMode]);
 
     const hasActiveAds = parseInt(activeAdsCheck.rows[0].ad_count) > 0;
     debug(`[SOLO_HANDLER] Player has active ads: ${hasActiveAds}`);

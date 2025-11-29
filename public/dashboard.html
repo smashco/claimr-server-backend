@@ -590,7 +590,22 @@
                 const row = tableBody.insertRow();
                 row.insertCell().innerHTML = `<span class="badge ${player.isOnline ? 'bg-success' : 'bg-secondary'}">${player.isOnline ? 'Online' : 'Offline'}</span>`;
                 row.insertCell().textContent = player.username || 'N/A';
-                row.insertCell().textContent = (player.area_sqm / 1000000).toFixed(6);
+                row.insertCell().textContent = player.username || 'N/A';
+
+                // Format area with breakdown tooltip
+                const totalAreaKm = (player.area_sqm / 1000000).toFixed(6);
+                const acAreaKm = (player.area_capture_sqm / 1000000).toFixed(6);
+                const twAreaKm = (player.territory_war_sqm / 1000000).toFixed(6);
+
+                const areaCell = row.insertCell();
+                areaCell.innerHTML = `
+                    <span data-bs-toggle="tooltip" data-bs-html="true" title="Area Capture: ${acAreaKm} km²<br>Territory War: ${twAreaKm} km²">
+                        ${totalAreaKm} <small class="text-muted">km²</small>
+                    </span>
+                `;
+
+                // Initialize tooltip
+                new bootstrap.Tooltip(areaCell.querySelector('span'));
 
                 const isBanned = player.banned_until && new Date(player.banned_until) > new Date();
                 row.insertCell().innerHTML = `<span class="badge ${isBanned ? 'bg-danger' : 'bg-success'}">${isBanned ? 'Banned' : 'Active'}</span>`;

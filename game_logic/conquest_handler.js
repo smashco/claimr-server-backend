@@ -24,7 +24,7 @@ class ConquestHandler {
 
         // Verify territory exists and is not owned by attacker
         const res = await this.pool.query(
-            'SELECT id, owner_id, owner_name, laps_required, ST_AsGeoJSON(area) as geojson FROM territories WHERE id = $1',
+            'SELECT id, owner_id, owner_name, laps_required, ST_AsGeoJSON(area) as geojson FROM territories WHERE id = $1 AND game_mode = \'territoryWar\'',
             [territoryId]
         );
         if (res.rowCount === 0) throw new Error("Territory not found.");
