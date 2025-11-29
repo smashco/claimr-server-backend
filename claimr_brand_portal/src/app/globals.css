@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+:root {
+  --foreground-rgb: 255, 255, 255;
+  --background-start-rgb: 2, 6, 23;
+  --background-end-rgb: 15, 23, 42;
+
+  --neon-cyan: #00f3ff;
+  --neon-purple: #bd00ff;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: linear-gradient(to bottom right,
+      rgb(var(--background-start-rgb)),
+      rgb(var(--background-end-rgb)));
+  min-height: 100vh;
+  font-family: 'Inter', sans-serif;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .glass-panel {
+    background-color: rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(24px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  }
+
+  .neon-text-cyan {
+    text-shadow: 0 0 10px var(--neon-cyan), 0 0 20px var(--neon-cyan);
+    color: var(--neon-cyan);
+  }
+
+  .neon-text-purple {
+    text-shadow: 0 0 10px var(--neon-purple), 0 0 20px var(--neon-purple);
+    color: var(--neon-purple);
+  }
+
+  .neon-border-cyan {
+    box-shadow: 0 0 10px var(--neon-cyan), inset 0 0 5px var(--neon-cyan);
+    border-color: var(--neon-cyan);
+  }
+
+  /* MapLibre Popup Overrides for Dark Theme */
+  .maplibregl-popup-content {
+    background: transparent !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+  }
+
+  .maplibregl-popup-tip {
+    border-top-color: rgba(2, 6, 23, 0.8) !important;
+  }
+}
