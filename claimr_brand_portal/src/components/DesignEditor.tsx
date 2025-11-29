@@ -23,6 +23,7 @@ interface DesignEditorProps {
 }
 
 export default function DesignEditor({ territory, onSave, onCancel }: DesignEditorProps) {
+    // Ref for the canvas element
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const [fabricCanvas, setFabricCanvas] = useState<fabric.Canvas | null>(null);
