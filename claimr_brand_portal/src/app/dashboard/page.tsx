@@ -340,9 +340,6 @@ function DashboardContent() {
                     <div className="h-full w-full relative">
                         <MapComponent
                             onDesignClick={(territory) => {
-                                console.log('[Dashboard] Received territory from Map:', territory);
-                                console.log('[Dashboard] Territory has geometry?', !!territory.geometry);
-                                console.log('[Dashboard] Geometry value:', territory.geometry);
                                 setSelectedTerritory(territory);
                                 setCurrentView('design');
                             }}
@@ -371,7 +368,14 @@ function DashboardContent() {
 
                 {currentView === 'marketplace' && (
                     <MarketplaceView onViewOnMap={(territory) => {
-                        setFocusTerritory(territory);
+                        // Normalize data from Marketplace (raw DB format) to App format
+                        const normalizedTerritory = {
+                            ...territory,
+                            geometry: territory.geometry || (territory.geojson ? JSON.parse(territory.geojson) : null),
+                            areaSqFt: territory.areaSqFt || (territory.area_sqm ? territory.area_sqm * 10.764 : 0),
+                        };
+                        console.log('[Dashboard] Normalized territory from Marketplace:', normalizedTerritory);
+                        setFocusTerritory(normalizedTerritory);
                         setCurrentView('map');
                     }} />
                 )}

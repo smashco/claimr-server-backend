@@ -24,6 +24,7 @@ interface DesignEditorProps {
 
 export default function DesignEditor({ territory, onSave, onCancel }: DesignEditorProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
     const [fabricCanvas, setFabricCanvas] = useState<fabric.Canvas | null>(null);
     const [selectedObject, setSelectedObject] = useState<fabric.Object | null>(null);
     const [backgroundColor, setBackgroundColor] = useState('#ffffff');
@@ -35,13 +36,11 @@ export default function DesignEditor({ territory, onSave, onCancel }: DesignEdit
 
         console.log('[DesignEditor] Territory data:', territory);
         console.log('[DesignEditor] Geometry:', territory.geometry);
-
         // Calculate bounds and dimensions
         let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
 
         if (territory.geometry && territory.geometry.coordinates) {
             const coords = territory.geometry.coordinates[0];
-            console.log('[DesignEditor] Coordinates count:', coords.length);
             coords.forEach((p: any) => {
                 const lng = p[0];
                 const lat = p[1];
@@ -70,26 +69,18 @@ export default function DesignEditor({ territory, onSave, onCancel }: DesignEdit
 
         const aspectRatio = widthMeters / heightMeters;
 
-        // Set canvas dimensions - Fit within a reasonable viewable area
-        const MAX_WIDTH = 800;
-        const MAX_HEIGHT = 600;
+        // Set canvas dimensions - Fit within the container
+        if (!containerRef.current) return;
 
-        let canvasWidth = MAX_WIDTH;
-        let canvasHeight = canvasWidth / aspectRatio;
+        const canvasWidth = containerRef.current.clientWidth;
+        const canvasHeight = containerRef.current.clientHeight;
 
-        // If height exceeds max, scale down based on height
-        if (canvasHeight > MAX_HEIGHT) {
-            canvasHeight = MAX_HEIGHT;
-            canvasWidth = canvasHeight * aspectRatio;
-        }
-
-        console.log('[DesignEditor] Canvas dimensions:', { canvasWidth, canvasHeight, aspectRatio });
-
+        // Use container dimensions for canvas
         const canvas = new fabric.Canvas(canvasRef.current, {
             width: canvasWidth,
             height: canvasHeight,
-            backgroundColor: backgroundColor || 'transparent',
-            selection: true,
+            backgroundColor: '#111827', // Set default background
+            selection: false, // Disable selection by default
             preserveObjectStacking: true
         });
 
@@ -115,7 +106,7 @@ export default function DesignEditor({ territory, onSave, onCancel }: DesignEdit
                 };
             });
 
-            console.log('[DesignEditor] Polygon points:', points.slice(0, 3), '... (total:', points.length, ')');
+
 
             const polygon = new fabric.Polygon(points, {
                 left: 0,
@@ -141,10 +132,7 @@ export default function DesignEditor({ territory, onSave, onCancel }: DesignEdit
                 opacity: 0.5
             });
             canvas.add(border);
-            console.log('[DesignEditor] Border added to canvas');
             canvas.renderAll();
-        } else {
-            console.error('[DesignEditor] Cannot create border - no geometry data!');
         }
 
         return () => {
@@ -372,7 +360,7 @@ export default function DesignEditor({ territory, onSave, onCancel }: DesignEdit
                 </div>
 
                 {/* Canvas Container */}
-                <div className="flex-1 overflow-auto flex items-center justify-center p-12">
+                <div ref={containerRef} className="flex-1 overflow-auto flex items-center justify-center p-12">
                     <div className="relative shadow-2xl shadow-black/50 rounded-sm overflow-hidden border border-gray-700 bg-[url('https://res.cloudinary.com/dvvqa6xgj/image/upload/v1709138658/checkerboard_v2_q7gq9e.png')] bg-repeat">
                         <canvas ref={canvasRef} />
                     </div>

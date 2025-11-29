@@ -109,9 +109,6 @@ export default function MapComponent({ onDesignClick, focusTerritory, openModalO
         const loadTerritories = async () => {
             try {
                 const data = await api.getTerritories();
-                console.log('[Map] Loaded territories from API:', data);
-                console.log('[Map] First territory:', data[0]);
-                console.log('[Map] First territory has geometry?', !!data[0]?.geometry);
                 setTerritories(data);
                 if (data.length > 0 && !focusTerritory) { // Only auto-center if not focusing
                     let minLat = Infinity, maxLat = -Infinity;
@@ -232,8 +229,6 @@ export default function MapComponent({ onDesignClick, focusTerritory, openModalO
                         console.log('Feature properties:', feature.properties);
                         const id = feature.properties?.id;
                         const territory = territories.find(t => t.id === id);
-                        console.log('[Map] Found territory from click:', territory);
-                        console.log('[Map] Found territory has geometry?', !!territory?.geometry);
                         if (territory) {
                             setSelectedTerritory(territory);
                             setShowRentModal(true);
@@ -362,8 +357,6 @@ export default function MapComponent({ onDesignClick, focusTerritory, openModalO
                     }}
                     onDesignClick={onDesignClick ? () => {
                         if (selectedTerritory) {
-                            console.log('[Map] Passing territory to onDesignClick:', selectedTerritory);
-                            console.log('[Map] Territory has geometry?', !!selectedTerritory.geometry);
                             onDesignClick(selectedTerritory);
                             setShowRentModal(false);
                         }
