@@ -340,6 +340,9 @@ function DashboardContent() {
                     <div className="h-full w-full relative">
                         <MapComponent
                             onDesignClick={(territory) => {
+                                console.log('[Dashboard] Received territory from Map:', territory);
+                                console.log('[Dashboard] Territory has geometry?', !!territory.geometry);
+                                console.log('[Dashboard] Geometry value:', territory.geometry);
                                 setSelectedTerritory(territory);
                                 setCurrentView('design');
                             }}
