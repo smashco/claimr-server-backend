@@ -109,6 +109,9 @@ export default function MapComponent({ onDesignClick, focusTerritory, openModalO
         const loadTerritories = async () => {
             try {
                 const data = await api.getTerritories();
+                console.log('[Map] Loaded territories from API:', data);
+                console.log('[Map] First territory:', data[0]);
+                console.log('[Map] First territory has geometry?', !!data[0]?.geometry);
                 setTerritories(data);
                 if (data.length > 0 && !focusTerritory) { // Only auto-center if not focusing
                     let minLat = Infinity, maxLat = -Infinity;
