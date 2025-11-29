@@ -371,7 +371,7 @@ function DashboardContent() {
                         // Normalize data from Marketplace (raw DB format) to App format
                         const normalizedTerritory = {
                             ...territory,
-                            geometry: territory.geometry || (territory.geojson ? JSON.parse(territory.geojson) : null),
+                            geometry: territory.geometry || (typeof territory.geojson === 'string' ? JSON.parse(territory.geojson) : territory.geojson),
                             areaSqFt: territory.areaSqFt || (territory.area_sqm ? territory.area_sqm * 10.764 : 0),
                         };
                         console.log('[Dashboard] Normalized territory from Marketplace:', normalizedTerritory);
