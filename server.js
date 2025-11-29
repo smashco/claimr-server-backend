@@ -697,7 +697,7 @@ app.get('/api/brands/available-territories', async (req, res) => {
             SELECT DISTINCT ON (id) id, username, area_sqm, ST_AsGeoJSON(area) as geojson, 
                    ST_Y(ST_Centroid(area)) as lat, ST_X(ST_Centroid(area)) as lng, identity_color
             FROM territories
-            WHERE owner_id IS NOT NULL AND area_sqm > 0
+            WHERE owner_id IS NOT NULL AND area_sqm > 0 AND game_mode = 'areaCapture'
             ORDER BY id, area_sqm DESC
             LIMIT 50
         `);
