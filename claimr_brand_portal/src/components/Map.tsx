@@ -358,6 +358,8 @@ export default function MapComponent({ onDesignClick, focusTerritory, openModalO
                     }}
                     onDesignClick={onDesignClick ? () => {
                         if (selectedTerritory) {
+                            console.log('[Map] Passing territory to onDesignClick:', selectedTerritory);
+                            console.log('[Map] Territory has geometry?', !!selectedTerritory.geometry);
                             onDesignClick(selectedTerritory);
                             setShowRentModal(false);
                         }
