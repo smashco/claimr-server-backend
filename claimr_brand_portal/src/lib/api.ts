@@ -1,6 +1,7 @@
 import axios from 'axios';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:10000';
+// Use relative URL since frontend is served from same domain as backend
+const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 export interface Territory {
     id: number;
