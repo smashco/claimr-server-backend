@@ -516,7 +516,7 @@ app.get('/api/brands/territories', async (req, res) => {
                          AND a.end_time > NOW()
                    ) as has_active_ad
             FROM territories t
-            WHERE t.area_sqm > 0
+            WHERE t.area_sqm > 0 AND t.game_mode = 'areaCapture'
         `);
 
         // Transform for frontend
