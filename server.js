@@ -100,13 +100,7 @@ app.use('/uploads', express.static('uploads')); // Serve uploaded files statical
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// Serve Next.js static assets
-app.use('/brand/_next', express.static(path.join(__dirname, 'public/brand/_next')));
-
-// Serve all other brand portal static files (CSS, JS, images, etc.)
-app.use('/brand', express.static(path.join(__dirname, 'public/brand')));
-
-// Explicitly serve Brand Portal HTML files to avoid directory conflicts
+// Explicitly serve Brand Portal HTML files FIRST (before static middleware)
 app.get('/brand', (req, res) => {
     res.sendFile(path.join(__dirname, 'public/brand', 'index.html'));
 });
@@ -116,6 +110,12 @@ app.get('/brand', (req, res) => {
         res.sendFile(path.join(__dirname, 'public/brand', `${page}.html`));
     });
 });
+
+// Serve Next.js static assets
+app.use('/brand/_next', express.static(path.join(__dirname, 'public/brand/_next')));
+
+// Serve all other brand portal static files (CSS, JS, images, etc.)
+app.use('/brand', express.static(path.join(__dirname, 'public/brand')));
 
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'], redirect: false }));
 
