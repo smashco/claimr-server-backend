@@ -97,8 +97,10 @@ function DashboardContent() {
 
     const handleDesignSave = (data: { fullImage: string, overlayImage: string, backgroundColor: string }) => {
         if (selectedTerritory) {
-            // Note: Removed localStorage caching to prevent QuotaExceededError
-            // Designs are uploaded to S3 via the API instead
+            // Save design data to localStorage (one design per territory to avoid quota issues)
+            localStorage.setItem(`design_${selectedTerritory.id}`, data.fullImage);
+            localStorage.setItem(`design_${selectedTerritory.id}_overlay`, data.overlayImage);
+            localStorage.setItem(`design_${selectedTerritory.id}_bg`, data.backgroundColor);
 
             // Return to map view
             setCurrentView('map');
