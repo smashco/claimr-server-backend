@@ -100,6 +100,9 @@ app.use('/uploads', express.static('uploads')); // Serve uploaded files statical
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
+// Serve Next.js static assets
+app.use('/brand/_next', express.static(path.join(__dirname, 'public/brand/_next')));
+
 // Explicitly serve Brand Portal HTML files to avoid directory conflicts
 app.get('/brand', (req, res) => {
     res.sendFile(path.join(__dirname, 'public/brand', 'index.html'));
