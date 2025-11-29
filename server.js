@@ -693,14 +693,23 @@ app.get('/api/brands/dashboard-stats', async (req, res) => {
 app.get('/api/brands/available-territories', async (req, res) => {
     try {
         // Fetch DISTINCT territories to avoid duplicates
+        // DEBUG: Check game mode distribution
+        const debugCounts = await pool.query('SELECT game_mode, COUNT(*) FROM territories GROUP BY game_mode');
+        console.log('[DEBUG] Territory Game Mode Distribution:', debugCounts.rows);
+
+        // Fetch DISTINCT territories to avoid duplicates
         const result = await pool.query(`
             SELECT DISTINCT ON (id) id, username, area_sqm, ST_AsGeoJSON(area) as geojson, 
-                   ST_Y(ST_Centroid(area)) as lat, ST_X(ST_Centroid(area)) as lng, identity_color
+                   ST_Y(ST_Centroid(area)) as lat, ST_X(ST_Centroid(area)) as lng, identity_color, game_mode
             FROM territories
-            WHERE owner_id IS NOT NULL AND area_sqm > 0 AND game_mode = 'areaCapture'
+            WHERE owner_id IS NOT NULL 
+              AND area_sqm > 0 
+              AND (game_mode = 'areaCapture' OR game_mode IS NULL) -- Include NULL as legacy Area Capture
             ORDER BY id, area_sqm DESC
             LIMIT 50
         `);
+
+        console.log(`[DEBUG] Fetched ${result.rowCount} territories after filtering for Area Capture.`);
 
         // Helper function for reverse geocoding (simplified - using Nominatim)
         const getLocationName = async (lat, lng) => {
