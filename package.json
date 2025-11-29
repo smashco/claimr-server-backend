@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "cd claimr_brand_portal && npm install && npm run build && mkdir -p ../public/brand && cp -r out/* ../public/brand/"
+    "build": "cd claimr_brand_portal && npm install && npm run build && rm -rf ../public/brand && mkdir -p ../public/brand && cp -r out/* ../public/brand/"
   },
   "keywords": [],
   "author": "",
