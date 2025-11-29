@@ -600,8 +600,9 @@ app.post('/api/brands/create-ad', upload.fields([{ name: 'adContent', maxCount: 
 app.delete('/api/brands/ads/:id', async (req, res) => {
     const { id } = req.params;
     try {
-        await pool.query("UPDATE ads SET status = 'DELETED' WHERE id = $1", [id]);
-        res.json({ success: true, message: 'Ad deleted successfully' });
+        // Hard delete - completely remove the ad and all associated data
+        await pool.query("DELETE FROM ads WHERE id = $1", [id]);
+        res.json({ success: true, message: 'Ad permanently deleted' });
     } catch (err) {
         console.error('Error deleting ad:', err);
         res.status(500).json({ error: 'Failed to delete ad' });
