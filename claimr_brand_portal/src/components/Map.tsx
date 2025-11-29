@@ -232,7 +232,8 @@ export default function MapComponent({ onDesignClick, focusTerritory, openModalO
                         console.log('Feature properties:', feature.properties);
                         const id = feature.properties?.id;
                         const territory = territories.find(t => t.id === id);
-                        console.log('Found territory:', territory);
+                        console.log('[Map] Found territory from click:', territory);
+                        console.log('[Map] Found territory has geometry?', !!territory?.geometry);
                         if (territory) {
                             setSelectedTerritory(territory);
                             setShowRentModal(true);
