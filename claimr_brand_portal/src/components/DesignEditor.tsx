@@ -33,11 +33,15 @@ export default function DesignEditor({ territory, onSave, onCancel }: DesignEdit
     useEffect(() => {
         if (!canvasRef.current) return;
 
+        console.log('[DesignEditor] Territory data:', territory);
+        console.log('[DesignEditor] Geometry:', territory.geometry);
+
         // Calculate bounds and dimensions
         let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
 
         if (territory.geometry && territory.geometry.coordinates) {
             const coords = territory.geometry.coordinates[0];
+            console.log('[DesignEditor] Coordinates count:', coords.length);
             coords.forEach((p: any) => {
                 const lng = p[0];
                 const lat = p[1];
@@ -46,11 +50,15 @@ export default function DesignEditor({ territory, onSave, onCancel }: DesignEdit
                 if (lng < minLng) minLng = lng;
                 if (lng > maxLng) maxLng = lng;
             });
+        } else {
+            console.error('[DesignEditor] ERROR: No geometry data found for territory!', territory);
         }
 
         const geoWidth = maxLng - minLng;
         const geoHeight = maxLat - minLat;
         const centerLat = (minLat + maxLat) / 2;
+
+        console.log('[DesignEditor] Bounds:', { minLat, maxLat, minLng, maxLng, geoWidth, geoHeight });
 
         // Calculate visual aspect ratio
         const latRad = centerLat * Math.PI / 180;
@@ -74,6 +82,8 @@ export default function DesignEditor({ territory, onSave, onCancel }: DesignEdit
             canvasHeight = MAX_HEIGHT;
             canvasWidth = canvasHeight * aspectRatio;
         }
+
+        console.log('[DesignEditor] Canvas dimensions:', { canvasWidth, canvasHeight, aspectRatio });
 
         const canvas = new fabric.Canvas(canvasRef.current, {
             width: canvasWidth,
@@ -105,6 +115,8 @@ export default function DesignEditor({ territory, onSave, onCancel }: DesignEdit
                 };
             });
 
+            console.log('[DesignEditor] Polygon points:', points.slice(0, 3), '... (total:', points.length, ')');
+
             const polygon = new fabric.Polygon(points, {
                 left: 0,
                 top: 0,
@@ -129,7 +141,10 @@ export default function DesignEditor({ territory, onSave, onCancel }: DesignEdit
                 opacity: 0.5
             });
             canvas.add(border);
+            console.log('[DesignEditor] Border added to canvas');
             canvas.renderAll();
+        } else {
+            console.error('[DesignEditor] Cannot create border - no geometry data!');
         }
 
         return () => {
