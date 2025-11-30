@@ -994,7 +994,7 @@ app.get('/check-profile', authenticate, async (req, res) => {
                     MAX(t.razorpay_subscription_id) as razorpay_subscription_id, 
                     MAX(t.subscription_status) as subscription_status, 
                     MAX(t.trail_effect) as trail_effect, 
-                    MIN(t.superpowers) as superpowers,
+                    MAX(t.superpowers::text)::jsonb as superpowers,
                     SUM(t.total_distance_km) as total_distance_km, 
                     MAX(c.id) as clan_id, MAX(c.name) as clan_name, MAX(c.tag) as clan_tag, MAX(cm.role) as clan_role,
                     BOOL_OR(c.base_location IS NOT NULL) as base_is_set,
