@@ -158,7 +158,7 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
     const hasActiveAds = parseInt(activeAdsCheck.rows[0].ad_count) > 0;
     debug(`[SOLO_HANDLER] Player has active ads: ${hasActiveAds}`);
 
-    const userExistingRes = await client.query(`SELECT area FROM territories WHERE owner_id = $1`, [userId]);
+    const userExistingRes = await client.query(`SELECT area FROM territories WHERE owner_id = $1 AND game_mode = $2`, [userId, player.gameMode]);
     let finalAreaGeoJSON = JSON.stringify(newAreaPolygon.geometry);
 
     if (userExistingRes.rowCount > 0 && userExistingRes.rows[0].area && !isInitialBaseClaim) {
@@ -171,14 +171,15 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
             ) as touches
             FROM territories
             WHERE owner_id = $2
-        `, [finalAreaGeoJSON, userId]);
+              AND game_mode = $3
+        `, [finalAreaGeoJSON, userId, player.gameMode]);
 
         const touchesExisting = touchCheckRes.rows.some(row => row.touches);
 
         if (touchesExisting) {
             // Normal expansion (Merge) - ALLOWED regardless of ads
             debug(`[SOLO_HANDLER] Expansion touches existing territory. Merging.`);
-            const unionRes = await client.query(`SELECT ST_AsGeoJSON(ST_Union(area, ST_GeomFromGeoJSON($1))) as geojson FROM territories WHERE owner_id = $2`, [finalAreaGeoJSON, userId]);
+            const unionRes = await client.query(`SELECT ST_AsGeoJSON(ST_Union(area, ST_GeomFromGeoJSON($1))) as geojson FROM territories WHERE owner_id = $2 AND game_mode = $3`, [finalAreaGeoJSON, userId, player.gameMode]);
             finalAreaGeoJSON = unionRes.rows[0].geojson;
         } else {
             // Not touching - Disconnected expansion
@@ -195,7 +196,8 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
                     SELECT SUM(area_sqm) as total_area
                     FROM territories
                     WHERE owner_id = $1
-                `, [userId]);
+                      AND game_mode = $2
+                `, [userId, player.gameMode]);
 
                 const totalExistingArea = parseFloat(areaCheckRes.rows[0].total_area) || 0;
                 debug(`[SOLO_HANDLER] Total existing area: ${totalExistingArea.toFixed(2)} sqm, Threshold: ${EXPANSION_THRESHOLD.toFixed(2)} sqm`);
@@ -218,7 +220,8 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
                     )) as min_distance
                     FROM territories
                     WHERE owner_id = $2
-                `, [finalAreaGeoJSON, userId]);
+                      AND game_mode = $3
+                `, [finalAreaGeoJSON, userId, player.gameMode]);
 
                 const dist = distanceRes.rows[0].min_distance;
                 debug(`[SOLO_HANDLER] Expansion failed. Min distance to existing territory: ${dist} meters`);
@@ -282,8 +285,8 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
         // Normal mode: UPDATE existing territory
         debug(`[SOLO_HANDLER] Normal mode: Updating existing territory`);
         updateResult = await client.query(
-            `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2, claimed_at = NOW() WHERE owner_id = $3 RETURNING id`,
-            [finalAreaGeoJSON, finalAreaSqM, userId]
+            `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2, claimed_at = NOW() WHERE owner_id = $3 AND game_mode = $4 RETURNING id`,
+            [finalAreaGeoJSON, finalAreaSqM, userId, player.gameMode]
         );
     }
 
@@ -321,8 +324,8 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
                 a.ad_content_url as "adContentUrl"
             FROM territories t
             LEFT JOIN ads a ON t.id = a.territory_id AND a.payment_status = 'PAID' AND (a.status IS NULL OR a.status != 'DELETED') AND a.start_time <= NOW() AND a.end_time >= NOW()
-            WHERE t.owner_id = ANY($1::varchar[])`,
-            [allAffectedIds]
+            WHERE t.owner_id = ANY($1::varchar[]) AND t.game_mode = $2`,
+            [allAffectedIds, player.gameMode]
         );
         queryResult.rows.forEach(r => {
             updatedTerritories.push({ ...r, geojson: r.geojson ? JSON.parse(r.geojson) : null });
