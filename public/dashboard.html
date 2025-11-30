@@ -108,6 +108,10 @@
                 <button class="nav-link" id="ads-tab" data-bs-toggle="tab" data-bs-target="#ads-tab-pane" type="button"
                     role="tab">Ads Management</button>
             </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="data-tab" data-bs-toggle="tab" data-bs-target="#data-tab-pane"
+                    type="button" role="tab">Data Management</button>
+            </li>
         </ul>
 
         <div class="tab-content" id="myTabContent">
@@ -411,6 +415,30 @@
             </div>
         </div>
     </div>
+    </div>
+
+    <div class="tab-pane fade p-3" id="data-tab-pane" role="tabpanel">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">Player Data Management</h5>
+                <div class="table-responsive">
+                    <table class="table table-dark table-striped table-hover">
+                        <thead>
+                            <tr>
+                                <th>Username</th>
+                                <th>Territory War Area (km²)</th>
+                                <th>Area Capture Area (km²)</th>
+                                <th>Free Run Distance (km)</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="data-management-table-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
@@ -573,6 +601,7 @@
             try {
                 currentPlayersData = await apiFetch('/admin/api/players');
                 renderPlayers(currentPlayersData);
+                renderDataManagement(currentPlayersData);
             } catch (error) {
                 console.error('Error fetching players:', error);
             }
@@ -802,6 +831,45 @@
         document.getElementById('schedule-reset-btn').addEventListener('click', async () => { const resetTime = document.getElementById('reset-time').value; if (!resetTime) { alert('Please select a date and time for the reset.'); return; } if (!confirm(`Are you sure you want to schedule a full game reset for ${new Date(resetTime).toLocaleString()}?`)) return; try { const result = await apiFetch('/admin/api/game-management/schedule-reset', { method: 'POST', body: { resetTime } }); alert(result.message); fetchGameManagementData(); } catch (error) { alert(`Error: ${error.message}`); } });
         document.getElementById('cancel-reset-btn').addEventListener('click', async () => { if (!confirm('Are you sure you want to cancel the scheduled game reset?')) return; try { const result = await apiFetch('/admin/api/game-management/cancel-reset', { method: 'POST' }); alert(result.message); fetchGameManagementData(); } catch (error) { alert(`Error: ${error.message}`); } });
 
+
+        function renderDataManagement(players) {
+            const tableBody = document.getElementById('data-management-table-body');
+            if (!tableBody) return;
+            tableBody.innerHTML = '';
+
+            players.forEach(player => {
+                const row = tableBody.insertRow();
+                row.insertCell().textContent = player.username || 'N/A';
+                row.insertCell().textContent = (player.territory_war_sqm / 1000000).toFixed(6);
+                row.insertCell().textContent = (player.area_capture_sqm / 1000000).toFixed(6);
+                row.insertCell().textContent = (player.total_distance_km || 0).toFixed(2);
+
+                const actionsCell = row.insertCell();
+                actionsCell.innerHTML = `
+                    <div class="btn-group" role="group">
+                        <button class="btn btn-sm btn-danger" onclick="deleteTerritory('${player.owner_id}', 'territoryWar')">Delete TW</button>
+                        <button class="btn btn-sm btn-warning" onclick="deleteTerritory('${player.owner_id}', 'areaCapture')">Delete AC</button>
+                        <button class="btn btn-sm btn-outline-danger" onclick="deleteTerritory('${player.owner_id}', 'all')">Delete All</button>
+                    </div>
+                `;
+            });
+        }
+
+        async function deleteTerritory(playerId, gameMode) {
+            const modeName = gameMode === 'all' ? 'ALL' : (gameMode === 'territoryWar' ? 'Territory War' : 'Area Capture');
+            if (!confirm(`Are you sure you want to delete ${modeName} territory for this player? This action cannot be undone.`)) {
+                return;
+            }
+
+            try {
+                const result = await apiFetch(`/admin/api/player/${playerId}/territory/${gameMode}`, { method: 'DELETE' });
+                alert(result.message);
+                fetchPlayers(); // Refresh data
+            } catch (error) {
+                console.error('Error deleting territory:', error);
+                alert('Failed to delete territory: ' + error.message);
+            }
+        }
 
         window.onload = () => {
             initMap();

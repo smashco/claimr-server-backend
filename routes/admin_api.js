@@ -22,7 +22,8 @@ module.exports = (pool, io, geofenceService, players) => {
                     banned_until,
                     SUM(area_sqm) as total_area_sqm,
                     SUM(CASE WHEN game_mode = 'areaCapture' THEN area_sqm ELSE 0 END) as area_capture_sqm,
-                    SUM(CASE WHEN game_mode = 'territoryWar' THEN area_sqm ELSE 0 END) as territory_war_sqm
+                    SUM(CASE WHEN game_mode = 'territoryWar' THEN area_sqm ELSE 0 END) as territory_war_sqm,
+                    SUM(total_distance_km) as total_distance_km
                 FROM territories 
                 GROUP BY owner_id, username, superpowers, banned_until
                 ORDER BY username
@@ -34,6 +35,7 @@ module.exports = (pool, io, geofenceService, players) => {
                     area_sqm: parseFloat(dbPlayer.total_area_sqm || 0), // Ensure number
                     area_capture_sqm: parseFloat(dbPlayer.area_capture_sqm || 0),
                     territory_war_sqm: parseFloat(dbPlayer.territory_war_sqm || 0),
+                    total_distance_km: parseFloat(dbPlayer.total_distance_km || 0),
                     isOnline: !!onlinePlayer,
                     lastKnownPosition: onlinePlayer ? onlinePlayer.lastKnownPosition : null
                 };
@@ -69,6 +71,34 @@ module.exports = (pool, io, geofenceService, players) => {
             return res.json({ message: `Territory for player ${id} has been reset.` });
         } catch (err) {
             console.error(`[API/Admin] Error on player action reset-territory:`, err);
+            res.status(500).json({ message: 'Server error' });
+        }
+    });
+
+    router.delete('/player/:id/territory/:gameMode', async (req, res) => {
+        const { id, gameMode } = req.params;
+        try {
+            let query;
+            let params;
+
+            if (gameMode === 'all') {
+                query = "UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), area_sqm = 0 WHERE owner_id = $1";
+                params = [id];
+            } else {
+                query = "UPDATE territories SET area = ST_GeomFromText('GEOMETRYCOLLECTION EMPTY', 4326), area_sqm = 0 WHERE owner_id = $1 AND game_mode = $2";
+                params = [id, gameMode];
+            }
+
+            await pool.query(query, params);
+
+            // Notify clients to clear the map for this user/mode
+            // We might need to send specific mode info in the update if clients filter by mode
+            // For now, sending a generic update with 0 area should trigger a refresh
+            io.emit('batchTerritoryUpdate', [{ ownerId: id, area: 0, geojson: null, gameMode: gameMode === 'all' ? null : gameMode }]);
+
+            return res.json({ message: `Territory for player ${id} in mode ${gameMode} has been reset.` });
+        } catch (err) {
+            console.error(`[API/Admin] Error deleting territory for player ${id} mode ${gameMode}:`, err);
             res.status(500).json({ message: 'Server error' });
         }
     });

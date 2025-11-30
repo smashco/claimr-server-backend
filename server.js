@@ -985,18 +985,30 @@ app.get('/check-profile', authenticate, async (req, res) => {
 
             const profileQuery = `
                 SELECT
-                    t.username, t.profile_image_url, t.area_sqm, t.identity_color, t.has_shield, t.is_paid,
-                    t.banned_until, t.razorpay_subscription_id, t.subscription_status, t.trail_effect, t.superpowers,
-                    t.total_distance_km, c.id as clan_id, c.name as clan_name, c.tag as clan_tag, cm.role as clan_role,
-                    (c.base_location IS NOT NULL) as base_is_set,
+                    t.username, t.profile_image_url, 
+                    SUM(t.area_sqm) as area_sqm, 
+                    t.identity_color, 
+                    BOOL_OR(t.has_shield) as has_shield, 
+                    BOOL_OR(t.is_paid) as is_paid,
+                    MAX(t.banned_until) as banned_until, 
+                    MAX(t.razorpay_subscription_id) as razorpay_subscription_id, 
+                    MAX(t.subscription_status) as subscription_status, 
+                    MAX(t.trail_effect) as trail_effect, 
+                    MIN(t.superpowers) as superpowers,
+                    SUM(t.total_distance_km) as total_distance_km, 
+                    MAX(c.id) as clan_id, MAX(c.name) as clan_name, MAX(c.tag) as clan_tag, MAX(cm.role) as clan_role,
+                    BOOL_OR(c.base_location IS NOT NULL) as base_is_set,
                     (SELECT r.rank FROM (
-                        SELECT owner_id, RANK() OVER (ORDER BY area_sqm DESC) as rank
-                        FROM territories WHERE area_sqm > 0 AND username IS NOT NULL
+                        SELECT owner_id, RANK() OVER (ORDER BY SUM(area_sqm) DESC) as rank
+                        FROM territories 
+                        WHERE area_sqm > 0 AND username IS NOT NULL
+                        GROUP BY owner_id
                     ) r WHERE r.owner_id = t.owner_id) as rank
                 FROM territories t
                 LEFT JOIN clan_members cm ON t.owner_id = cm.user_id
                 LEFT JOIN clans c ON cm.clan_id = c.id
-                WHERE t.owner_id = $1;
+                WHERE t.owner_id = $1
+                GROUP BY t.owner_id, t.username, t.profile_image_url, t.identity_color;
             `;
 
             const profileResult = await client.query(profileQuery, [googleId]);
@@ -1364,16 +1376,18 @@ app.get('/leaderboard', async (req, res) => {
                 t.owner_id,
                 t.username as owner_name,
                 t.profile_image_url,
-                t.area_sqm,
+                SUM(t.area_sqm) as area_sqm,
                 t.identity_color,
-                t.total_distance_km,
-                RANK() OVER (ORDER BY t.area_sqm DESC) as rank
+                SUM(t.total_distance_km) as total_distance_km,
+                RANK() OVER (ORDER BY SUM(t.area_sqm) DESC) as rank
             FROM
                 territories t
             WHERE
                 t.area_sqm > 0 AND t.username IS NOT NULL
+            GROUP BY
+                t.owner_id, t.username, t.profile_image_url, t.identity_color
             ORDER BY
-                t.area_sqm DESC
+                area_sqm DESC
             LIMIT 100;
         `;
         const result = await pool.query(query);
