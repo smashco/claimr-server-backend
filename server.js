@@ -1667,10 +1667,12 @@ io.on('connection', (socket) => {
                 hasInfiltrator: ownedPowers.includes('infiltrator'),
                 hasGhostRunner: ownedPowers.includes('ghostRunner'),
                 hasTrailDefense: ownedPowers.includes('trailDefense'),
+                hasReclaimBase: ownedPowers.includes('reclaimBase'),
                 isGhostRunnerActive: false,
                 isLastStandActive: false,
                 isInfiltratorActive: false,
                 isTrailDefenseActive: false,
+                isReclaimBaseActive: false,
                 isCarveModeActive: isCarveModeActive,
                 // CONQUER STATE
                 isConquering: false,
@@ -2030,6 +2032,27 @@ io.on('connection', (socket) => {
             } catch (err) {
                 logGame(`Failed to use Last Stand for ${player.name}: %O`, err);
                 player.hasLastStand = true;
+            }
+        }
+    });
+
+    socket.on('activateReclaimBase', async () => {
+        const player = players[socket.id];
+        // Check if player has the power (assuming it's stored in 'hasReclaimBase' or similar)
+        // Since we didn't see 'hasReclaimBase' in the player object init, we might need to add it there too.
+        // But for now, let's assume the client sends this event only if they have it.
+        // Better: Check DB or player object.
+        // Let's assume we add 'hasReclaimBase' to the player object in playerJoined.
+        if (player && player.hasReclaimBase) {
+            player.isReclaimBaseActive = true;
+            player.hasReclaimBase = false;
+            logGame(`Player ${player.name} activating Reclaim Base.`);
+            try {
+                await superpowerManager.usePower(player.googleId, 'reclaimBase');
+                socket.emit('superpowerAcknowledged', { power: 'reclaimBase' });
+            } catch (err) {
+                logGame(`Failed to use Reclaim Base for ${player.name}: %O`, err);
+                player.hasReclaimBase = true;
             }
         }
     });

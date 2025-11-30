@@ -91,51 +91,100 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
         `, [userId, player.gameMode]);
 
         if (victimsRes.rowCount > 0) {
-            debug(`[SOLO_HANDLER][COMPETITIVE] Found ${victimsRes.rowCount} overlapping territories. Applying Shield.`);
+            debug(`[SOLO_HANDLER][COMPETITIVE] Found ${victimsRes.rowCount} overlapping territories.`);
 
-            const victimIds = victimsRes.rows.map(v => v.owner_id);
-            victimIds.forEach(id => affectedOwnerIds.add(id));
+            // Fetch victim details to check for shields
+            const victimDetailsRes = await client.query(`
+                SELECT owner_id, is_shield_active, area_sqm 
+                FROM territories 
+                WHERE owner_id = ANY($1::varchar[]) AND game_mode = $2
+            `, [victimsRes.rows.map(v => v.owner_id), player.gameMode]);
 
-            // Subtract ALL overlapping victim areas from the new area (Shield behavior)
-            // We clip the NEW area so it fits around existing territories.
-            const diffQuery = `
-                SELECT ST_AsGeoJSON(
-                    ST_Multi(
-                        ST_Difference(
-                            ${newAreaWKT},
-                            (SELECT ST_Union(area) FROM territories WHERE owner_id = ANY($1::varchar[]))
+            const victims = victimDetailsRes.rows;
+            const shieldedVictimIds = victims.filter(v => v.is_shield_active).map(v => v.owner_id);
+            const unshieldedVictimIds = victims.filter(v => !v.is_shield_active).map(v => v.owner_id);
+
+            // --- WIPEOUT LOGIC (Only for Unshielded) ---
+            // Check if any UNSHIELDED victim is COMPLETELY contained within the new area
+            if (unshieldedVictimIds.length > 0) {
+                const wipeoutRes = await client.query(`
+                    SELECT owner_id, area_sqm 
+                    FROM territories 
+                    WHERE owner_id = ANY($1::varchar[]) 
+                      AND game_mode = $2
+                      AND ST_Contains(${newAreaWKT}, area);
+                `, [unshieldedVictimIds, player.gameMode]);
+
+                if (wipeoutRes.rowCount > 0) {
+                    debug(`[SOLO_HANDLER][COMPETITIVE] WIPEOUT DETECTED! ${wipeoutRes.rowCount} territories will be wiped.`);
+                    for (const row of wipeoutRes.rows) {
+                        const wipedId = row.owner_id;
+                        debug(`[SOLO_HANDLER][COMPETITIVE] Wiping out player ${wipedId} (Area: ${row.area_sqm})`);
+
+                        // Delete the wiped territory
+                        await client.query(`DELETE FROM territories WHERE owner_id = $1 AND game_mode = $2`, [wipedId, player.gameMode]);
+
+                        // Notify the wiped player
+                        const wipedSocketId = Object.keys(players).find(id => players[id].googleId === wipedId);
+                        if (wipedSocketId) {
+                            io.to(wipedSocketId).emit('territoryWiped', { by: player.name });
+                            io.to(wipedSocketId).emit('info', { message: `You were WIPED OUT by ${player.name}!` });
+                        }
+
+                        // Remove from unshielded list so we don't try to clip them later
+                        const index = unshieldedVictimIds.indexOf(wipedId);
+                        if (index > -1) unshieldedVictimIds.splice(index, 1);
+                        affectedOwnerIds.add(wipedId);
+                    }
+                }
+            }
+
+            // --- SHIELD LOGIC (Protected Victims) ---
+            // If victim has shield, ATTACKER is clipped (cannot steal)
+            if (shieldedVictimIds.length > 0) {
+                debug(`[SOLO_HANDLER][COMPETITIVE] ${shieldedVictimIds.length} victims have SHIELDS. Clipping ATTACKER.`);
+                shieldedVictimIds.forEach(id => affectedOwnerIds.add(id));
+
+                const diffQuery = `
+                    SELECT ST_AsGeoJSON(
+                        ST_Multi(
+                            ST_Difference(
+                                ${newAreaWKT},
+                                (SELECT ST_Union(area) FROM territories WHERE owner_id = ANY($1::varchar[]) AND game_mode = $2)
+                            )
                         )
-                    )
-                ) as geojson
-            `;
+                    ) as geojson
+                `;
+                const diffRes = await client.query(diffQuery, [shieldedVictimIds, player.gameMode]);
 
-            const diffRes = await client.query(diffQuery, [victimIds]);
-
-            if (diffRes.rows.length > 0 && diffRes.rows[0].geojson) {
-                const clippedGeoJSON = JSON.parse(diffRes.rows[0].geojson);
-
-                // Check if the resulting geometry is empty (fully blocked)
-                if (!clippedGeoJSON.coordinates || clippedGeoJSON.coordinates.length === 0) {
-                    throw new Error(`Claim blocked! You cannot claim land inside another player's territory.`);
+                if (diffRes.rows.length > 0 && diffRes.rows[0].geojson) {
+                    const clippedGeoJSON = JSON.parse(diffRes.rows[0].geojson);
+                    if (!clippedGeoJSON.coordinates || clippedGeoJSON.coordinates.length === 0) {
+                        throw new Error(`Claim blocked! Protected territory prevents expansion.`);
+                    }
+                    newAreaPolygon = turf.feature(clippedGeoJSON);
+                    newAreaSqM = turf.area(newAreaPolygon);
+                    newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
+                } else {
+                    throw new Error(`Claim blocked! Protected territory prevents expansion.`);
                 }
+            }
 
-                // Update newAreaPolygon to the clipped geometry
-                // This ensures the subsequent merge step uses the clipped area.
-                newAreaPolygon = turf.feature(clippedGeoJSON);
+            // --- STEAL LOGIC (Unshielded Victims) ---
+            // If victim is unshielded, VICTIM is clipped (Attacker steals)
+            if (unshieldedVictimIds.length > 0) {
+                debug(`[SOLO_HANDLER][COMPETITIVE] Stealing from ${unshieldedVictimIds.length} unshielded victims.`);
+                unshieldedVictimIds.forEach(id => affectedOwnerIds.add(id));
 
-                // Recalculate area size for the clipped area
-                newAreaSqM = turf.area(newAreaPolygon);
-                debug(`[SOLO_HANDLER][COMPETITIVE] New area clipped by shield. Remaining size: ${newAreaSqM.toFixed(2)} sqm`);
+                // We update the VICTIMS to subtract the new area from them
+                await client.query(`
+                    UPDATE territories 
+                    SET area = ST_Multi(ST_Difference(area, ${newAreaWKT})),
+                        area_sqm = ST_Area(ST_Difference(area, ${newAreaWKT})::geography)
+                    WHERE owner_id = ANY($1::varchar[]) AND game_mode = $2
+                `, [unshieldedVictimIds, player.gameMode]);
 
-                if (newAreaSqM < 1) { // Minimal threshold
-                    throw new Error(`Claim blocked! Overlap left too little area.`);
-                }
-                // Update newAreaWKT for subsequent use
-                newAreaWKT = `ST_MakeValid(ST_GeomFromGeoJSON('${JSON.stringify(newAreaPolygon.geometry)}'))`;
-
-            } else {
-                // Result is empty/null -> Fully blocked
-                throw new Error(`Claim blocked! You cannot claim land inside another player's territory.`);
+                // Note: We don't change newAreaPolygon here because the attacker takes the full area.
             }
         }
     }
@@ -247,6 +296,24 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
     if (userExistingRes.rowCount === 0) {
         shouldInsert = true;
         debug(`[SOLO_HANDLER] No existing territory for mode ${player.gameMode}. Will INSERT.`);
+    } else if (player.gameMode === 'territoryWar') {
+        // STRICT SINGLE BASE ENFORCEMENT FOR TERRITORY WAR
+        if (!touchesExisting) {
+            // Check if player has "Reclaim Base" power
+            if (player.isReclaimBaseActive) {
+                debug(`[SOLO_HANDLER] Reclaim Base power active! Allowing disconnected claim.`);
+                shouldInsert = true;
+                // Deactivate power after use
+                player.isReclaimBaseActive = false;
+                // We should also consume it from DB if it wasn't consumed on activation
+                // But for now, we assume activation consumed it or set a flag.
+                // Since 'reclaimBase' is likely an instant-use power that sets a flag on the player object,
+                // we just check the flag here.
+            } else {
+                throw new Error('In Territory War, you must expand from your existing base! Disconnected bases are not allowed.');
+            }
+        }
+        // If touchesExisting is true, we merge (UPDATE), so shouldInsert remains false.
     } else if (hasActiveAds && !isInitialBaseClaim && !touchesExisting) {
         shouldInsert = true;
         debug(`[SOLO_HANDLER] Multi-base expansion (disconnected). Will INSERT.`);
