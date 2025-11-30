@@ -207,11 +207,15 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
     const hasActiveAds = parseInt(activeAdsCheck.rows[0].ad_count) > 0;
     debug(`[SOLO_HANDLER] Player has active ads: ${hasActiveAds}`);
 
-    const userExistingRes = await client.query(`SELECT area FROM territories WHERE owner_id = $1 AND game_mode = $2`, [userId, player.gameMode]);
+    const userExistingRes = await client.query(`SELECT area, area_sqm FROM territories WHERE owner_id = $1 AND game_mode = $2`, [userId, player.gameMode]);
     let finalAreaGeoJSON = JSON.stringify(newAreaPolygon.geometry);
     let touchesExisting = false;
 
-    if (userExistingRes.rowCount > 0 && userExistingRes.rows[0].area && !isInitialBaseClaim) {
+    // Check if the user has a "valid" territory (not just an empty row from a reset)
+    // We consider it valid if it has > 1 sqm.
+    const hasValidTerritory = userExistingRes.rowCount > 0 && (userExistingRes.rows[0].area_sqm > 1);
+
+    if (hasValidTerritory && userExistingRes.rows[0].area && !isInitialBaseClaim) {
         // Check if touching/overlapping (always allowed)
         const touchCheckRes = await client.query(`
             SELECT ST_DWithin(
@@ -296,8 +300,9 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
     if (userExistingRes.rowCount === 0) {
         shouldInsert = true;
         debug(`[SOLO_HANDLER] No existing territory for mode ${player.gameMode}. Will INSERT.`);
-    } else if (player.gameMode === 'territoryWar') {
+    } else if (player.gameMode === 'territoryWar' && hasValidTerritory) {
         // STRICT SINGLE BASE ENFORCEMENT FOR TERRITORY WAR
+        // Only enforce if the user actually has a valid territory to expand from.
         if (!touchesExisting) {
             // Check if player has "Reclaim Base" power
             if (player.isReclaimBaseActive) {
@@ -305,10 +310,6 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
                 shouldInsert = true;
                 // Deactivate power after use
                 player.isReclaimBaseActive = false;
-                // We should also consume it from DB if it wasn't consumed on activation
-                // But for now, we assume activation consumed it or set a flag.
-                // Since 'reclaimBase' is likely an instant-use power that sets a flag on the player object,
-                // we just check the flag here.
             } else {
                 throw new Error('In Territory War, you must expand from your existing base! Disconnected bases are not allowed.');
             }
