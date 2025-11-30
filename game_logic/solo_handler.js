@@ -160,6 +160,7 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
 
     const userExistingRes = await client.query(`SELECT area FROM territories WHERE owner_id = $1 AND game_mode = $2`, [userId, player.gameMode]);
     let finalAreaGeoJSON = JSON.stringify(newAreaPolygon.geometry);
+    let touchesExisting = false;
 
     if (userExistingRes.rowCount > 0 && userExistingRes.rows[0].area && !isInitialBaseClaim) {
         // Check if touching/overlapping (always allowed)
@@ -174,7 +175,7 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
               AND game_mode = $3
         `, [finalAreaGeoJSON, userId, player.gameMode]);
 
-        const touchesExisting = touchCheckRes.rows.some(row => row.touches);
+        touchesExisting = touchCheckRes.rows.some(row => row.touches);
 
         if (touchesExisting) {
             // Normal expansion (Merge) - ALLOWED regardless of ads
@@ -236,45 +237,24 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
     debug(`[SOLO_HANDLER] Final total area for ${player.name}: ${finalAreaSqM.toFixed(2)} sqm`);
 
     let updateResult;
-    // Determine if we should INSERT (new disconnected base) or UPDATE (merge)
-    // We INSERT only if:
-    // 1. Has active ads
-    // 2. Not initial base claim
-    // 3. Did NOT merge with existing (meaning it's disconnected)
-    // Wait, how do we know if it merged?
-    // If it merged, finalAreaGeoJSON is the UNION.
-    // If it didn't merge (disconnected), finalAreaGeoJSON is just the NEW area.
 
-    // Better logic:
-    // If touchesExisting was true (in the block above), we merged.
-    // If touchesExisting was false, we didn't merge.
+    // Determine if we should INSERT (new disconnected base or FIRST base) or UPDATE (merge)
+    // We INSERT if:
+    // 1. User has NO existing territory in this mode (First claim)
+    // 2. Multi-base mode: Has active ads AND didn't merge (disconnected expansion)
 
-    // I need to capture 'touchesExisting' from the block above.
-    // But it's scoped.
-    // I'll re-check ST_Intersects or just rely on logic:
-    // If hasActiveAds is true, AND we didn't merge (because not touching), then INSERT.
+    let shouldInsert = false;
+    if (userExistingRes.rowCount === 0) {
+        shouldInsert = true;
+        debug(`[SOLO_HANDLER] No existing territory for mode ${player.gameMode}. Will INSERT.`);
+    } else if (hasActiveAds && !isInitialBaseClaim && !touchesExisting) {
+        shouldInsert = true;
+        debug(`[SOLO_HANDLER] Multi-base expansion (disconnected). Will INSERT.`);
+    }
 
-    // Actually, I can check if finalAreaGeoJSON contains the original area? No.
-
-    // Let's use a flag. But I can't easily pass a flag out of the if block without restructuring.
-    // I'll assume that if hasActiveAds is true, and we are here, we might need to INSERT.
-    // BUT if we merged, we should UPDATE.
-
-    // I'll check if the new area touches existing again? No, expensive.
-
-    // I will refactor the INSERT/UPDATE logic to be inside the block?
-    // No, finalAreaSqM is calculated after.
-
-    // Let's look at the logic again.
-    // If touchesExisting -> Merged -> UPDATE.
-    // If !touchesExisting -> Disconnected -> INSERT (if ads).
-
-    // I'll use a variable `isDisconnectedExpansion` initialized to false.
-    // But I can't modify it inside the if block if defined outside? Yes I can (let).
-
-    if (hasActiveAds && !isInitialBaseClaim) {
-        // Multi-base mode: INSERT new territory row
-        debug(`[SOLO_HANDLER] Multi-base mode: Inserting new territory row`);
+    if (shouldInsert) {
+        // INSERT new territory row
+        debug(`[SOLO_HANDLER] Performing INSERT.`);
         updateResult = await client.query(
             `INSERT INTO territories (owner_id, username, profile_image_url, identity_color, area, area_sqm, laps_required, claimed_at, game_mode)
                  VALUES ($1, $2, $3, $4, ST_GeomFromGeoJSON($5), $6, 1, NOW(), $7)
@@ -283,7 +263,7 @@ async function handleSoloClaim(io, socket, player, players, req, client, superpo
         );
     } else {
         // Normal mode: UPDATE existing territory
-        debug(`[SOLO_HANDLER] Normal mode: Updating existing territory`);
+        debug(`[SOLO_HANDLER] Performing UPDATE on existing territory.`);
         updateResult = await client.query(
             `UPDATE territories SET area = ST_GeomFromGeoJSON($1), area_sqm = $2, claimed_at = NOW() WHERE owner_id = $3 AND game_mode = $4 RETURNING id`,
             [finalAreaGeoJSON, finalAreaSqM, userId, player.gameMode]
